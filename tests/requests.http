@@ -1,0 +1,99 @@
+### Base URL
+@baseUrl = http://127.0.0.1:8001
+@empresaId = 1
+@sucursalId = 1
+@identificacion = 123456789
+@pedidoId = 1
+@nuevoEstadoId = 2
+
+### 1) Catálogo por empresa
+GET {{baseUrl}}/catalogo/{{empresaId}}
+Origin: http://127.0.0.1:5500
+
+### 2) Buscar cliente por empresa + identificación
+GET {{baseUrl}}/cliente/buscar/{{empresaId}}/{{identificacion}}
+Origin: http://127.0.0.1:5500
+
+### 3) Buscar barrios (mínimo 2 caracteres)
+GET {{baseUrl}}/barrios/search?q=sa&empresa_id={{empresaId}}&sucursal_id={{sucursalId}}
+Origin: http://127.0.0.1:5500
+
+### 4) Checkout OK (flujo recomendado)
+POST {{baseUrl}}/pedido/checkout
+Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+{
+  "empresaID": {{empresaId}},
+  "sucursalID": {{sucursalId}},
+  "productos": [
+    { "productoID": 1, "cantidad": 1 },
+    { "productoID": 2, "cantidad": 2 }
+  ],
+  "cliente": {
+    "nombreCompleto": "Cliente Prueba Checkout",
+    "telefono": "3001234567",
+    "email": "checkout@test.com"
+  },
+  "entrega": {
+    "direccion": "Calle 123 #45-67",
+    "barrioID": 10,
+    "fechaEntrega": "2026-03-01T10:00:00",
+    "mensaje": "Prueba desde requests.http"
+  }
+}
+
+### 5) Checkout inválido (cantidad <= 0)
+POST {{baseUrl}}/pedido/checkout
+Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+{
+  "empresaID": {{empresaId}},
+  "sucursalID": {{sucursalId}},
+  "productos": [
+    { "productoID": 1, "cantidad": 0 }
+  ],
+  "cliente": {
+    "nombreCompleto": "Cliente Inválido",
+    "telefono": "3001239999",
+    "email": "invalido@test.com"
+  },
+  "entrega": {
+    "direccion": "Calle 999",
+    "barrioID": 10,
+    "fechaEntrega": "2026-03-01T10:00:00",
+    "mensaje": "Caso cantidad 0"
+  }
+}
+
+### 6) Crear pedido (flujo alterno)
+POST {{baseUrl}}/pedido
+Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+{
+  "empresaId": {{empresaId}},
+  "sucursalId": {{sucursalId}},
+  "cliente": {
+    "nombres": "Cliente Flujo Alterno",
+    "telefono": "3010000000",
+    "email": "alterno@test.com"
+  },
+  "entrega": {
+    "tipoEntrega": "DOMICILIO",
+    "direccion": "Carrera 10 #20-30",
+    "barrioId": 10,
+    "destinatarioNombre": "Cliente Flujo Alterno",
+    "mensaje": "Pedido creado por endpoint /pedido"
+  },
+  "items": [
+    { "productoId": 1, "cantidad": 2 },
+    { "productoId": 2, "cantidad": 1 }
+  ]
+}
+
+### 7) Cambiar estado de pedido (ajusta IDs según tu DB)
+PUT {{baseUrl}}/pedido/{{pedidoId}}/estado/{{nuevoEstadoId}}
+Content-Type: application/json
+Origin: http://127.0.0.1:5500

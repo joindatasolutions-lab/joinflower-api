@@ -1,0 +1,242 @@
+{
+  "info": {
+    "_postman_id": "f2c6f91c-2f67-4f31-b2f0-6df2ef3f5531",
+    "name": "PetalOps API Local",
+    "description": "Colección para validar endpoints principales de catálogo, cliente, barrios y pedidos en entorno local.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Catalogo - GET /catalogo/{empresaId}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/catalogo/{{empresaId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "catalogo",
+            "{{empresaId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Cliente - GET /cliente/buscar/{empresaID}/{identificacion}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/cliente/buscar/{{empresaId}}/{{identificacion}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "cliente",
+            "buscar",
+            "{{empresaId}}",
+            "{{identificacion}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Barrios - GET /barrios/search",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/barrios/search?q=sa&empresa_id={{empresaId}}&sucursal_id={{sucursalId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "barrios",
+            "search"
+          ],
+          "query": [
+            {
+              "key": "q",
+              "value": "sa"
+            },
+            {
+              "key": "empresa_id",
+              "value": "{{empresaId}}"
+            },
+            {
+              "key": "sucursal_id",
+              "value": "{{sucursalId}}"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Checkout - POST /pedido/checkout (OK)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"empresaID\": {{empresaId}},\n  \"sucursalID\": {{sucursalId}},\n  \"productos\": [\n    {\n      \"productoID\": 1,\n      \"cantidad\": 1\n    },\n    {\n      \"productoID\": 2,\n      \"cantidad\": 2\n    }\n  ],\n  \"cliente\": {\n    \"nombreCompleto\": \"Cliente Prueba Checkout\",\n    \"telefono\": \"3001234567\",\n    \"email\": \"checkout@test.com\"\n  },\n  \"entrega\": {\n    \"direccion\": \"Calle 123 #45-67\",\n    \"barrioID\": 10,\n    \"fechaEntrega\": \"2026-03-01T10:00:00\",\n    \"mensaje\": \"Prueba desde Postman\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/pedido/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "pedido",
+            "checkout"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Checkout - POST /pedido/checkout (cantidad invalida)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"empresaID\": {{empresaId}},\n  \"sucursalID\": {{sucursalId}},\n  \"productos\": [\n    {\n      \"productoID\": 1,\n      \"cantidad\": 0\n    }\n  ],\n  \"cliente\": {\n    \"nombreCompleto\": \"Cliente Inválido\",\n    \"telefono\": \"3001239999\",\n    \"email\": \"invalido@test.com\"\n  },\n  \"entrega\": {\n    \"direccion\": \"Calle 999\",\n    \"barrioID\": 10,\n    \"fechaEntrega\": \"2026-03-01T10:00:00\",\n    \"mensaje\": \"Caso cantidad 0\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/pedido/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "pedido",
+            "checkout"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Pedido - POST /pedido (flujo alterno)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"empresaId\": {{empresaId}},\n  \"sucursalId\": {{sucursalId}},\n  \"cliente\": {\n    \"nombres\": \"Cliente Flujo Alterno\",\n    \"telefono\": \"3010000000\",\n    \"email\": \"alterno@test.com\"\n  },\n  \"entrega\": {\n    \"tipoEntrega\": \"DOMICILIO\",\n    \"direccion\": \"Carrera 10 #20-30\",\n    \"barrioId\": 10,\n    \"destinatarioNombre\": \"Cliente Flujo Alterno\",\n    \"mensaje\": \"Pedido creado por endpoint /pedido\"\n  },\n  \"items\": [\n    {\n      \"productoId\": 1,\n      \"cantidad\": 2\n    },\n    {\n      \"productoId\": 2,\n      \"cantidad\": 1\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/pedido",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "pedido"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Pedido - PUT /pedido/{pedido_id}/estado/{nuevo_estado_id}",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Origin",
+            "value": "http://127.0.0.1:5500"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/pedido/{{pedidoId}}/estado/{{nuevoEstadoId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "pedido",
+            "{{pedidoId}}",
+            "estado",
+            "{{nuevoEstadoId}}"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8001"
+    },
+    {
+      "key": "empresaId",
+      "value": "1"
+    },
+    {
+      "key": "sucursalId",
+      "value": "1"
+    },
+    {
+      "key": "identificacion",
+      "value": "123456789"
+    },
+    {
+      "key": "pedidoId",
+      "value": "1"
+    },
+    {
+      "key": "nuevoEstadoId",
+      "value": "2"
+    }
+  ]
+}
