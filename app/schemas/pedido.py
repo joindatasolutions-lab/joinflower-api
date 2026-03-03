@@ -36,16 +36,26 @@ class CheckoutProductoItem(BaseModel):
 
 
 class CheckoutClienteInput(BaseModel):
+    tipoIdent: Optional[str] = None
+    identificacion: Optional[str] = None
+    indicativo: Optional[str] = None
     nombreCompleto: str
     telefono: str
     email: Optional[str] = None
 
 
 class CheckoutEntregaInput(BaseModel):
+    tipoEntrega: Optional[str] = None
+    destinatario: Optional[str] = None
+    telefonoDestino: Optional[str] = None
     direccion: str
     barrioID: Optional[int] = None
+    barrioNombre: Optional[str] = None
     fechaEntrega: datetime
+    rangoHora: Optional[str] = None
     mensaje: Optional[str] = None
+    firma: Optional[str] = None
+    observacionGeneral: Optional[str] = None
 
 
 class PedidoCheckoutRequest(BaseModel):
@@ -60,3 +70,50 @@ class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
     total: float
     estado: str
+
+
+class PedidoListItem(BaseModel):
+    pedidoID: int
+    numeroPedido: str
+    fecha: Optional[datetime] = None
+    cliente: str
+    destinatario: Optional[str] = None
+    productos: List[str]
+    total: float
+    metodoPago: Optional[str] = None
+    estado: str
+    telefono: Optional[str] = None
+    telefonoCompleto: Optional[str] = None
+
+
+class PedidoListResponse(BaseModel):
+    items: List[PedidoListItem]
+    total: int
+    page: int
+    pageSize: int
+
+
+class PedidoDetalleProducto(BaseModel):
+    productoID: int
+    nombreProducto: str
+    cantidad: float
+    precioUnitario: float
+    subtotal: float
+
+
+class PedidoDetalleResponse(BaseModel):
+    pedidoID: int
+    numeroPedido: str
+    fecha: Optional[datetime] = None
+    estado: str
+    empresaID: int
+    sucursalID: int
+    motivoRechazo: Optional[str] = None
+    cliente: dict
+    destinatario: dict
+    financiero: dict
+    productos: List[PedidoDetalleProducto]
+
+
+class RechazarPedidoRequest(BaseModel):
+    motivo: str

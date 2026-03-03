@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, Numeric, DateTime, ForeignKey
+from sqlalchemy import Column, BigInteger, Numeric, DateTime, ForeignKey, String
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -14,6 +14,7 @@ class Pedido(Base):
 
     fechaPedido = Column(DateTime)
     estadoPedidoID = Column(BigInteger, ForeignKey("EstadoPedido.idEstadoPedido"))
+    motivoRechazo = Column(String(300))
 
     totalBruto = Column(Numeric(12,2))
     totalIva = Column(Numeric(12,2))

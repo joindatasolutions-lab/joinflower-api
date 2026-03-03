@@ -2,16 +2,33 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.cliente import Cliente
+from app.models.empleado import Empleado
+from app.models.empresa import Empresa
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
+from app.models.sucursal import Sucursal
 from app.schemas.pedido import PedidoCheckoutRequest
+
+
+def _normalizar_telefono_completo(indicativo: str | None, telefono: str | None) -> str | None:
+    prefijo = str(indicativo or "").strip().replace(" ", "")
+    numero = str(telefono or "").strip().replace(" ", "")
+
+    if not prefijo and not numero:
+        return None
+
+    if prefijo and not prefijo.startswith("+"):
+        prefijo = f"+{prefijo}"
+
+    return f"{prefijo}{numero}"
 
 
 def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
@@ -58,7 +75,10 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             db.query(Cliente)
             .filter(
                 Cliente.empresaID == payload.empresaID,
-                Cliente.telefono == payload.cliente.telefono,
+                or_(
+                    Cliente.telefono == payload.cliente.telefono,
+                    Cliente.identificacion == payload.cliente.identificacion,
+                ),
             )
             .first()
         )
@@ -66,13 +86,32 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
         if not cliente:
             cliente = Cliente(
                 empresaID=payload.empresaID,
+                tipoIdent=payload.cliente.tipoIdent,
+                identificacion=payload.cliente.identificacion,
+                indicativo=payload.cliente.indicativo,
+                telefonoCompleto=_normalizar_telefono_completo(
+                    payload.cliente.indicativo,
+                    payload.cliente.telefono,
+                ),
                 nombreCompleto=payload.cliente.nombreCompleto,
                 telefono=payload.cliente.telefono,
                 email=payload.cliente.email,
                 activo=True,
+                createdAt=datetime.now(timezone.utc),
             )
             db.add(cliente)
             db.flush()
+        else:
+            cliente.tipoIdent = payload.cliente.tipoIdent or cliente.tipoIdent
+            cliente.identificacion = payload.cliente.identificacion or cliente.identificacion
+            cliente.indicativo = payload.cliente.indicativo or cliente.indicativo
+            cliente.nombreCompleto = payload.cliente.nombreCompleto or cliente.nombreCompleto
+            cliente.telefono = payload.cliente.telefono or cliente.telefono
+            cliente.telefonoCompleto = _normalizar_telefono_completo(
+                payload.cliente.indicativo or cliente.indicativo,
+                payload.cliente.telefono or cliente.telefono,
+            )
+            cliente.email = payload.cliente.email if payload.cliente.email is not None else cliente.email
 
         pedido = Pedido(
             empresaID=payload.empresaID,
@@ -83,6 +122,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             totalBruto=Decimal("0.00"),
             totalIva=Decimal("0.00"),
             totalNeto=Decimal("0.00"),
+            createdAt=datetime.now(timezone.utc),
         )
         db.add(pedido)
         db.flush()
@@ -117,7 +157,18 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             empresaID=payload.empresaID,
             pedidoID=pedido.idPedido,
             estadoEntregaID=1,
+            tipoEntrega=payload.entrega.tipoEntrega,
+            destinatario=payload.entrega.destinatario,
+            telefonoDestino=payload.entrega.telefonoDestino,
+            direccion=payload.entrega.direccion,
+            barrioID=payload.entrega.barrioID,
+            barrioNombre=payload.entrega.barrioNombre,
+            rangoHora=payload.entrega.rangoHora,
+            mensaje=payload.entrega.mensaje,
+            firma=payload.entrega.firma,
+            observacionGeneral=payload.entrega.observacionGeneral,
             fechaEntrega=payload.entrega.fechaEntrega,
+            createdAt=datetime.now(timezone.utc),
         )
         db.add(entrega)
 

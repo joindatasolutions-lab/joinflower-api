@@ -28,8 +28,11 @@ def buscar_cliente(
     return {
         "existe": True,
         "cliente": {
+            "tipoIdent": cliente.tipoIdent,
             "nombreCompleto": cliente.nombreCompleto,
+            "indicativo": cliente.indicativo,
             "telefono": cliente.telefono,
+            "telefonoCompleto": cliente.telefonoCompleto,
             "email": cliente.email,
         },
     }

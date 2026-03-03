@@ -1,0 +1,2 @@
+ALTER TABLE Pedido
+  ADD COLUMN IF NOT EXISTS motivoRechazo VARCHAR(300) NULL AFTER estadoPedidoID;
