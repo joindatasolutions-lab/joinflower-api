@@ -1,8 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import or_, cast, String, func
 from datetime import datetime, timezone
+from io import BytesIO
+import textwrap
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 from app.database import get_db
 from app.models.producto import Producto
 from app.models.cliente import Cliente
@@ -29,6 +34,64 @@ router = APIRouter()
 
 def _numero_pedido_humano(pedido_id: int) -> str:
     return f"PED-{pedido_id:06d}"
+
+
+def _fecha_pedido_str(value: datetime | None) -> str | None:
+    if not value:
+        return None
+    return value.date().isoformat()
+
+
+def _hora_pedido_str(value: datetime | None) -> str | None:
+    if not value:
+        return None
+    return value.strftime("%H:%M:%S")
+
+
+def _fecha_hora_humano(value: datetime | None) -> str:
+    if not value:
+        return "No especificada"
+    return value.strftime("%d/%m/%Y %H:%M")
+
+
+def _money_cop(value: float | int | None) -> str:
+    number = int(round(float(value or 0)))
+    return f"${number:,}".replace(",", ".")
+
+
+def _estado_permite_factura(value: str | None) -> bool:
+    estado = str(value or "").strip().upper()
+    return estado in {"APROBADO", "PAGADO"}
+
+
+def _render_factura_pdf(lines: list[str]) -> bytes:
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin_x = 40
+    y = height - 45
+
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(margin_x, y, "FLORA - TIENDA DE FLORES")
+    y -= 24
+
+    pdf.setFont("Helvetica", 10)
+    max_chars = 88
+
+    for raw_line in lines:
+        wrapped = textwrap.wrap(str(raw_line or ""), width=max_chars) or [""]
+        for line in wrapped:
+            if y < 45:
+                pdf.showPage()
+                pdf.setFont("Helvetica", 10)
+                y = height - 45
+            pdf.drawString(margin_x, y, line)
+            y -= 14
+        y -= 2
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def _buscar_estado_por_nombre(db: Session, *nombres: str) -> EstadoPedido | None:
@@ -143,6 +206,8 @@ def listar_pedidos(
                 pedidoID=pedido_id,
                 numeroPedido=_numero_pedido_humano(pedido_id),
                 fecha=pedido.fechaPedido,
+                fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
+                horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 destinatario=str((entrega.destinatario if entrega else None) or ""),
                 productos=productos_por_pedido.get(pedido_id, []),
@@ -195,6 +260,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
         pedidoID=int(pedido.idPedido),
         numeroPedido=_numero_pedido_humano(int(pedido.idPedido)),
         fecha=pedido.fechaPedido,
+        fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
+        horaPedido=_hora_pedido_str(pedido.fechaPedido),
         estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
         empresaID=int(pedido.empresaID),
         sucursalID=int(pedido.sucursalID),
@@ -227,6 +294,77 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
         },
         productos=productos,
     )
+
+
+@router.get("/pedido/{pedido_id}/factura")
+def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db)):
+    row = (
+        db.query(Pedido, Cliente, Entrega, EstadoPedido)
+        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
+        .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+        .filter(Pedido.idPedido == pedido_id)
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+
+    pedido, cliente, entrega, estado_db = row
+    estado_nombre = str((estado_db.nombreEstado if estado_db else "") or "")
+    if not _estado_permite_factura(estado_nombre):
+        raise HTTPException(status_code=400, detail="La factura solo está disponible para pedidos APROBADO/PAGADO")
+
+    detalles = (
+        db.query(PedidoDetalle, Producto)
+        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
+        .filter(PedidoDetalle.pedidoID == pedido.idPedido)
+        .all()
+    )
+
+    lineas_productos = [
+        f"{int(round(float(detalle.cantidad or 0)))}× {str(producto.nombreProducto or 'Producto')}"
+        for detalle, producto in detalles
+    ]
+    productos_texto = "\n".join(lineas_productos) if lineas_productos else "Sin productos"
+
+    observaciones = (
+        (entrega.observacionGeneral if entrega else None)
+        or (entrega.mensaje if entrega else None)
+        or "Sin observaciones"
+    )
+
+    contenido_lineas = [
+        f"Pedido N°: {pedido.idPedido}",
+        f"Fecha Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
+        f"Fecha Entrega: {_fecha_hora_humano(entrega.fechaEntrega if entrega else None)}",
+        f"Cliente: {str(cliente.nombreCompleto or '-')}",
+        f"CC/Nit: {str(cliente.identificacion or '-')}",
+        f"Teléfono: {str(cliente.telefonoCompleto or cliente.telefono or '-')}",
+        "Forma de pago: No especificada",
+        "(Transferencia 3671)",
+        f"Destinatario: {str((entrega.destinatario if entrega else None) or cliente.nombreCompleto or '-')}",
+        f"Teléfono destino: {str((entrega.telefonoDestino if entrega else None) or cliente.telefonoCompleto or cliente.telefono or '-')}",
+        f"Barrio: {str((entrega.barrioNombre if entrega else None) or 'Recoger en Tienda')}",
+        "Zona: Sin zona",
+        "Dirección:",
+        str((entrega.direccion if entrega else None) or "Recoger en Tienda"),
+        "Producto(s):",
+        productos_texto,
+        "Obs:",
+        str(observaciones),
+        f"Subtotal: {_money_cop(pedido.totalBruto)}",
+        "Domicilio: $0",
+        f"Total: {_money_cop(pedido.totalNeto)}",
+        "Celular Flora: Samsung",
+        "Gracias por su compra 💐",
+    ]
+
+    pdf_bytes = _render_factura_pdf(contenido_lineas)
+    headers = {
+        "Content-Disposition": f"attachment; filename=factura_pedido_{pedido.idPedido}.pdf"
+    }
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
 @router.put("/pedido/{pedido_id}/aprobar")
@@ -339,11 +477,15 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
         db.flush()  # obtiene idCliente sin commit
 
         # 4️⃣ Crear pedido
+        fecha_pedido = datetime.now(timezone.utc)
+
         pedido = Pedido(
             empresaID=data.empresaId,
             sucursalID=data.sucursalId,
             clienteID=cliente.idCliente,
-            fechaPedido=datetime.now(timezone.utc),
+            fechaPedido=fecha_pedido,
+            fechaPedidoDate=fecha_pedido.date(),
+            horaPedido=fecha_pedido.time().replace(microsecond=0),
             estadoPedidoID=1,  # Pedido Registrado
             totalBruto=subtotal,
             totalIva=total_iva,

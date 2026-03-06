@@ -76,6 +76,8 @@ class PedidoListItem(BaseModel):
     pedidoID: int
     numeroPedido: str
     fecha: Optional[datetime] = None
+    fechaPedido: Optional[str] = None
+    horaPedido: Optional[str] = None
     cliente: str
     destinatario: Optional[str] = None
     productos: List[str]
@@ -105,6 +107,8 @@ class PedidoDetalleResponse(BaseModel):
     pedidoID: int
     numeroPedido: str
     fecha: Optional[datetime] = None
+    fechaPedido: Optional[str] = None
+    horaPedido: Optional[str] = None
     estado: str
     empresaID: int
     sucursalID: int

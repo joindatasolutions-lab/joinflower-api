@@ -15,6 +15,8 @@ class Producto(Base):
     precioBase = Column("precio", Numeric(12,2))
     porcentajeIva = Column(Numeric(5,2))
     ivaIncluido = Column(Boolean)
+    tiempoBaseProduccionMin = Column(BigInteger)
+    nivelComplejidad = Column(String(30))
     activo = Column(Boolean)
     esDestacado = Column(Boolean)
     ordenCatalogo = Column(BigInteger)

@@ -7,3 +7,6 @@ from .categoria import Categoria
 from .entrega import Entrega
 from .estadopedido import EstadoPedido
 from .transicionestadopedido import TransicionEstadoPedido
+from .florista import Florista
+from .produccion import Produccion
+from .produccionhistorial import ProduccionHistorial

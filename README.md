@@ -38,11 +38,11 @@ Este proyecto carga variables desde `.env` (ver `app/database.py`).
 Variables requeridas:
 
 ```env
-DATABASE_HOST=localhost
+DATABASE_HOST=148.113.221.17
 DATABASE_PORT=3306
-DATABASE_NAME=petalops
-DATABASE_USER=usuario
-DATABASE_PASSWORD=secreto
+DATABASE_NAME=joindata_app
+DATABASE_USER=joindata_joindata
+DATABASE_PASSWORD=Emprender2025#
 ```
 
 ## 4) Instalación y ejecución
@@ -61,6 +61,28 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8001
 ```
 
+### Ejecutar frontend (starter)
+
+Este repositorio incluye un frontend base en `front/` para consumir endpoints del API.
+
+En otra terminal, desde la raiz del proyecto:
+
+```powershell
+python -m http.server 5500 -d front
+```
+
+Luego abre:
+
+- `http://127.0.0.1:5500`
+
+El starter permite probar:
+
+- `GET /ping`
+- `GET /health`
+- `GET /catalogo/{empresa_id}`
+- `GET /barrios/search`
+- `GET /cliente/buscar/{empresaID}/{identificacion}`
+
 ### Documentación interactiva
 
 - Swagger UI: `http://127.0.0.1:8001/docs`
@@ -72,6 +94,10 @@ Configurado en `app/main.py` con estos orígenes:
 
 - `http://127.0.0.1:5500`
 - `http://localhost:5500`
+- `http://127.0.0.1:5173`
+- `http://localhost:5173`
+- `http://127.0.0.1:3000`
+- `http://localhost:3000`
 
 Parámetros:
 

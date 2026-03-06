@@ -113,11 +113,15 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             )
             cliente.email = payload.cliente.email if payload.cliente.email is not None else cliente.email
 
+        fecha_pedido = datetime.now(timezone.utc)
+
         pedido = Pedido(
             empresaID=payload.empresaID,
             sucursalID=payload.sucursalID,
             clienteID=cliente.idCliente,
-            fechaPedido=datetime.now(timezone.utc),
+            fechaPedido=fecha_pedido,
+            fechaPedidoDate=fecha_pedido.date(),
+            horaPedido=fecha_pedido.time().replace(microsecond=0),
             estadoPedidoID=estado_creado.idEstadoPedido,
             totalBruto=Decimal("0.00"),
             totalIva=Decimal("0.00"),
