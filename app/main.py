@@ -86,11 +86,15 @@ def ping():
 @app.get("/db-connection")
 def db_connection_check():
     try:
-        # Intenta conectar y obtener versión
         with engine.connect() as conn:
-            version = conn.execute("SELECT VERSION() as version").fetchone()
+            result = conn.execute(text("SELECT VERSION() as version"))
+            version = result.fetchone()
         return {"ok": True, "version": version[0] if version else None}
-    except OperationalError as exc:
+
+    except SQLAlchemyError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
 
