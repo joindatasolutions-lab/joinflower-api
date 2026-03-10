@@ -1,0 +1,213 @@
+Pedido,Fecha,Telefono,Barrio,Direccion,Total,Estado,motivo_no_migrado
+89417.0,2025-11-19 10:12:18.133,573005140423,Entrega En Tienda,Entrega en tienda - Entrega en tienda,200000,Aprobado,cliente_no_en_hoja_clientes
+89488.0,2025-11-21 07:55:59.463,000000,Entrega En Tienda,cra. 52 # 84 - 64,120000,Aprobado,cliente_no_en_hoja_clientes
+89578.0,2025-11-24 10:52:23.983,3006517761,Villa Country,Universidad Autónoma del Caribe,128000,Aprobado,cliente_no_en_hoja_clientes
+89585.0,2025-11-24 12:57:17.955,5730111886453,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+89631.0,2025-11-25 14:58:05.842,#ERROR!,Bethania,"Carrera 39#75b-38 edificio Lisboa, apto 605 - Edificio",81000,Aprobado,telefono_invalido
+89634.0,2025-11-25 16:55:52.976,57226133817,Altos de Riomar,cra 74#91-120 casa 37 - Casa,270000,Aprobado,cliente_no_en_hoja_clientes
+89684.0,2025-11-27 09:37:50.995,17728993732,soledad,"Calle 42 #2604  arboleda , soledad - Casa",100000,Aprobado,cliente_no_en_hoja_clientes
+89723.0,2025-11-28 00:00:00.000,3156234881,Entrega En Tienda,entrega en tienda,40000,Aprobado,cliente_no_en_hoja_clientes
+89724.0,2025-11-28 00:00:00.000,3157241281,Entrega En Tienda,flora,164000,Aprobado,cliente_no_en_hoja_clientes
+89727.0,2025-11-28 00:00:00.000,3013772533,Alfonso López,Calle 47C #21c-12,55000,Aprobado,cliente_no_en_hoja_clientes
+89732.0,2025-11-28 00:00:00.000,3012527025,miramar,CRA 45 #99c- 94 torre 4 piso 5 apto 513 conjunto residencial portal de miramar,142000,Aprobado,cliente_no_en_hoja_clientes
+89907.0,2025-12-03 14:32:12.305,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,98000,Aprobado,cliente_no_en_hoja_clientes
+89916.0,2025-12-03 17:36:08.102,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89923.0,2025-12-04 08:15:41.422,570000,,Cra 55 no. 80-56 - Edificio,300000,Aprobado,cliente_no_en_hoja_clientes
+89931.0,2025-12-04 09:29:24.708,573244711392,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+89933.0,2025-12-04 11:06:10.193,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89934.0,2025-12-04 11:34:56.096,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89943.0,2025-12-04 13:18:30.780,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89946.0,2025-12-04 14:27:25.764,573003182878,Entrega En Tienda,casa - Casa,70000,Aprobado,cliente_no_en_hoja_clientes
+89949.0,2025-12-04 15:02:06.578,57000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89967.0,2025-12-05 08:00:06.189,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,640000,Aprobado,cliente_no_en_hoja_clientes
+89987.0,2025-12-05 12:49:28.454,57014030939,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+89991.0,2025-12-05 13:20:05.456,570000,Entrega En Tienda,Entrega en tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90055.0,2025-12-06 17:44:57.733,573013723831,Buenavista,Calle 98 # 65a -54  Brisas del rio - Edificio,310000,Aprobado,cliente_no_en_hoja_clientes
+90062.0,2025-12-09 09:58:29.512,573003915137,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90066.0,2025-12-09 10:23:12.765,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+90094.0,2025-12-09 15:48:27.338,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90104.0,2025-12-09 18:24:28.365,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,140000,Aprobado,cliente_no_en_hoja_clientes
+90128.0,2025-12-10 10:52:55.359,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,980000,Aprobado,cliente_no_en_hoja_clientes
+90145.0,2025-12-10 15:55:20.838,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,150000,Aprobado,cliente_no_en_hoja_clientes
+90150.0,2025-12-10 17:37:50.360,573003182878,,uninorte puerta 7 - Casa,100000,Aprobado,cliente_no_en_hoja_clientes
+90151.0,2025-12-10 17:56:31.378,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,60000,Aprobado,cliente_no_en_hoja_clientes
+90154.0,2025-12-11 07:30:57.949,905331500244,El Tabor,tabor,410000,Aprobado,cliente_no_en_hoja_clientes
+90168.0,2025-12-11 12:07:44.046,573205399094,Villa Carolina,Cra72 #91a-100 T7 apto 627 - Conjunto,150000,Aprobado,cliente_no_en_hoja_clientes
+90180.0,2025-12-11 16:24:42.138,#ERROR!,Nuevo Horizonte,calle 84 # 42c -355 edificio balcones de Santa María apto 203  Barrio de entrega: Nuevo Horizonte - Casa,182000,Aprobado,telefono_invalido
+90187.0,2025-12-11 18:20:39.601,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,170000,Aprobado,cliente_no_en_hoja_clientes
+90198.0,2025-12-12 09:23:54.135,19148884045,Parque venezuela,"Cra 44 No. 85-130  Apt. 602  Edificio: EVORA 85  Barranquilla, Colombia - Casa",710000,Aprobado,cliente_no_en_hoja_clientes
+90199.0,2025-12-12 09:17:23.167,573006009556,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+90223.0,2025-12-12 11:31:59.202,573013755838,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,75000,Aprobado,cliente_no_en_hoja_clientes
+90249.0,2025-12-13 11:08:33.938,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,64000,Aprobado,cliente_no_en_hoja_clientes
+90256.0,2025-12-13 13:33:01.322,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,168000,Aprobado,cliente_no_en_hoja_clientes
+90307.0,2025-12-15 15:33:16.301,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,25000,Aprobado,cliente_no_en_hoja_clientes
+90318.0,2025-12-16 08:06:42.182,5700,,movich - Casa,0,Aprobado,cliente_no_en_hoja_clientes
+90354.0,2025-12-16 14:00:49.189,573014886277,Villa Carolina,cra 71 #94-127 conjunto ibiza torre 2 apto 810 - Edificio,190000,Aprobado,cliente_no_en_hoja_clientes
+90360.0,2025-12-17 07:11:48.114,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90361.0,2025-12-17 07:16:38.227,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,telefono_invalido
+90387.0,2025-12-17 15:49:22.468,5707757433,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90395.0,2025-12-18 07:06:53.261,5731749862627,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,65000,Aprobado,cliente_no_en_hoja_clientes
+90403.0,2025-12-18 09:52:13.626,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,telefono_invalido
+90421.0,2025-12-18 15:23:51.707,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90429.0,2025-12-18 17:12:17.426,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,20000,Aprobado,telefono_invalido
+90442.0,2025-12-19 09:52:06.496,573003182878,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,150000,Aprobado,cliente_no_en_hoja_clientes
+90448.0,2025-12-19 11:00:03.469,57746370,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90451.0,2025-12-19 11:25:25.849,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,260000,Aprobado,cliente_no_en_hoja_clientes
+90471.0,2025-12-19 16:19:57.227,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,60000,Aprobado,cliente_no_en_hoja_clientes
+90472.0,2025-12-19 16:29:58.465,5731749862627,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,8000,Aprobado,cliente_no_en_hoja_clientes
+90480.0,2025-12-19 18:37:07.272,5700000,,CRA 59#81-229 APTO 1601 - Casa,500000,Aprobado,cliente_no_en_hoja_clientes
+90496.0,2025-12-20 15:11:04.579,57017081709,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+90500.0,2025-12-20 15:33:17.433,573116813546,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,1135000,Aprobado,cliente_no_en_hoja_clientes
+90507.0,2025-12-20 16:54:29.146,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+90514.0,2025-12-20 18:11:56.836,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,40000,Aprobado,cliente_no_en_hoja_clientes
+90547.0,2025-12-22 15:57:05.944,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,telefono_invalido
+90548.0,2025-12-22 16:02:24.264,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,telefono_invalido
+90558.0,2025-12-22 17:48:38.672,573042744865,Portal de Genoves,Cra 25 # 1A-55 apto 603 edificio Actually - Edificio,192000,Aprobado,cliente_no_en_hoja_clientes
+90574.0,2025-12-23 01:13:15.873,313 6805643,Ciudad Jardín Modelo,Cl.79#42f-111 Edificio - Apto 501 queda en frente de la universidad elitora,141000,Aprobado,cliente_no_en_hoja_clientes
+90576.0,2025-12-23 10:48:36.438,57 300 5790118,ciudad de mallorquin,T15 901 Cra 22 #1e-116 Edificio Speranza - Edificio,565000,Aprobado,cliente_no_en_hoja_clientes
+90579.0,2025-12-23 10:47:56.878,573166423792,,calle 11#8-366 lagos del caujaral - Casa,1500000,Aprobado,cliente_no_en_hoja_clientes
+90585.0,2025-12-23 13:18:17.955,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,140000,Aprobado,telefono_invalido
+90607.0,2025-12-24 07:13:16.688,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90609.0,2025-12-24 07:33:26.924,573016978511,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,52000,Aprobado,cliente_no_en_hoja_clientes
+90612.0,2025-12-24 08:20:45.554,573015718010,La Concepción,La dirección es cra 73 #75-152 conjunto ribera alta torre 4 apto 1202,92000,Aprobado,cliente_no_en_hoja_clientes
+90647.0,2025-12-26 10:33:33.191,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90660.0,2025-12-26 15:33:38.806,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,180000,Aprobado,cliente_no_en_hoja_clientes
+90674.0,2025-12-27 08:30:20.318,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90684.0,2025-12-27 11:35:36.826,573007682024,,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90687.0,2025-12-27 11:51:21.891,57317700000000000000,El Tabor,Calle 95 # 42g-105 - Casa,192000,Aprobado,cliente_no_en_hoja_clientes
+90701.0,2025-12-27 16:31:45.475,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,10000,Aprobado,cliente_no_en_hoja_clientes
+90702.0,2025-12-27 16:37:08.399,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90703.0,2025-12-27 16:48:55.755,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,30000,Aprobado,cliente_no_en_hoja_clientes
+90709.0,2025-12-29 10:21:10.694,573003182878,,000 - Casa,0,Aprobado,cliente_no_en_hoja_clientes
+90716.0,2025-12-29 12:02:03.190,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,77000,Aprobado,cliente_no_en_hoja_clientes
+90725.0,2025-12-29 14:35:49.344,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,34000,Aprobado,cliente_no_en_hoja_clientes
+90734.0,2025-12-29 16:41:26.954,5700,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+90736.0,2025-12-29 18:22:25.791,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+90748.0,2025-12-30 11:39:18.717,4400450000000000,san vicente,cra. 53 # 82-93  edificio Danielle apto 6 - Edificio,6000,Aprobado,cliente_no_en_hoja_clientes
+90754.0,2025-12-30 11:43:33.231,573222218451,soledad,Calle 80 #22-04 - Casa  Robles  Por la olímpica derecho,170000,Aprobado,cliente_no_en_hoja_clientes
+90762.0,2025-12-30 16:57:40.938,575667005,Bostón,Calle 62 #46-56,115000,Aprobado,cliente_no_en_hoja_clientes
+90795.0,2026-01-05 08:02:59.588,57004900000000000,Bethania,Calle 76  #39-39 - Casa,192000,Aprobado,cliente_no_en_hoja_clientes
+90798.0,2026-01-05 08:53:10.184,570000,,cra 54#91-76 - Casa,200000,Aprobado,cliente_no_en_hoja_clientes
+90826.0,2026-01-05 15:09:22.817,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,20000,Aprobado,cliente_no_en_hoja_clientes
+90827.0,2026-01-05 15:10:27.729,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+90843.0,2026-01-06 11:20:17.219,573007682024,Centro,funeraria universal Cl 47#29-93 - Casa,265500,Aprobado,cliente_no_en_hoja_clientes
+90845.0,2026-01-06 11:54:44.483,57323 3201869,Alameda del Río,Cl 117 #42b 25 - Edificio,137000,Aprobado,cliente_no_en_hoja_clientes
+90858.0,2026-01-06 14:04:27.834,573103540175,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,350000,Aprobado,cliente_no_en_hoja_clientes
+90859.0,2026-01-06 14:40:50.863,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+90862.0,2026-01-06 16:21:09.718,573128640780,Riomar,carrera 55 No 99 B-24 edificio Bali torre 1 Apto 1301 - Casa,90000,Aprobado,cliente_no_en_hoja_clientes
+90878.0,2026-01-07 11:41:51.954,57304600000000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,180000,Aprobado,cliente_no_en_hoja_clientes
+90879.0,2026-01-07 11:50:57.913,57000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+90901.0,2026-01-08 07:07:32.219,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,telefono_invalido
+90916.0,2026-01-08 12:51:10.796,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,8000,Aprobado,cliente_no_en_hoja_clientes
+90918.0,2026-01-08 13:41:34.298,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,8000,Aprobado,cliente_no_en_hoja_clientes
+90925.0,2026-01-08 16:41:51.709,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,180000,Aprobado,cliente_no_en_hoja_clientes
+90934.0,2026-01-09 09:17:04.000,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90937.0,2026-01-09 09:52:55.265,3243999949,El Poblado,Cra 49D # 94- 49 - Casa 1,230000,Aprobado,cliente_no_en_hoja_clientes
+90938.0,2026-01-09 10:30:52.368,17866740598,Altos del Prado,Calle 85 # 53-14 super giros - Oficina,88000,Aprobado,cliente_no_en_hoja_clientes
+90953.0,2026-01-09 14:21:40.140,57000,,Dirección: Cra 56 #82-161 edf testarosa apto 1501 - Edificio,220000,Aprobado,cliente_no_en_hoja_clientes
+90959.0,2026-01-09 15:50:00.084,5700,,Torre 1 Apt 301 - Casa,340000,Aprobado,cliente_no_en_hoja_clientes
+90961.0,2026-01-09 17:14:05.118,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+90974.0,2026-01-10 10:55:00.524,57321815170808,Los Nogales,Cra 42A 4 # 84-202 Apto 3B - Casa,192000,Aprobado,cliente_no_en_hoja_clientes
+91007.0,2026-01-13 11:18:24.297,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,telefono_invalido
+91027.0,2026-01-13 16:43:57.510,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,telefono_invalido
+91047.0,2026-01-14 13:44:29.993,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,130000,Aprobado,cliente_no_en_hoja_clientes
+91049.0,2026-01-14 13:53:22.399,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,25000,Aprobado,cliente_no_en_hoja_clientes
+91051.0,2026-01-14 15:12:07.278,573007682024,La Playa,calle 13a #7a-114 barrio la playa. - Casa,136000,Aprobado,cliente_no_en_hoja_clientes
+91067.0,2026-01-15 10:35:26.021,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,telefono_invalido
+91089.0,2026-01-15 18:26:23.094,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,35000,Aprobado,cliente_no_en_hoja_clientes
+91095.0,2026-01-16 08:42:41.280,573147737274,Los Alpes,Cra 42g # 84b - 77 edificio mirador 42g apto 4b - Edificio,180000,Aprobado,cliente_no_en_hoja_clientes
+91107.0,2026-01-23 13:13:56.000,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,90000,Aprobado,cliente_no_en_hoja_clientes
+91140.0,2026-01-17 11:04:06.539,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+91151.0,2026-01-17 12:54:32.431,57000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+91152.0,2026-01-17 12:56:55.197,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,19000,Aprobado,cliente_no_en_hoja_clientes
+91167.0,2026-01-19 07:04:06.168,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,150000,Aprobado,telefono_invalido
+91177.0,2026-01-19 09:36:02.195,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+91198.0,2026-01-19 15:55:46.637,573014135878,mallorquin,Calle 1D - 20 - 45 torre 1 apto 701 ciudad mallorquin edificio el alba - Edificio,167000,Aprobado,cliente_no_en_hoja_clientes
+91214.0,2026-01-20 09:47:26.913,5703600187,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,120000,Aprobado,cliente_no_en_hoja_clientes
+91216.0,2026-01-20 11:34:22.066,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,32000,Aprobado,cliente_no_en_hoja_clientes
+91274.0,2026-01-22 13:27:56.149,57,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,200000,Aprobado,telefono_invalido
+91297.0,2026-01-23 12:47:50.679,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+91338.0,2026-01-26 09:13:42.533,57300 6118194,Ciudad Jardín Modelo,Calle 79b #42-494 edificio jardín plaza II apto 902 - Edificio,311000,Aprobado,cliente_no_en_hoja_clientes
+91341.0,2026-01-26 10:36:58.033,573003716174,Altos de Riomar,Apto 304/torre 3B - Edificio,107000,Aprobado,cliente_no_en_hoja_clientes
+91344.0,2026-01-26 11:37:17.486,5758917936,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,24000,Aprobado,cliente_no_en_hoja_clientes
+91347.0,2026-01-26 11:39:07.479,573216624895,Entrega En Tienda,Calle 99A#42f-211 - Conjunto,160000,Aprobado,cliente_no_en_hoja_clientes
+91362.0,2026-01-27 07:33:48.468,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,20000,Aprobado,cliente_no_en_hoja_clientes
+91371.0,2026-01-27 13:11:06.978,573003182878,,Edificio Vizcayne Cra 51 con 81. Apartamento 704. - Edificio,120000,Aprobado,cliente_no_en_hoja_clientes
+91389.0,2026-01-27 18:19:10.253,573145814765,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,65000,Aprobado,cliente_no_en_hoja_clientes
+91391.0,2026-01-28 07:01:22.635,#ERROR!,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,120000,Aprobado,telefono_invalido
+91399.0,2026-01-28 11:38:50.770,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+91414.0,2026-01-28 14:43:48.406,575756135617,Villa Carolina,Cra 71#94-124 Apto 704 torre 1 - Casa,160000,Aprobado,cliente_no_en_hoja_clientes
+91426.0,2026-01-29 10:08:38.020,573113631663,Villa Country,clle 77#58-68 registraduría princial - Casa,208000,Aprobado,cliente_no_en_hoja_clientes
+91441.0,2026-01-29 16:01:44.740,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+91479.0,2026-01-30 13:51:10.361,34638612865,El Golf,Cra 57 #82-52 - Edificio,158000,Aprobado,cliente_no_en_hoja_clientes
+91483.0,2026-01-30 15:26:47.017,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+91484.0,2026-01-30 15:30:14.327,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+91494.0,2026-01-30 18:18:17.951,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,18000,Aprobado,cliente_no_en_hoja_clientes
+91521.0,2026-02-02 07:37:24.784,573003182878,Cementerio jardines de la eternidad,jardines de la eternidad norte sala 7 - Edificio,320000,Aprobado,cliente_no_en_hoja_clientes
+91527.0,2026-02-02 09:18:01.557,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,220000,Aprobado,cliente_no_en_hoja_clientes
+91537.0,2026-02-02 12:55:36.389,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+91542.0,2026-02-02 15:22:06.650,573007682024,El Prado,Cra. 53#55-161 Funeraria Abadia de Ascensión. Sala 3 - Casa,244200,Aprobado,cliente_no_en_hoja_clientes
+91575.0,2026-02-03 16:23:26.060,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+91581.0,2026-02-03 18:17:44.337,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+91606.0,2026-02-04 14:20:38.928,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,108000,Aprobado,cliente_no_en_hoja_clientes
+91626.0,2026-02-05 07:12:52.235,570000,,Cra 56 # 91-86 - Edificio,340000,Aprobado,cliente_no_en_hoja_clientes
+91631.0,2026-02-05 08:50:19.441,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+91649.0,2026-02-05 14:48:15.567,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+91685.0,2026-02-06 15:58:02.806,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+91711.0,2026-02-07 16:29:06.637,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,27000,Aprobado,cliente_no_en_hoja_clientes
+91727.0,2026-02-09 10:10:55.691,573008001157,san vicente,calle 85 # 50-159 - Casa,216000,Aprobado,cliente_no_en_hoja_clientes
+91748.0,2026-02-09 16:26:37.260,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,200000,Aprobado,cliente_no_en_hoja_clientes
+91750.0,2026-02-09 16:57:32.286,570000,Villa Santos,Carrera 64#98-90 apto 709 Alameda campestre - Edificio,120000,Aprobado,cliente_no_en_hoja_clientes
+91798.0,2026-02-11 09:16:06.679,5730089999999999934464,Andalucía,Cra 64e # 86-99 - Casa,230000,Aprobado,cliente_no_en_hoja_clientes
+91803.0,2026-02-11 10:36:35.987,570000,Paraíso,clle 85#73-06 segundo piso - Casa,164700,Aprobado,cliente_no_en_hoja_clientes
+91821.0,2026-02-11 13:30:36.249,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+91840.0,2026-02-11 18:16:30.025,5732768151,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,70000,Aprobado,cliente_no_en_hoja_clientes
+91841.0,2026-02-12 07:17:47.043,574086795988,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+91888.0,2026-02-12 15:29:54.955,573043000000000032768,Portal de Genoves,Cra 25 # 1A - 55 apto 603 - Edificio Actually  Portal de Genovés,172000,Aprobado,cliente_no_en_hoja_clientes
+91900.0,2026-02-12 17:13:39.350,34600784957,Altos del Prado,Cra52#79-184 - Casa,368000,Aprobado,cliente_no_en_hoja_clientes
+91938.0,2026-02-13 11:46:09.232,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,200000,Aprobado,cliente_no_en_hoja_clientes
+91940.0,2026-02-13 11:53:32.923,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,89000,Aprobado,cliente_no_en_hoja_clientes
+91947.0,2026-02-13 12:44:17.943,00000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,138000,Aprobado,cliente_no_en_hoja_clientes
+91970.0,2026-02-13 15:19:10.388,5700000,,0000 - Entrega En Tienda,120000,Aprobado,cliente_no_en_hoja_clientes
+91976.0,2026-02-13 15:39:07.197,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,88000,Aprobado,cliente_no_en_hoja_clientes
+91983.0,2026-02-13 16:02:47.162,570000,,0000 - Entrega En Tienda,130000,Aprobado,cliente_no_en_hoja_clientes
+92002.0,2026-02-13 18:27:55.433,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,50000,Aprobado,cliente_no_en_hoja_clientes
+92004.0,2026-02-13 19:16:01.163,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,120000,Aprobado,cliente_no_en_hoja_clientes
+92007.0,2026-02-13 19:37:12.159,57000,Paraíso,Cra 65# 84-145 Apto 4F Edificio victoria Plaza - Edificio,790000,Aprobado,cliente_no_en_hoja_clientes
+92015.0,2026-02-14 09:41:46.400,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,185000,Aprobado,cliente_no_en_hoja_clientes
+92018.0,2026-02-14 09:55:51.242,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,200000,Aprobado,cliente_no_en_hoja_clientes
+92066.0,2026-02-14 13:20:17.933,570000,Altos de Riomar,CARRERA 57 # 94-73 EDI - Edificio,90000,Aprobado,cliente_no_en_hoja_clientes
+92113.0,2026-02-14 17:25:58.131,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,100000,Aprobado,cliente_no_en_hoja_clientes
+92114.0,2026-02-18 07:38:46.364,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+92115.0,2026-02-18 08:04:58.747,57,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,50000,Aprobado,telefono_invalido
+92132.0,2026-02-18 11:02:11.064,57000,,Cra 56 no 79-165 - Casa,120000,Aprobado,cliente_no_en_hoja_clientes
+92137.0,2026-02-18 12:29:48.772,57000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,300000,Aprobado,cliente_no_en_hoja_clientes
+92142.0,2026-02-18 13:18:26.449,573215240869,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,200000,Aprobado,cliente_no_en_hoja_clientes
+92155.0,2026-02-18 17:56:17.579,573003278825,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,19000,Aprobado,cliente_no_en_hoja_clientes
+92156.0,2026-02-18 18:04:04.473,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,50000,Aprobado,cliente_no_en_hoja_clientes
+92173.0,2026-02-19 10:40:01.985,573007682024,,BURO 51 - Casa,0,Aprobado,cliente_no_en_hoja_clientes
+92191.0,2026-02-19 16:04:26.840,573007682024,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,0,Aprobado,cliente_no_en_hoja_clientes
+92194.0,2026-02-19 16:30:03.176,573003182878,,boulevar country - Casa,66000,Aprobado,cliente_no_en_hoja_clientes
+92198.0,2026-02-19 17:42:59.392,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,35000,Aprobado,cliente_no_en_hoja_clientes
+92205.0,2026-02-20 09:12:09.995,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,8000,Aprobado,cliente_no_en_hoja_clientes
+92225.0,2026-02-20 15:49:48.234,5700000,Altos de Riomar,Carrera 49C#96-24,158000,Aprobado,cliente_no_en_hoja_clientes
+92237.0,2026-02-21 08:41:40.025,573015011750,Riomar,LeColate de Plaza del Parque,90000,Aprobado,cliente_no_en_hoja_clientes
+92242.0,2026-02-21 10:18:58.924,573007682024,,hOTEL MOVICH - Hotel,0,Aprobado,cliente_no_en_hoja_clientes
+92263.0,2026-02-21 16:23:31.421,57000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+92269.0,2026-02-23 07:50:27.384,5700000,El Golf,Cra 59 #82-63 - Edificio,107000,Aprobado,cliente_no_en_hoja_clientes
+92277.0,2026-02-23 08:53:24.495,4400450000000000,Altos del Prado,Carrera 53 #83-93 - Edificio,238000,Aprobado,cliente_no_en_hoja_clientes
+92292.0,2026-02-23 14:45:51.774,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,110000,Aprobado,cliente_no_en_hoja_clientes
+92301.0,2026-02-24 08:00:40.036,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,14000,Aprobado,cliente_no_en_hoja_clientes
+92328.0,2026-02-24 16:24:10.427,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,15000,Aprobado,cliente_no_en_hoja_clientes
+92339.0,2026-02-25 08:50:18.077,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+92412.0,2026-02-26 18:07:59.301,5700000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,80000,Aprobado,cliente_no_en_hoja_clientes
+92413.0,2026-02-26 18:09:03.283,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,25000,Aprobado,cliente_no_en_hoja_clientes
+92414.0,2026-02-26 18:09:44.375,570000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,35000,Aprobado,cliente_no_en_hoja_clientes
+92471.0,2026-02-28 11:14:20.027,57327700000000000000,Entrega En Tienda,Entrega En Tienda - Entrega En Tienda,62000,Aprobado,cliente_no_en_hoja_clientes
+92489.0,2026-02-28 16:48:39.441,570000000000,Entrega En Tienda,Entrega en Tienda,88000,Aprobado,cliente_no_en_hoja_clientes
+92880.0,2026-03-07 19:42:45.991,57312383819419,Recoger en Tienda,Recoger en Tienda,90000,Aprobado,cliente_no_en_hoja_clientes
+92899.0,2026-03-08 10:01:31.209,57003176637,san vicente,Cra 56 #79 -342. Edificio San Angelo. Apto 1601,206000,Aprobado,cliente_no_en_hoja_clientes
+92960.0,2026-03-08 12:59:36.406,310 6376698,Recoger en Tienda,Recoger en Tienda,360000,Aprobado,cliente_no_en_hoja_clientes
+92991.0,2026-03-08 15:47:12.215,57000000000,Recoger en Tienda,Recoger en Tienda,45000,Aprobado,cliente_no_en_hoja_clientes
+93045.0,2026-03-09 16:13:50.478,570531683838,Riomar,"Cl. 98 #65A-54, Riomar, Barranquilla, Atlántico, Colombia - Torre 1 apt 304 - Torre 1 apt 304",189000,Aprobado,cliente_no_en_hoja_clientes
+.venv\Scripts\uvicorn.exe app.main:app --host 0.0.0.0 --port 8001

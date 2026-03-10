@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, BigInteger, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -11,7 +11,7 @@ class Categoria(Base):
 
     nombreCategoria = Column(String(100), nullable=False)
     descripcion = Column(String(250))
-    orden = Column(BigInteger)
+    orden = Column(Integer)
     activo = Column(Boolean)
 
     createdAt = Column(DateTime)

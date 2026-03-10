@@ -7,8 +7,8 @@ class TransicionEstadoPedido(Base):
 
     idTransicionEstadoPedido = Column(BigInteger, primary_key=True, index=True)
 
-    empresaID = Column(BigInteger, nullable=False)
+    empresaID = Column(BigInteger, ForeignKey("Empresa.idEmpresa"), nullable=False)
     estadoOrigenID = Column(BigInteger, nullable=False)
     estadoDestinoID = Column(BigInteger, nullable=False)
 
-    createdAt = Column(DateTime)
+    createdAt = Column(DateTime, nullable=False)

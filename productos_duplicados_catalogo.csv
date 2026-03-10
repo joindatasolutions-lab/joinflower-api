@@ -1,0 +1,7 @@
+id,name, price,img,categoria,activo
+5.0,Flora Box Romantic Flores 12 Rosas,220000.0,https://floraapp.s3.us-east-1.amazonaws.com/Imagen5.jpg,Flora Box,1.0
+104.0,Flora Box Romantic Flores 12 Rosas,220000.0,https://flora-s3-bucket.s3.us-east-1.amazonaws.com/Flora+Box+Romantic+12+Rosas+v2.png,Flora Box,0.0
+26.0,Flora Mini Plus Box Redonda,150000.0,https://floraapp.s3.us-east-1.amazonaws.com/Imagen26.jpg,Flora Box,1.0
+105.0,Flora Mini Plus Box Redonda,150000.0,https://flora-s3-bucket.s3.us-east-1.amazonaws.com/21.+Flora+Box+plus+redonda+gerbera.png,Flora Box,0.0
+77.0,Sudario,270000.0,https://floraapp.s3.us-east-1.amazonaws.com/Imagen77.jpg,Condolencias,1.0
+78.0,Sudario,300000.0,https://floraapp.s3.us-east-1.amazonaws.com/Imagen78.jpg,Condolencias,1.0

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, Text, Date
+from sqlalchemy import Column, BigInteger, Integer, String, Boolean, DateTime, Text, Date
 from app.database import Base
 
 
@@ -10,7 +10,7 @@ class Florista(Base):
     sucursalID = Column(BigInteger, nullable=False, index=True)
     nombre = Column(String(150), nullable=False)
     capacidadDiaria = Column(BigInteger, nullable=False)
-    trabajosSimultaneosPermitidos = Column(BigInteger, nullable=False, default=1)
+    trabajosSimultaneosPermitidos = Column(Integer, nullable=False, default=1)
     estado = Column(String(20), nullable=False, default="Activo")
     fechaInicioIncapacidad = Column(Date)
     fechaFinIncapacidad = Column(Date)

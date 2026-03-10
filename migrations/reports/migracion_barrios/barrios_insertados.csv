@@ -1,0 +1,154 @@
+﻿fila_excel,idBarrio,empresaID,nombreBarrio,zonaID,costoDomicilio
+2,175,3,adela de char,5,17000.0
+3,176,3,alameda del río,6,17000.0
+4,177,3,alfonso lópez,2,15000.0
+5,178,3,altamira,3,25000.0
+6,179,3,altos de riomar,3,8000.0
+7,180,3,altos del limón,3,10000.0
+8,181,3,altos del prado,2,8000.0
+9,182,3,andalucía,3,10000.0
+10,183,3,bellavista,1,12000.0
+11,184,3,bethania,2,12000.0
+12,185,3,bostón,2,15000.0
+13,186,3,buena esperanza,4,16000.0
+14,187,3,buenavista,3,10000.0
+15,188,3,buenos aires,2,20000.0
+16,189,3,california,4,20000.0
+17,190,3,campo alegre,4,17000.0
+18,191,3,caribe verde,6,25000.0
+19,192,3,carlos meisel,2,16000.0
+20,193,3,castellana,3,10000.0
+21,194,3,caujaral,5,25000.0
+22,195,3,centro,2,18000.0
+23,196,3,cevillar,2,18000.0
+24,197,3,chiquinquirá,2,17000.0
+25,198,3,ciudadela 20 de julio,2,25000.0
+26,199,3,colina campestre,4,18000.0
+27,200,3,conjunto terra,5,15000.0
+28,201,3,corregimiento eduardo santos,5,20000.0
+29,202,3,el campito,2,20000.0
+30,203,3,el carmén,2,16000.0
+31,204,3,el castillo,3,10000.0
+32,205,3,el edén,4,20000.0
+33,206,3,el golf,3,8000.0
+34,207,3,el limón,2,20000.0
+35,208,3,el limoncito,3,10000.0
+36,209,3,el parque,2,30000.0
+37,210,3,el poblado,3,10000.0
+38,211,3,el porvenir,2,10000.0
+39,212,3,el prado,1,12000.0
+40,213,3,el recreo,2,14000.0
+41,214,3,el romance,4,20000.0
+42,215,3,el rosario,2,18000.0
+43,216,3,el rubí,4,20000.0
+44,217,3,el santuario,2,20000.0
+45,218,3,el silencio,2,15000.0
+46,219,3,el tabor,4,12000.0
+47,220,3,el valle,4,20000.0
+48,221,3,entrega en tienda,1,0.0
+49,222,3,granadillo,4,9000.0
+50,223,3,josé antonio galán,2,20000.0
+51,224,3,kalamary,4,22000.0
+52,225,3,kennedy,2,20000.0
+53,226,3,la arboraya,2,20000.0
+54,227,3,la campiña,4,9000.0
+55,228,3,la ceiba,2,20000.0
+56,229,3,la concepción,1,15000.0
+57,230,3,la cumbre,4,12000.0
+58,231,3,la esmeralda,2,18000.0
+59,232,3,la floresta,3,11000.0
+60,233,3,la florida,4,20000.0
+61,234,3,la magdalena,2,20000.0
+62,235,3,la paz,6,18000.0
+63,236,3,la playa,5,17000.0
+64,237,3,la pradera,6,20000.0
+65,238,3,la unión,2,20000.0
+67,239,3,la victoria,2,20000.0
+68,240,3,las cayenas,6,30000.0
+69,241,3,las colinas,4,18000.0
+70,242,3,las delicias,2,13000.0
+71,243,3,las estrellas,4,18000.0
+72,244,3,las flores,3,18000.0
+73,245,3,las mercedes,4,12000.0
+74,246,3,las moras,6,30000.0
+75,247,3,las nieves,2,20000.0
+76,248,3,las palmas,2,18000.0
+77,249,3,las terrazas,4,16000.0
+78,250,3,las tres ave maria,3,10000.0
+79,251,3,lipaya,2,20000.0
+80,252,3,loma fresca,2,17000.0
+81,253,3,los alpes,4,10000.0
+82,254,3,los andes,2,15000.0
+83,255,3,los jobos,4,10000.0
+84,256,3,los laureles,2,30000.0
+86,257,3,los nogales,4,12000.0
+87,258,3,los olivos i,6,20000.0
+88,259,3,los olivos ii,6,20000.0
+89,260,3,los pinos,2,16000.0
+90,261,3,los robles,6,30000.0
+91,262,3,los trupillos,2,25000.0
+92,263,3,lucero,2,17000.0
+93,264,3,malambo,6,50000.0
+94,265,3,mallorquin,5,17000.0
+95,266,3,miramar,4,15000.0
+96,267,3,moderno,2,20000.0
+97,268,3,montecristo,1,15000.0
+98,269,3,montes,2,20000.0
+99,270,3,nueva granada,2,15000.0
+100,271,3,nuevo horizonte,3,12000.0
+101,272,3,olaya,2,15000.0
+102,273,3,paraíso,3,10000.0
+103,274,3,pradomar,5,30000.0
+104,275,3,pumarejo,2,16000.0
+105,276,3,riomar,3,10000.0
+106,277,3,sabanilla,5,30000.0
+107,278,3,salgar,5,30000.0
+108,279,3,san felipe,2,15000.0
+109,280,3,san francisco,1,13000.0
+110,281,3,san isidro,2,15000.0
+111,282,3,san josé,2,18000.0
+112,283,3,san nicolás,2,20000.0
+113,284,3,san roque,2,25000.0
+114,285,3,san salvador,3,12000.0
+115,286,3,santa ana,2,13000.0
+116,287,3,santa helena,2,30000.0
+117,288,3,santa mónica,3,12000.0
+118,289,3,siape,5,20000.0
+119,290,3,simón bolívar,2,25000.0
+120,291,3,san vicente,3,6000.0
+121,292,3,solaire norte,3,10000.0
+122,293,3,soledad,6,35000.0
+123,294,3,tayrona,2,25000.0
+124,295,3,universal i,2,24000.0
+125,296,3,universal ii,2,24000.0
+126,297,3,villa blanca,2,18000.0
+127,298,3,villa campestre,5,17000.0
+128,299,3,villa carolina,3,10000.0
+129,300,3,villa country,3,8000.0
+130,301,3,villa del carmén,2,30000.0
+131,302,3,villa del este,3,10000.0
+132,303,3,villa santos,4,10000.0
+133,304,3,zion tower,3,8000.0
+134,305,3,zona franca,3,25000.0
+135,306,3,zona industrial,3,15000.0
+136,307,3,la chinita,1,50000.0
+137,308,3,puerto colombia,5,30000.0
+138,309,3,puerto colombia bajo orion,1,80000.0
+139,310,3,clinica la merced,1,15000.0
+140,311,3,portal de genoves,5,12000.0
+141,312,3,ciudad de mallorquin,5,17000.0
+142,313,3,delicias,1,12000.0
+143,314,3,parque venezuela,4,10000.0
+144,315,3,pricesmart,6,12000.0
+145,316,3,cementerio jardines de la eternidad,5,20000.0
+146,317,3,cementerio los olivos,5,20000.0
+147,318,3,cementerio jardines de paz,5,20000.0
+148,319,3,universidad sergio arboleda,5,20000.0
+149,320,3,"pumarejo, soledad",2,35000.0
+150,321,3,barrio abajo,1,16000.0
+151,322,3,galapa,1,30000.0
+152,323,3,via 40,1,16000.0
+153,324,3,ciudad jardin,4,11000.0
+154,325,3,modelo,4,15000.0
+155,326,3,jardines de la eternidad sur,6,30000.0
+156,327,3,puerta dorada,6,25000.0

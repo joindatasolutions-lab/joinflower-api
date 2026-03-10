@@ -1,0 +1,13 @@
+MIGRACION PEDIDOS REGISTRO(S)
+Archivo: csv\empresas\flora\FLORA_APP_V2.xlsx
+EmpresaID: 3
+SucursalID: 1
+Offset: 0
+Batch size: 300
+Filas leidas: 300
+Pedidos creados: 264
+Detalles creados: 274
+Errores cliente: 18
+Errores producto: 18
+Pedidos sin detalle valido: 18
+Modo: APPLY

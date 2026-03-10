@@ -1,0 +1,15 @@
+RESUMEN VALIDACION EXCEL FLORISTERIA
+Archivo: csv\empresas\flora\FLORA_APP_V2.xlsx
+Fecha ejecucion: 2026-03-08T06:33:12
+
+Total pedidos: 3143
+Total clientes: 2811
+Total productos: 108
+Total domicilios: 447
+Total registros produccion: 2371
+
+Pedidos duplicados: 0
+Clientes sin identificacion: 4
+Productos no catalogo: 238
+Pedidos produccion inexistentes: 2
+Pedidos domicilios inexistentes: 0

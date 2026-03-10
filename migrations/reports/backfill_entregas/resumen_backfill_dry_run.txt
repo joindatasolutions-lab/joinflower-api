@@ -1,0 +1,9 @@
+BACKFILL ENTREGAS DESDE REGISTRO(S)
+Archivo: csv\empresas\flora\FLORA_APP_V2.xlsx
+EmpresaID: 3
+Filas leidas: 3249
+Entregas creadas: 1883
+Pedidos sin match: 1129
+Clientes no encontrados: 237
+Barrios no encontrados: 88
+Modo: DRY_RUN

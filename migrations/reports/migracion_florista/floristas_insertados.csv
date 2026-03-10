@@ -1,0 +1,12 @@
+﻿fila_excel,idFlorista,empresaID,sucursalID,nombre,estado,activo,capacidadDiaria
+2,4,3,1,elibeth salgado,activo,1,9
+3,5,3,1,cristina arrieta,activo,1,9
+4,6,3,1,james de la cruz,activo,1,9
+5,7,3,1,adriana suarez,inactivo,0,1
+6,8,3,1,ana narvaez,activo,1,9
+7,9,3,1,darle galera,activo,1,9
+8,10,3,1,ani ruiz,activo,1,8
+9,11,3,1,eliana brochero,activo,1,8
+10,12,3,1,michel,inactivo,0,1
+11,13,3,1,pocholo,activo,1,8
+12,14,3,1,maría perez,inactivo,0,1

@@ -1,0 +1,11 @@
+MIGRACION PEDIDOS REGISTRO(S)
+Archivo: csv\empresas\flora\FLORA_APP_V2.xlsx
+EmpresaID: 3
+SucursalID: 1
+Filas leidas: 3249
+Pedidos creados: 1883
+Detalles creados: 2006
+Errores cliente: 237
+Errores producto: 1198
+Pedidos sin detalle valido: 1129
+Modo: DRY-RUN

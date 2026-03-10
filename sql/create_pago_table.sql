@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS `Pago` (
+  `idPago` BIGINT NOT NULL AUTO_INCREMENT,
+  `empresaID` BIGINT NOT NULL,
+  `pedidoID` BIGINT NOT NULL,
+  `proveedor` VARCHAR(50) NOT NULL DEFAULT 'WOMPI',
+  `referencia` VARCHAR(120) NOT NULL,
+  `transaccionID` VARCHAR(120) NULL,
+  `estado` VARCHAR(40) NOT NULL DEFAULT 'PENDIENTE',
+  `moneda` VARCHAR(10) NOT NULL DEFAULT 'COP',
+  `monto` DECIMAL(12,2) NOT NULL,
+  `checkoutUrl` TEXT NULL,
+  `rawRespuesta` TEXT NULL,
+  `createdAt` DATETIME NULL,
+  `updatedAt` DATETIME NULL,
+  PRIMARY KEY (`idPago`),
+  UNIQUE KEY `uq_pago_referencia` (`referencia`),
+  KEY `idx_pago_pedido` (`pedidoID`),
+  CONSTRAINT `fk_pago_empresa` FOREIGN KEY (`empresaID`) REFERENCES `Empresa` (`idEmpresa`),
+  CONSTRAINT `fk_pago_pedido` FOREIGN KEY (`pedidoID`) REFERENCES `Pedido` (`idPedido`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -5,6 +5,7 @@
 @identificacion = 123456789
 @pedidoId = 1
 @nuevoEstadoId = 2
+@referenciaPago = pedido_1_1234567890
 
 ### 1) Catálogo por empresa
 GET {{baseUrl}}/catalogo/{{empresaId}}
@@ -96,4 +97,29 @@ Origin: http://127.0.0.1:5500
 ### 7) Cambiar estado de pedido (ajusta IDs según tu DB)
 PUT {{baseUrl}}/pedido/{{pedidoId}}/estado/{{nuevoEstadoId}}
 Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+### 8) Generar checkout link de Wompi
+POST {{baseUrl}}/pagos/wompi/checkout-link
+Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+{
+  "pedidoID": {{pedidoId}}
+}
+
+### 9) Confirmar estado de pago Wompi (simulado)
+POST {{baseUrl}}/pagos/wompi/confirmar
+Content-Type: application/json
+Origin: http://127.0.0.1:5500
+
+{
+  "referencia": "{{referenciaPago}}",
+  "transaccionID": "txn_demo_001",
+  "estado": "APPROVED",
+  "rawRespuesta": "{\"source\":\"manual-test\"}"
+}
+
+### 10) Consultar estado de pago por referencia
+GET {{baseUrl}}/pagos/wompi/status?referencia={{referenciaPago}}
 Origin: http://127.0.0.1:5500

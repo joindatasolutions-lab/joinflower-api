@@ -6,6 +6,8 @@ from app.routers import catalogo
 from app.routers import cliente
 from app.routers import barrios
 from app.routers import produccion
+from app.routers import pagos
+from app.routers import empresa
 
 ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
@@ -36,6 +38,9 @@ app.include_router(pedido.router)
 app.include_router(cliente.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
+app.include_router(pagos.router)
+app.include_router(pagos.api_router)
+app.include_router(empresa.router)
 
 
 @app.get("/")
