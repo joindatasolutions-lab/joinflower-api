@@ -1,3 +1,6 @@
+import os
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -64,3 +67,9 @@ def health():
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
+
+
+if __name__ == "__main__":
+    # Cloud Run injects PORT at runtime; default keeps local execution simple.
+    port = int(os.getenv("PORT", "8080"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
