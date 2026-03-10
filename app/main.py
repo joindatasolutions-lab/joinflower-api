@@ -7,6 +7,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.extension import _rate_limit_exceeded_handler
 from slowapi.middleware import SlowAPIMiddleware
 
+
 from app.routers import pedido
 from app.routers import catalogo
 from app.routers import cliente
@@ -17,6 +18,9 @@ from app.routers import domicilios
 from app.routers import inventario
 from app.routers import entregas
 from app.middlewares.rate_limit import limiter
+# Endpoint temporal para probar conexión DB
+from sqlalchemy.exc import OperationalError
+from app.database import engine
 
 ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
@@ -76,6 +80,18 @@ def health():
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
+
+
+# Endpoint temporal para probar conexión DB
+@app.get("/db-connection")
+def db_connection_check():
+    try:
+        # Intenta conectar y obtener versión
+        with engine.connect() as conn:
+            version = conn.execute("SELECT VERSION() as version").fetchone()
+        return {"ok": True, "version": version[0] if version else None}
+    except OperationalError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 if __name__ == "__main__":
