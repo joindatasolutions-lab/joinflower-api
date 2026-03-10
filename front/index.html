@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PetalOps | Front Starter</title>
+    <title>Petalops | Arquitectura Operativa</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -18,10 +18,10 @@
 
     <main class="layout">
       <header class="hero reveal">
-        <p class="eyebrow">JoinFlower API Playground</p>
-        <h1>Front listo para conectar con tu backend FastAPI</h1>
+        <p class="eyebrow">Arquitectura | Petalops</p>
+        <h1>Petalops</h1>
         <p class="subtitle">
-          Prueba salud, catálogo, barrios y cliente desde una UI simple.
+          Plataforma operativa para pedidos, produccion, domicilios, catalogo e inventario.
         </p>
       </header>
 
@@ -73,9 +73,42 @@
           </div>
           <button id="btnCliente" class="btn">Buscar cliente</button>
         </article>
+
+        <article class="panel reveal delay-5">
+          <h2>Produccion (hoy)</h2>
+          <div class="field">
+            <label for="empresaProduccion">Empresa ID</label>
+            <input id="empresaProduccion" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="sucursalProduccion">Sucursal ID</label>
+            <input id="sucursalProduccion" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="fechaProduccion">Fecha</label>
+            <input id="fechaProduccion" type="date" />
+          </div>
+          <div class="row">
+            <button id="btnProduccionModulo" class="btn">Abrir modulo</button>
+            <button id="btnAsignarHoyManual" class="btn btn-alt">Asignar hoy</button>
+          </div>
+        </article>
+
+        <article class="panel reveal delay-6">
+          <h2>Pedidos</h2>
+          <div class="field">
+            <label for="empresaPedidos">Empresa ID</label>
+            <input id="empresaPedidos" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="sucursalPedidos">Sucursal ID (opcional)</label>
+            <input id="sucursalPedidos" type="number" value="1" min="1" />
+          </div>
+          <button id="btnPedidos" class="btn">Ver pedidos</button>
+        </article>
       </section>
 
-      <section class="panel reveal delay-5">
+      <section class="panel reveal delay-7">
         <h2>Resultado</h2>
         <pre id="output">Sin consultas todavia.</pre>
       </section>

@@ -192,6 +192,14 @@ pre {
   animation-delay: 290ms;
 }
 
+.delay-6 {
+  animation-delay: 350ms;
+}
+
+.delay-7 {
+  animation-delay: 410ms;
+}
+
 @keyframes reveal {
   to {
     opacity: 1;

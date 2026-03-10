@@ -10,3 +10,13 @@ from .transicionestadopedido import TransicionEstadoPedido
 from .florista import Florista
 from .produccion import Produccion
 from .produccionhistorial import ProduccionHistorial
+from .rol import Rol
+from .usuario import Usuario
+from .permisomodulo import PermisoModulo
+from .planmodulo import PlanModulo
+from .domiciliario import Domiciliario
+from .usuariomodulo import UsuarioModulo
+from .proveedor import Proveedor
+from .inventario import Inventario
+from .movimientoinventario import MovimientoInventario
+from .sucursal_contador_pedido import SucursalContadorPedido

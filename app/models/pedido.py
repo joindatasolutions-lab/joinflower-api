@@ -10,6 +10,8 @@ class Pedido(Base):
 
     empresaID = Column(BigInteger, nullable=False)
     sucursalID = Column(BigInteger, nullable=False)
+    numeroPedido = Column(BigInteger, nullable=False)
+    codigoPedido = Column(String(40))
     clienteID = Column(BigInteger, ForeignKey("Cliente.idCliente"), nullable=False)
 
     fechaPedido = Column(DateTime)

@@ -102,6 +102,7 @@
 - `idx_produccion_fecha_estado(fechaProgramadaProduccion, estado)`
 - `idx_produccion_florista_fecha(floristaID, fechaProgramadaProduccion)`
 - `idx_produccion_empresa_sucursal_fecha(empresaID, sucursalID, fechaProgramadaProduccion)`
+- `idx_produccion_empresa_fecha(empresaID, fechaProgramadaProduccion)`
 - `idx_historial_produccion_fecha(produccionID, fechaCambio)`
 - `idx_historial_empresa_sucursal_fecha(empresaID, sucursalID, fechaCambio)`
 
@@ -113,7 +114,15 @@
 1. Filtra floristas activos.
 2. Excluye incapacidad en `fechaProgramadaProduccion`.
 3. Valida `carga del día < capacidadDiaria`.
-4. Ordena por `ocupacion/capacidad` ascendente.
+4. Valida `simultáneos en EnProduccion < trabajosSimultaneosPermitidos`.
+5. Ordena por `ocupacion/capacidad` ascendente.
+
+### Disparo de asignación (bajo costo Cloud Run)
+- No hay polling ni cron masivo.
+- Se asigna automáticamente solo cuando corresponde:
+  - al aprobar pedido (`APROBADO/PAGADO`) y `fechaProgramadaProduccion == hoy`.
+  - al abrir módulo de Producción (`GET /produccion`) para pendientes de hoy sin florista.
+- Producciones futuras se crean en `Pendiente` sin florista y se asignan al llegar el día.
 
 ### Trabajos simultáneos
 - Antes de pasar a `EnProduccion` valida:
@@ -122,13 +131,20 @@
 
 ### Incapacidad
 - Cambio de estado de florista a `Incapacidad`:
-  - Reasigna automáticamente pendientes futuras.
+  - Reasigna automáticamente pendientes afectadas.
   - No mueve `EnProduccion` (requiere acción manual).
   - Registra historial por cada reasignación.
+
+- Cambio de estado de florista a `Inactivo`:
+  - Reasigna automáticamente pendientes afectadas.
+  - No mueve `EnProduccion` (requiere acción manual).
 
 ### Reasignación auditada
 - Endpoint dedicado con `motivo` y `usuarioCambio` obligatorios.
 - También se audita reasignación cuando corresponde desde otros flujos.
+
+### Regla de control de fecha
+- No se permite asignación manual de producciones con fecha futura.
 
 ### Recalculo por cambio de pedido
 - Si producción está `Pendiente`:
@@ -159,8 +175,10 @@ Base: `/produccion`
 - `GET /produccion/floristas`
 - `PUT /produccion/floristas/{florista_id}/estado`
 - `GET /produccion`
+- `POST /produccion/asignar-pendientes-hoy`
 - `GET /produccion/resumen`
 - `GET /produccion/kanban`
+- `POST /produccion/floristas/sincronizar-incapacidades`
 - `PUT /produccion/{produccion_id}/asignar`
 - `PUT /produccion/{produccion_id}/reasignar`
 - `PUT /produccion/{produccion_id}/estado`
@@ -175,3 +193,4 @@ Base: `/produccion`
 
 - `sql/alter_produccion_module.sql` (base del módulo)
 - `sql/alter_produccion_operativa_v2.sql` (endurecimiento operativo)
+- `sql/alter_produccion_cloudrun_indexes.sql` (índice adicional tenancy + fecha)

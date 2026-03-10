@@ -1,96 +1,91 @@
 # PetalOps API (FastAPI)
 
-Backend para catálogo y gestión de pedidos con arquitectura por capas usando FastAPI + SQLAlchemy sobre MySQL.
+Backend multi-tenant para gestion comercial y operativa de floristerias (catalogo, pedidos, produccion, domicilios, inventario y usuarios), construido con FastAPI + SQLAlchemy sobre MySQL.
 
-## 1) Estructura del proyecto
+## 1) Arquitectura y estructura
 
 ```text
 app/
-  database.py
-  main.py
+  core/
   models/
   routers/
   schemas/
   services/
-csv/
+  database.py
+  main.py
 sql/
+scripts/
 tests/
+front/
+docs/
 ```
 
-### Capas
-
-- **models/**: modelos SQLAlchemy (mapeo de tablas existentes).
-- **schemas/**: modelos Pydantic de entrada/salida.
-- **services/**: lógica de negocio transaccional.
-- **routers/**: endpoints HTTP (delegan lógica en servicios).
-- **main.py**: instancia de FastAPI, CORS y registro de routers.
+- `app/models`: mapeo de tablas SQLAlchemy.
+- `app/schemas`: contratos de entrada/salida (Pydantic).
+- `app/services`: logica de negocio transaccional.
+- `app/routers`: endpoints HTTP por dominio.
+- `sql`: migraciones/alter idempotentes.
+- `scripts`: seeds y utilidades operativas.
+- `tests`: pruebas unitarias e integracion.
 
 ## 2) Requisitos
 
 - Python 3.10+
-- Base de datos MySQL accesible
-- Dependencias del proyecto instaladas en un entorno virtual
+- MySQL/MariaDB accesible
+- Entorno virtual recomendado
 
-## 3) Configuración de entorno
+## 3) Configuracion de entorno
 
-Este proyecto carga variables desde `.env` (ver `app/database.py`).
+El backend toma configuracion desde variables de entorno (o `.env`) leidas en `app/database.py`.
 
-Variables requeridas:
+Ejemplo:
 
 ```env
-DATABASE_HOST=148.113.221.17
+DATABASE_HOST=127.0.0.1
 DATABASE_PORT=3306
-DATABASE_NAME=joindata_app
-DATABASE_USER=joindata_joindata
-DATABASE_PASSWORD=Emprender2025#
+DATABASE_NAME=joinflower
+DATABASE_USER=tu_usuario
+DATABASE_PASSWORD=tu_password
+JWT_SECRET_KEY=cambia-esta-clave
 ```
 
-## 4) Instalación y ejecución
+## 4) Instalacion y ejecucion
 
-### Instalar dependencias
+### Backend (API)
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-> Si no tienes `requirements.txt`, instala al menos: `fastapi`, `uvicorn`, `sqlalchemy`, `pymysql`, `python-dotenv`.
+Salud basica:
 
-### Ejecutar API
+- `http://127.0.0.1:8001/ping`
+- `http://127.0.0.1:8001/health`
+- `http://127.0.0.1:8001/docs`
 
-```powershell
-uvicorn app.main:app --reload --port 8001
-```
-
-### Ejecutar frontend (starter)
-
-Este repositorio incluye un frontend base en `front/` para consumir endpoints del API.
-
-En otra terminal, desde la raiz del proyecto:
+### Frontend rapido incluido en este repo
 
 ```powershell
 python -m http.server 5500 -d front
 ```
 
-Luego abre:
+Abrir: `http://127.0.0.1:5500`
 
-- `http://127.0.0.1:5500`
+### Frontend principal (Petalops React/Vite)
 
-El starter permite probar:
+Si trabajas con el frontend completo en repositorio separado (`Petalops`):
 
-- `GET /ping`
-- `GET /health`
-- `GET /catalogo/{empresa_id}`
-- `GET /barrios/search`
-- `GET /cliente/buscar/{empresaID}/{identificacion}`
+```powershell
+npm install
+npm run dev -- --host 127.0.0.1 --port 5500
+```
 
-### Documentación interactiva
+## 5) CORS local habilitado
 
-- Swagger UI: `http://127.0.0.1:8001/docs`
-- ReDoc: `http://127.0.0.1:8001/redoc`
-
-## 5) CORS
-
-Configurado en `app/main.py` con estos orígenes:
+En `app/main.py` estan permitidos origenes locales comunes:
 
 - `http://127.0.0.1:5500`
 - `http://localhost:5500`
@@ -99,90 +94,115 @@ Configurado en `app/main.py` con estos orígenes:
 - `http://127.0.0.1:3000`
 - `http://localhost:3000`
 
-Parámetros:
+## 6) Funcionalidades clave
 
-- `allow_credentials=True`
-- `allow_methods=["*"]`
-- `allow_headers=["*"]`
+### Pedidos con numeracion por sucursal
 
-## 6) Endpoints disponibles
+- `idPedido` permanece como llave tecnica interna.
+- `numeroPedido` es consecutivo por `empresaID + sucursalID`.
+- `codigoPedido` es el codigo visible para negocio (con prefijo de sucursal cuando aplica).
+- La asignacion de consecutivo se hace de forma transaccional para evitar duplicados.
 
-### Catálogo
+### Checkout transaccional
+
+`POST /pedido/checkout` valida productos, cliente, entrega, estado inicial y totales, y persiste pedido + detalle + entrega en una sola transaccion.
+
+### Auth y autorizacion multi-tenant
+
+- Login JWT: `POST /auth/login`
+- Perfil: `GET /auth/me`
+- Claims base: `userID`, `empresaID`, `rolID`, `planID`.
+- Enforcements:
+- Aislamiento por empresa.
+- Permisos por rol/modulo/accion.
+- Restriccion por plan.
+- Overrides por empresa y por usuario (`EmpresaModulo`, `UsuarioModulo`).
+
+### Produccion inteligente por evento
+
+- Al aprobar un pedido, crea/actualiza produccion.
+- Autoasignacion solo para pendientes de hoy.
+- Trigger manual: `POST /produccion/asignar-pendientes-hoy`.
+- Sin polling permanente.
+
+## 7) Migraciones SQL recomendadas
+
+Ejecutar segun entorno (todas son idempotentes o preparadas para despliegue progresivo):
+
+- `sql/alter_auth_multitenant.sql`
+- `sql/alter_pedido_fecha_hora_fields.sql`
+- `sql/alter_pedido_motivo_rechazo.sql`
+- `sql/alter_domicilios_module.sql`
+- `sql/alter_inventario_module.sql`
+- `sql/alter_produccion_module.sql`
+- `sql/alter_usuario_modulo_override.sql`
+- `sql/alter_empresa_modulo_override.sql`
+- `sql/alter_usuario_login_unique.sql`
+
+Notas:
+
+- Para datos demo base puedes usar `sql/seed_auth_example.sql` y `sql/seed_empresas_demo.sql`.
+- Para semillas de usuarios de prueba por empresa, ver carpeta `scripts`.
+
+## 8) Usuarios de prueba y credenciales
+
+Se dejaron credenciales de trabajo en:
+
+- `docs/credenciales_prueba/empresa3_flora.md`
+- `docs/credenciales_prueba/empresa1_demo.md`
+
+Scripts de seed asociados:
+
+- `scripts/seed_flora_empresa3_users.py`
+- `scripts/seed_empresa1_test_users.py`
+
+## 9) Testing
+
+### Ejecutar pruebas unitarias
+
+```powershell
+pytest -q
+```
+
+### Ejecutar integracion (si aplica en tu entorno)
+
+```powershell
+$env:RUN_INTEGRATION_TESTS="1"
+pytest -m integration -q
+```
+
+Archivos de prueba relevantes:
+
+- `tests/test_multitenant_guard_and_numero.py`
+- `tests/test_tenant_table_guard.py`
+- `tests/test_security_helpers.py`
+- `tests/test_role_module_access_matrix.py`
+
+Tambien hay workflow CI en `.github/workflows/ci-pytest.yml`.
+
+## 10) E2E rapido sugerido
+
+1. Levantar API en `8001`.
+2. Hacer login con un usuario de `empresaID` conocida.
+3. Crear pedido por `POST /pedido/checkout`.
+4. Consultar `GET /pedidos` y validar que aparezcan `numeroPedido` y `codigoPedido`.
+
+## 11) Endpoints de referencia
 
 - `GET /catalogo/{empresa_id}`
-  - Retorna productos activos por empresa.
-
-### Clientes
-
+- `GET /barrios/search`
 - `GET /cliente/buscar/{empresaID}/{identificacion}`
-  - Busca cliente por empresa + identificación.
-
-### Barrios
-
-- `GET /barrios/search?q=...&empresa_id=...&sucursal_id=...`
-  - Búsqueda de barrios (mínimo 2 caracteres), máximo 10 resultados.
-
-### Pedidos
-
 - `POST /pedido/checkout`
-  - Flujo transaccional recomendado para checkout.
+- `GET /pedidos`
+- `GET /entregas/pedido/{pedido_id}/mensaje`
+- `GET /produccion`
+- `GET /domicilios`
+- `GET /inventario`
+- `POST /auth/login`
+- `GET /auth/me`
 
-- `POST /pedido`
-  - Flujo alterno de creación de pedido.
+## 12) Consideraciones importantes
 
-- `PUT /pedido/{pedido_id}/estado/{nuevo_estado_id}`
-  - Cambia estado del pedido validando transición permitida.
-
-## 7) Ejemplo de checkout
-
-### Request
-
-```json
-{
-  "empresaID": 1,
-  "sucursalID": 1,
-  "productos": [
-    { "productoID": 1, "cantidad": 2 },
-    { "productoID": 2, "cantidad": 1 }
-  ],
-  "cliente": {
-    "nombreCompleto": "Cliente Demo",
-    "telefono": "3001234567",
-    "email": "demo@correo.com"
-  },
-  "entrega": {
-    "direccion": "Calle 123 #45-67",
-    "barrioID": 10,
-    "fechaEntrega": "2026-03-01T10:00:00",
-    "mensaje": "Opcional"
-  }
-}
-```
-
-### Response
-
-```json
-{
-  "pedidoID": 123,
-  "total": 250000.0,
-  "estado": "CREADO"
-}
-```
-
-## 8) Reglas del checkout (`POST /pedido/checkout`)
-
-1. Valida que `productos` no esté vacío.
-2. Valida que cada `cantidad` sea mayor que 0.
-3. Obtiene estado inicial activo con nombre `CREADO`.
-4. Valida que todos los productos existan, estén activos y pertenezcan a la empresa.
-5. Busca cliente por `empresaID + telefono`; si no existe, lo crea.
-6. Crea pedido y detalles con precio tomado desde base de datos.
-7. Calcula y actualiza totales (`totalBruto`, `totalIva`, `totalNeto`).
-8. Crea registro de entrega.
-9. Hace `commit` al final; ante error hace `rollback`.
-
-## 9) Notas
-
-- El endpoint `/pedido/checkout` está desacoplado en `app/services/pedido_service.py`.
-- No se usan precios enviados por frontend para totalizar pedidos.
-- La lógica de pago no está implementada en esta API.
+- El frontend no define permisos: backend siempre valida token, empresa y accion.
+- Evitar exponer credenciales productivas en repositorio.
+- Mantener migraciones SQL versionadas y ejecutadas por ambiente.

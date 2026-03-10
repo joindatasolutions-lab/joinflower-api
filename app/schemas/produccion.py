@@ -49,7 +49,8 @@ class ProduccionRecalcularPedidoRequest(BaseModel):
 class ProduccionItem(BaseModel):
     idProduccion: int
     pedidoID: int
-    numeroPedido: str
+    numeroPedido: int
+    codigoPedido: Optional[str] = None
     producto: str
     cliente: str
     fechaEntrega: Optional[datetime] = None
@@ -64,9 +65,17 @@ class ProduccionItem(BaseModel):
     fechaProgramadaProduccion: date
 
 
+class AutoAsignacionResumen(BaseModel):
+    ejecutada: bool
+    evaluadas: int
+    asignadas: int
+    sinDisponibilidad: int
+
+
 class ProduccionListResponse(BaseModel):
     items: List[ProduccionItem]
     total: int
+    autoAsignacion: Optional[AutoAsignacionResumen] = None
 
 
 class ProduccionResumenResponse(BaseModel):
@@ -139,3 +148,13 @@ class OperativaDiariaItem(BaseModel):
 
 class OperativaDiariaResponse(BaseModel):
     items: List[OperativaDiariaItem]
+
+
+class AutoAsignacionResponse(BaseModel):
+    status: str
+    fecha: date
+    empresaID: int
+    sucursalID: Optional[int] = None
+    evaluadas: int
+    asignadas: int
+    sinDisponibilidad: int

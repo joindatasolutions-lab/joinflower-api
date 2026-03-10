@@ -5,19 +5,59 @@ const setOutput = (data) => {
     typeof data === "string" ? data : JSON.stringify(data, null, 2);
 };
 
+const formatDateTime = (value) => {
+  if (!value) {
+    return "-";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+  return parsed.toLocaleString("es-CO", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+const renderPedidosSummary = (payload) => {
+  const items = payload?.items || [];
+  const table = items.map((item) => ({
+    numeroPedido: item.numeroPedido,
+    codigoPedido: item.codigoPedido || "-",
+    cliente: item.cliente,
+    empresaID: item.empresaID || "-",
+    sucursalID: item.sucursalID || "-",
+    estado: item.estado,
+    fechaEntrega: formatDateTime(item.fechaEntrega),
+    franjaEntrega: item.horaEntrega || "-",
+    total: item.total,
+  }));
+
+  setOutput({
+    ok: true,
+    total: payload?.total || 0,
+    page: payload?.page,
+    pageSize: payload?.pageSize,
+    pedidos: table,
+  });
+};
+
 const getBaseUrl = () => {
   const value = document.getElementById("apiBase").value.trim();
   return value.endsWith("/") ? value.slice(0, -1) : value;
 };
 
-const request = async (path) => {
+const request = async (path, method = "GET") => {
   const base = getBaseUrl();
   const url = `${base}${path}`;
-  setOutput(`Consultando ${url} ...`);
+  setOutput(`Consultando ${method} ${url} ...`);
 
   try {
     const response = await fetch(url, {
-      method: "GET",
+      method,
       headers: {
         Accept: "application/json",
       },
@@ -39,15 +79,34 @@ const request = async (path) => {
       return;
     }
 
-    setOutput({ ok: true, status: response.status, path, body });
+    setOutput({ ok: true, status: response.status, method, path, body });
   } catch (error) {
     setOutput({
       ok: false,
       path,
+      method,
       error: "No se pudo conectar al backend. Verifica que este corriendo.",
       detail: String(error),
     });
   }
+};
+
+const getTodayIso = () => new Date().toISOString().slice(0, 10);
+
+const buildProduccionQuery = () => {
+  const empresa = document.getElementById("empresaProduccion").value.trim() || "1";
+  const sucursal = document.getElementById("sucursalProduccion").value.trim();
+  const fecha = document.getElementById("fechaProduccion").value || getTodayIso();
+
+  const qs = new URLSearchParams({
+    empresaID: empresa,
+    fecha,
+    autoAsignarPendientesHoy: "true",
+  });
+  if (sucursal) {
+    qs.set("sucursalID", sucursal);
+  }
+  return qs.toString();
 };
 
 document.getElementById("btnPing").addEventListener("click", () => {
@@ -81,3 +140,58 @@ document.getElementById("btnCliente").addEventListener("click", () => {
 
   request(`/cliente/buscar/${empresa}/${ident}`);
 });
+
+document.getElementById("btnProduccionModulo").addEventListener("click", () => {
+  request(`/produccion?${buildProduccionQuery()}`);
+});
+
+document.getElementById("btnAsignarHoyManual").addEventListener("click", () => {
+  const empresa = document.getElementById("empresaProduccion").value.trim() || "1";
+  const sucursal = document.getElementById("sucursalProduccion").value.trim();
+  const qs = new URLSearchParams({ empresaID: empresa });
+  if (sucursal) {
+    qs.set("sucursalID", sucursal);
+  }
+  request(`/produccion/asignar-pendientes-hoy?${qs.toString()}`, "POST");
+});
+
+document.getElementById("btnPedidos").addEventListener("click", async () => {
+  const empresa = document.getElementById("empresaPedidos").value.trim() || "1";
+  const sucursal = document.getElementById("sucursalPedidos").value.trim();
+
+  const qs = new URLSearchParams({
+    empresaID: empresa,
+    page: "1",
+    pageSize: "20",
+  });
+  if (sucursal) {
+    qs.set("sucursalID", sucursal);
+  }
+
+  const base = getBaseUrl();
+  const path = `/pedidos?${qs.toString()}`;
+  const url = `${base}${path}`;
+  setOutput(`Consultando GET ${url} ...`);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      setOutput({ ok: false, status: response.status, path, body });
+      return;
+    }
+    renderPedidosSummary(body);
+  } catch (error) {
+    setOutput({
+      ok: false,
+      path,
+      error: "No se pudo consultar pedidos.",
+      detail: String(error),
+    });
+  }
+});
+
+document.getElementById("fechaProduccion").value = getTodayIso();

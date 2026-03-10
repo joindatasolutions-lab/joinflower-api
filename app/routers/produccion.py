@@ -17,6 +17,8 @@ from app.models.producto import Producto
 from app.models.produccion import Produccion
 from app.models.produccionhistorial import ProduccionHistorial
 from app.schemas.produccion import (
+    AutoAsignacionResponse,
+    AutoAsignacionResumen,
     FloristaEstadoRequest,
     FloristaItem,
     FloristaListResponse,
@@ -36,8 +38,14 @@ from app.schemas.produccion import (
     ReasignacionHistorialItem,
     ReasignacionHistorialResponse,
 )
+from app.services import domicilio_service, produccion_service
+from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
 
-router = APIRouter(prefix="/produccion", tags=["Produccion"])
+router = APIRouter(
+    prefix="/produccion",
+    tags=["Produccion"],
+    dependencies=[Depends(require_module_access("produccion", "puedeVer"))],
+)
 
 ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
@@ -73,71 +81,42 @@ def _estado_produccion_norm(value: str | None) -> str:
 
 
 def _estado_florista_norm(value: str | None) -> str:
-    text = str(value or "").strip().upper()
-    if text == "ACTIVO":
-        return "Activo"
-    if text == "INACTIVO":
-        return "Inactivo"
-    if text == "INCAPACIDAD":
-        return "Incapacidad"
-    return str(value or "Activo").strip() or "Activo"
+    return produccion_service.estado_florista_norm(value)
 
 
-def _numero_pedido_humano(pedido_id: int) -> str:
-    return f"PED-{pedido_id:06d}"
+def _numero_pedido_valor(pedido: Pedido) -> int:
+    if pedido.numeroPedido is not None:
+        return int(pedido.numeroPedido)
+    return int(pedido.idPedido)
 
 
 def _calcular_fecha_programada(fecha_entrega: datetime | None, dias_anticipacion: int) -> date:
-    base = fecha_entrega.date() if fecha_entrega else date.today()
-    return base - timedelta(days=max(dias_anticipacion, 0))
+    return produccion_service.calcular_fecha_programada(fecha_entrega, dias_anticipacion)
 
 
 def _is_florista_in_incapacity(florista: Florista, fecha_programada: date) -> bool:
-    if _estado_florista_norm(florista.estado) != "Incapacidad":
-        return False
-
-    start = florista.fechaInicioIncapacidad
-    end = florista.fechaFinIncapacidad
-
-    if start and end:
-        return start <= fecha_programada <= end
-    if start and not end:
-        return fecha_programada >= start
-    if end and not start:
-        return fecha_programada <= end
-    return True
+    return produccion_service.is_florista_in_incapacity(florista, fecha_programada)
 
 
 def _count_carga_florista(db: Session, empresa_id: int, sucursal_id: int, florista_id: int, fecha_programada: date, ignore_produccion_id: int | None = None) -> int:
-    q = (
-        db.query(func.count(Produccion.idProduccion))
-        .filter(
-            Produccion.empresaID == empresa_id,
-            Produccion.sucursalID == sucursal_id,
-            Produccion.floristaID == florista_id,
-            Produccion.fechaProgramadaProduccion == fecha_programada,
-            func.upper(Produccion.estado) != "CANCELADO",
-        )
+    return produccion_service.count_carga_florista(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        florista_id=florista_id,
+        fecha_programada=fecha_programada,
+        ignore_produccion_id=ignore_produccion_id,
     )
-    if ignore_produccion_id is not None:
-        q = q.filter(Produccion.idProduccion != ignore_produccion_id)
-
-    return int(q.scalar() or 0)
 
 
 def _count_simultaneos_en_produccion(db: Session, empresa_id: int, sucursal_id: int, florista_id: int, ignore_produccion_id: int | None = None) -> int:
-    q = (
-        db.query(func.count(Produccion.idProduccion))
-        .filter(
-            Produccion.empresaID == empresa_id,
-            Produccion.sucursalID == sucursal_id,
-            Produccion.floristaID == florista_id,
-            func.upper(Produccion.estado) == "ENPRODUCCION",
-        )
+    return produccion_service.count_simultaneos_en_produccion(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        florista_id=florista_id,
+        ignore_produccion_id=ignore_produccion_id,
     )
-    if ignore_produccion_id is not None:
-        q = q.filter(Produccion.idProduccion != ignore_produccion_id)
-    return int(q.scalar() or 0)
 
 
 def _validate_florista_disponibilidad(db: Session, florista: Florista, fecha_programada: date, empresa_id: int, sucursal_id: int, ignore_produccion_id: int | None = None):
@@ -161,60 +140,17 @@ def _validate_florista_disponibilidad(db: Session, florista: Florista, fecha_pro
 
 
 def _seleccionar_florista_auto(db: Session, empresa_id: int, sucursal_id: int, fecha_programada: date, ignore_produccion_id: int | None = None) -> Florista | None:
-    floristas = (
-        db.query(Florista)
-        .filter(
-            Florista.empresaID == empresa_id,
-            Florista.sucursalID == sucursal_id,
-            Florista.activo == True,
-        )
-        .all()
+    return produccion_service.seleccionar_florista_auto(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        fecha_programada=fecha_programada,
+        ignore_produccion_id=ignore_produccion_id,
     )
-
-    ranking: list[tuple[float, int, int, Florista]] = []
-    for florista in floristas:
-        if _estado_florista_norm(florista.estado) != "Activo":
-            continue
-        if _is_florista_in_incapacity(florista, fecha_programada):
-            continue
-
-        capacidad = max(int(florista.capacidadDiaria or 0), 1)
-        ocupacion = _count_carga_florista(
-            db,
-            empresa_id=empresa_id,
-            sucursal_id=sucursal_id,
-            florista_id=int(florista.idFlorista),
-            fecha_programada=fecha_programada,
-            ignore_produccion_id=ignore_produccion_id,
-        )
-        if ocupacion >= capacidad:
-            continue
-
-        ratio = ocupacion / capacidad
-        ranking.append((ratio, ocupacion, int(florista.idFlorista), florista))
-
-    ranking.sort(key=lambda item: (item[0], item[1], item[2]))
-    return ranking[0][3] if ranking else None
 
 
 def _calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
-    rows = (
-        db.query(PedidoDetalle.cantidad, Producto.tiempoBaseProduccionMin)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(PedidoDetalle.pedidoID == pedido_id)
-        .all()
-    )
-
-    if not rows:
-        return 30
-
-    total = 0
-    for cantidad, tiempo_base in rows:
-        qty = max(float(cantidad or 0), 0)
-        base = int(tiempo_base or 30)
-        total += int(round(base * qty))
-
-    return max(total, 1)
+    return produccion_service.calcular_tiempo_estimado_pedido(db, pedido_id)
 
 
 def _log_historial(
@@ -225,17 +161,14 @@ def _log_historial(
     motivo: str,
     usuario: str,
 ):
-    item = ProduccionHistorial(
-        empresaID=int(produccion.empresaID),
-        sucursalID=int(produccion.sucursalID),
-        produccionID=int(produccion.idProduccion),
-        floristaAnteriorID=florista_anterior_id,
-        floristaNuevoID=florista_nuevo_id,
-        fechaCambio=datetime.now(timezone.utc),
-        motivo=(motivo or "Sin motivo").strip(),
-        usuarioCambio=(usuario or "system").strip() or "system",
+    produccion_service.log_historial(
+        db=db,
+        produccion=produccion,
+        florista_anterior_id=florista_anterior_id,
+        florista_nuevo_id=florista_nuevo_id,
+        motivo=motivo,
+        usuario=usuario,
     )
-    db.add(item)
 
 
 def _build_producto_map(db: Session, produccion_ids: list[int]) -> dict[int, str]:
@@ -303,7 +236,8 @@ def _build_items(
             ProduccionItem(
                 idProduccion=int(produccion.idProduccion),
                 pedidoID=int(pedido.idPedido),
-                numeroPedido=_numero_pedido_humano(int(pedido.idPedido)),
+                numeroPedido=_numero_pedido_valor(pedido),
+                codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
                 producto=producto_map.get(int(produccion.idProduccion), "Producto"),
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
@@ -326,8 +260,9 @@ def _dias_anticipacion_default() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
 
 
-@router.post("/generar-desde-pedidos")
-def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depends(get_db)):
+@router.post("/generar-desde-pedidos", dependencies=[Depends(require_module_access("produccion", "puedeCrear"))])
+def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    assert_same_empresa(auth, int(payload.empresaID))
     dias_anticipacion = payload.diasAnticipacion if payload.diasAnticipacion is not None else _dias_anticipacion_default()
 
     estado_ids = [
@@ -367,7 +302,7 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
         tiempo_estimado = _calcular_tiempo_estimado_pedido(db, int(pedido.idPedido))
 
         florista = None
-        if payload.autoAsignar:
+        if payload.autoAsignar and fecha_programada == date.today():
             florista = _seleccionar_florista_auto(
                 db=db,
                 empresa_id=int(pedido.empresaID),
@@ -415,7 +350,9 @@ def listar_floristas(
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     solo_activos: bool = Query(True, alias="soloActivos"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     q = db.query(Florista).filter(Florista.empresaID == empresa_id)
     if sucursal_id is not None:
         q = q.filter(Florista.sucursalID == sucursal_id)
@@ -442,11 +379,12 @@ def listar_floristas(
     )
 
 
-@router.put("/floristas/{florista_id}/estado")
-def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest, db: Session = Depends(get_db)):
+@router.put("/floristas/{florista_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     florista = db.query(Florista).filter(Florista.idFlorista == florista_id).first()
     if not florista:
         raise HTTPException(status_code=404, detail="Florista no encontrado")
+    assert_same_empresa(auth, int(florista.empresaID))
 
     nuevo_estado = _estado_florista_norm(payload.estado)
     if nuevo_estado not in {"Activo", "Inactivo", "Incapacidad"}:
@@ -459,43 +397,18 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     florista.updatedAt = datetime.now(timezone.utc)
 
     reasignadas = 0
+    sin_reemplazo = 0
     requiere_manual = 0
 
-    if nuevo_estado == "Incapacidad":
-        hoy = date.today()
-        pendientes_futuras = (
-            db.query(Produccion)
-            .filter(
-                Produccion.empresaID == florista.empresaID,
-                Produccion.sucursalID == florista.sucursalID,
-                Produccion.floristaID == florista.idFlorista,
-                Produccion.fechaProgramadaProduccion >= hoy,
-                func.upper(Produccion.estado) == "PENDIENTE",
-            )
-            .all()
+    if nuevo_estado in {"Incapacidad", "Inactivo"}:
+        resumen = produccion_service.reasignar_pendientes_por_indisponibilidad(
+            db=db,
+            florista=florista,
+            usuario=payload.usuarioCambio,
+            motivo=(payload.motivo or f"Reasignación automática por {nuevo_estado.lower()} del florista"),
         )
-
-        for prod in pendientes_futuras:
-            nuevo = _seleccionar_florista_auto(
-                db,
-                empresa_id=int(prod.empresaID),
-                sucursal_id=int(prod.sucursalID),
-                fecha_programada=prod.fechaProgramadaProduccion,
-                ignore_produccion_id=int(prod.idProduccion),
-            )
-            anterior = int(prod.floristaID) if prod.floristaID else None
-            prod.floristaID = int(nuevo.idFlorista) if nuevo else None
-            prod.fechaAsignacion = datetime.now(timezone.utc) if nuevo else prod.fechaAsignacion
-            prod.updatedAt = datetime.now(timezone.utc)
-            _log_historial(
-                db,
-                produccion=prod,
-                florista_anterior_id=anterior,
-                florista_nuevo_id=(int(nuevo.idFlorista) if nuevo else None),
-                motivo=(payload.motivo or "Reasignación automática por incapacidad del florista"),
-                usuario=payload.usuarioCambio,
-            )
-            reasignadas += 1
+        reasignadas = int(resumen["reasignadas"])
+        sin_reemplazo = int(resumen["sinReemplazo"])
 
         requiere_manual = int(
             db.query(func.count(Produccion.idProduccion))
@@ -516,8 +429,27 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
         "floristaID": florista_id,
         "estado": nuevo_estado,
         "reasignadasAutomaticamente": reasignadas,
+        "pendientesSinReemplazo": sin_reemplazo,
         "enProduccionRequierenAccionManual": requiere_manual,
     }
+
+
+@router.post("/floristas/sincronizar-incapacidades", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def sincronizar_incapacidades(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    resumen = produccion_service.sincronizar_incapacidades_y_reasignar(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        usuario="job.sincronizar_incapacidades",
+    )
+    db.commit()
+    return {"status": "ok", **resumen}
 
 
 @router.get("", response_model=ProduccionListResponse)
@@ -527,17 +459,72 @@ def listar_produccion(
     fecha: date | None = Query(None),
     estado: str | None = Query(None),
     incluir_cancelado: bool = Query(False, alias="incluirCancelado"),
+    auto_asignar_pendientes_hoy: bool = Query(True, alias="autoAsignarPendientesHoy"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
+    target_fecha = fecha or date.today()
+    auto_resumen = AutoAsignacionResumen(
+        ejecutada=False,
+        evaluadas=0,
+        asignadas=0,
+        sinDisponibilidad=0,
+    )
+
+    if auto_asignar_pendientes_hoy and target_fecha == date.today():
+        stats = produccion_service.asignar_pendientes_hoy(
+            db=db,
+            empresa_id=empresa_id,
+            sucursal_id=sucursal_id,
+            usuario="produccion.listar",
+            motivo="Asignación automática al abrir módulo Producción",
+        )
+        db.commit()
+        auto_resumen = AutoAsignacionResumen(
+            ejecutada=True,
+            evaluadas=int(stats["evaluadas"]),
+            asignadas=int(stats["asignadas"]),
+            sinDisponibilidad=int(stats["sinDisponibilidad"]),
+        )
+
     items = _build_items(
         db=db,
         empresa_id=empresa_id,
         sucursal_id=sucursal_id,
-        fecha_programada=(fecha or date.today()),
+        fecha_programada=target_fecha,
         estado=estado,
         incluir_cancelado=incluir_cancelado,
     )
-    return ProduccionListResponse(items=items, total=len(items))
+    return ProduccionListResponse(items=items, total=len(items), autoAsignacion=auto_resumen)
+
+
+@router.post("/asignar-pendientes-hoy", response_model=AutoAsignacionResponse, dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def asignar_pendientes_hoy(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    stats = produccion_service.asignar_pendientes_hoy(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        usuario="produccion.asignar_pendientes_hoy",
+        motivo="Asignación manual de pendientes de hoy",
+    )
+    db.commit()
+
+    return AutoAsignacionResponse(
+        status="ok",
+        fecha=date.today(),
+        empresaID=empresa_id,
+        sucursalID=sucursal_id,
+        evaluadas=int(stats["evaluadas"]),
+        asignadas=int(stats["asignadas"]),
+        sinDisponibilidad=int(stats["sinDisponibilidad"]),
+    )
 
 
 @router.get("/resumen", response_model=ProduccionResumenResponse)
@@ -546,7 +533,9 @@ def resumen_produccion(
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     fecha: date | None = Query(None),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     items = _build_items(
         db=db,
         empresa_id=empresa_id,
@@ -580,7 +569,9 @@ def kanban_produccion(
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     fecha: date | None = Query(None),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     items = _build_items(
         db=db,
         empresa_id=empresa_id,
@@ -606,15 +597,18 @@ def kanban_produccion(
     )
 
 
-@router.put("/{produccion_id}/asignar")
-def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db: Session = Depends(get_db)):
+@router.put("/{produccion_id}/asignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
         raise HTTPException(status_code=404, detail="Registro de producción no encontrado")
+    assert_same_empresa(auth, int(produccion.empresaID))
 
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
     if not fecha_programada:
         raise HTTPException(status_code=400, detail="fechaProgramadaProduccion es obligatoria")
+    if fecha_programada > date.today():
+        raise HTTPException(status_code=400, detail="No se permite asignar producciones con fecha futura")
 
     estado_actual = _estado_produccion_norm(produccion.estado)
     if estado_actual == ESTADO_EN_PRODUCCION and not (payload.motivo and payload.usuarioCambio):
@@ -686,8 +680,8 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     }
 
 
-@router.put("/{produccion_id}/reasignar")
-def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db)):
+@router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     if not payload.motivo.strip():
         raise HTTPException(status_code=400, detail="motivo es obligatorio")
     if not payload.usuarioCambio.strip():
@@ -699,14 +693,15 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
         motivo=payload.motivo,
         usuarioCambio=payload.usuarioCambio,
     )
-    return asignar_produccion(produccion_id, wrapper, db)
+    return asignar_produccion(produccion_id, wrapper, db, auth)
 
 
-@router.put("/{produccion_id}/estado")
-def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db)):
+@router.put("/{produccion_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
         raise HTTPException(status_code=404, detail="Registro de producción no encontrado")
+    assert_same_empresa(auth, int(produccion.empresaID))
 
     estado_actual = _estado_produccion_norm(produccion.estado)
     nuevo_estado = _estado_produccion_norm(payload.nuevoEstado)
@@ -716,6 +711,9 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
 
     if nuevo_estado == estado_actual:
         return {"status": "ok", "idProduccion": produccion_id, "estado": estado_actual}
+
+    if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
+        raise HTTPException(status_code=400, detail="No se permite modificar Producción cuando el domicilio está EnRuta")
 
     if nuevo_estado not in TRANSICIONES_VALIDAS.get(estado_actual, set()):
         raise HTTPException(status_code=400, detail=f"Transición no permitida: {estado_actual} -> {nuevo_estado}")
@@ -760,6 +758,9 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
         delta_min = int((produccion.fechaFinalizacion - produccion.fechaInicio).total_seconds() // 60)
         produccion.tiempoRealMin = max(delta_min, 0)
 
+        pedido = db.query(Pedido).filter(Pedido.idPedido == produccion.pedidoID).first()
+        domicilio_service.ensure_entrega_desde_produccion(db=db, produccion=produccion, pedido=pedido)
+
     if payload.observacionesInternas:
         produccion.observacionesInternas = payload.observacionesInternas.strip()
 
@@ -776,11 +777,12 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     }
 
 
-@router.post("/pedido/{pedido_id}/recalcular")
-def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcularPedidoRequest, db: Session = Depends(get_db)):
+@router.post("/pedido/{pedido_id}/recalcular", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcularPedidoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    assert_same_empresa(auth, int(pedido.empresaID))
 
     produccion = (
         db.query(Produccion)
@@ -795,6 +797,9 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
     tiempo_estimado = _calcular_tiempo_estimado_pedido(db, pedido_id)
     fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, _dias_anticipacion_default())
     estado_actual = _estado_produccion_norm(produccion.estado)
+
+    if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
+        raise HTTPException(status_code=400, detail="No se puede recalcular producción: el domicilio ya está EnRuta")
 
     now_utc = datetime.now(timezone.utc)
 
@@ -889,7 +894,9 @@ def historial_reasignaciones(
     fecha_desde: date = Query(..., alias="fechaDesde"),
     fecha_hasta: date = Query(..., alias="fechaHasta"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     q = db.query(ProduccionHistorial).filter(
         ProduccionHistorial.empresaID == empresa_id,
         ProduccionHistorial.fechaCambio >= datetime.combine(fecha_desde, datetime.min.time()),
@@ -921,7 +928,9 @@ def metricas_productividad(
     fecha_desde: date = Query(..., alias="fechaDesde"),
     fecha_hasta: date = Query(..., alias="fechaHasta"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     q = db.query(Produccion).filter(
         Produccion.empresaID == empresa_id,
         Produccion.fechaProgramadaProduccion >= fecha_desde,
@@ -1013,7 +1022,9 @@ def metricas_operacion(
     fecha_desde: date = Query(..., alias="fechaDesde"),
     fecha_hasta: date = Query(..., alias="fechaHasta"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     q = db.query(Produccion).filter(
         Produccion.empresaID == empresa_id,
         Produccion.fechaProgramadaProduccion >= fecha_desde,

@@ -68,18 +68,25 @@ class PedidoCheckoutRequest(BaseModel):
 
 class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
+    numeroPedido: int
+    codigoPedido: str
     total: float
     estado: str
 
 
 class PedidoListItem(BaseModel):
     pedidoID: int
-    numeroPedido: str
+    numeroPedido: int
+    codigoPedido: Optional[str] = None
+    empresaID: int
+    sucursalID: int
     fecha: Optional[datetime] = None
     fechaPedido: Optional[str] = None
     horaPedido: Optional[str] = None
     cliente: str
     destinatario: Optional[str] = None
+    fechaEntrega: Optional[datetime] = None
+    horaEntrega: Optional[str] = None
     productos: List[str]
     total: float
     metodoPago: Optional[str] = None
@@ -105,7 +112,8 @@ class PedidoDetalleProducto(BaseModel):
 
 class PedidoDetalleResponse(BaseModel):
     pedidoID: int
-    numeroPedido: str
+    numeroPedido: int
+    codigoPedido: Optional[str] = None
     fecha: Optional[datetime] = None
     fechaPedido: Optional[str] = None
     horaPedido: Optional[str] = None

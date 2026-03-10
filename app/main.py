@@ -6,6 +6,10 @@ from app.routers import catalogo
 from app.routers import cliente
 from app.routers import barrios
 from app.routers import produccion
+from app.routers import auth
+from app.routers import domicilios
+from app.routers import inventario
+from app.routers import entregas
 
 ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
@@ -25,6 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,6 +41,10 @@ app.include_router(pedido.router)
 app.include_router(cliente.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
+app.include_router(auth.router)
+app.include_router(domicilios.router)
+app.include_router(inventario.router)
+app.include_router(entregas.router)
 
 
 @app.get("/")
