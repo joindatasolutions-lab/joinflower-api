@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import json
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -24,9 +24,11 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
+from app.middlewares.rate_limit import limiter
 from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
+from app.services.cache import get_cache, set_cache
 from app.schemas.auth import (
     AuthMeResponse,
     EmpresaCreateRequest,
@@ -348,7 +350,8 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("30/minute")
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         usuario = (
             db.query(Usuario)
@@ -835,6 +838,7 @@ def crear_empresa(
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
 def listar_modulos_empresa(
+    request: Request,
     empresa_id: int = Query(..., alias="empresaID"),
     db: Session = Depends(get_db),
     auth=Depends(require_admin_role),
@@ -843,9 +847,19 @@ def listar_modulos_empresa(
         if not is_super_admin_context(auth):
             empresa_id = int(auth.empresaID)
         normalized_empresa_id = _resolve_empresa_id_for_module_admin(db, empresa_id)
+
+        cache_key = f"empresa_config:{normalized_empresa_id}"
+        cached = get_cache(cache_key)
+        if cached is not None:
+            return EmpresaModuloListResponse(**cached)
+
         _ensure_empresa_modulo_table(db)
         items = _build_empresa_module_items(db, normalized_empresa_id)
-        return EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
+        response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
+
+        # Configuration cache is short-lived to keep admin updates near real-time.
+        set_cache(cache_key, response.model_dump(), ttl=300)
+        return response
     except SQLAlchemyError as exc:
         raise auth_schema_error() from exc
 
@@ -887,6 +901,15 @@ def actualizar_modulos_empresa(
             )
 
         db.commit()
+
+        # Refresh cache snapshot after mutation to keep reads consistent.
+        updated_items = _build_empresa_module_items(db, empresa_id)
+        set_cache(
+            f"empresa_config:{empresa_id}",
+            EmpresaModuloListResponse(empresaID=empresa_id, items=updated_items).model_dump(),
+            ttl=300,
+        )
+
         return EmpresaModuloUpdateResponse(
             status="ok",
             empresaID=empresa_id,
