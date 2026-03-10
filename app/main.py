@@ -87,15 +87,20 @@ def ping():
 def db_connection_check():
     try:
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT VERSION() as version"))
-            version = result.fetchone()
-        return {"ok": True, "version": version[0] if version else None}
+            result = conn.execute(text("SELECT 1"))
+            value = result.scalar()
 
-    except SQLAlchemyError as exc:
-        return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "result": value
+        }
 
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
 
 
 if __name__ == "__main__":
