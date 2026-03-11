@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,13 +29,26 @@ from app.schemas.pedido import (
     PedidoDetalleProducto,
     RechazarPedidoRequest,
 )
-from app.services.pedido_service import checkout_pedido
+from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
+from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado
+from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.middlewares.rate_limit import limiter
 
 router = APIRouter()
 
 
-def _numero_pedido_humano(pedido_id: int) -> str:
-    return f"PED-{pedido_id:06d}"
+def _numero_pedido_humano(pedido: Pedido) -> str:
+    if pedido.codigoPedido:
+        return str(pedido.codigoPedido)
+    if pedido.numeroPedido is not None:
+        return f"PED-{int(pedido.numeroPedido)}"
+    return f"PED-{int(pedido.idPedido):06d}"
+
+
+def _numero_pedido_valor(pedido: Pedido) -> int:
+    if pedido.numeroPedido is not None:
+        return int(pedido.numeroPedido)
+    return int(pedido.idPedido)
 
 
 def _fecha_pedido_str(value: datetime | None) -> str | None:
@@ -113,8 +128,14 @@ def _ids_estado_pendiente(db: Session) -> set[int]:
     return {int(estado.idEstadoPedido) for estado in estados}
 
 
-@router.get("/pedidos", response_model=PedidoListResponse)
+def _dias_anticipacion_produccion() -> int:
+    return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
+
+
+@router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
+@limiter.limit("100/minute")
 def listar_pedidos(
+    request: Request,
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     estado: str | None = Query(None),
@@ -124,7 +145,9 @@ def listar_pedidos(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
+    assert_same_empresa(auth, empresa_id)
     base = (
         db.query(Pedido.idPedido)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -153,6 +176,8 @@ def listar_pedidos(
             .filter(
                 or_(
                     cast(Pedido.idPedido, String).like(term),
+                    cast(Pedido.numeroPedido, String).like(term),
+                    Pedido.codigoPedido.like(term),
                     Cliente.nombreCompleto.like(term),
                     Cliente.telefono.like(term),
                     Cliente.identificacion.like(term),
@@ -204,12 +229,17 @@ def listar_pedidos(
         items.append(
             PedidoListItem(
                 pedidoID=pedido_id,
-                numeroPedido=_numero_pedido_humano(pedido_id),
+                numeroPedido=_numero_pedido_valor(pedido),
+                codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+                empresaID=int(pedido.empresaID),
+                sucursalID=int(pedido.sucursalID),
                 fecha=pedido.fechaPedido,
                 fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 destinatario=str((entrega.destinatario if entrega else None) or ""),
+                fechaEntrega=(entrega.fechaEntrega if entrega else None),
+                horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
                 metodoPago=None,
@@ -222,8 +252,8 @@ def listar_pedidos(
     return PedidoListResponse(items=items, total=total, page=page, pageSize=page_size)
 
 
-@router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse)
-def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
+@router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
+def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -237,6 +267,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
 
     pedido, cliente, entrega, estado_db = row
+    assert_same_empresa(auth, int(pedido.empresaID))
 
     detalles = (
         db.query(PedidoDetalle, Producto)
@@ -258,7 +289,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
 
     return PedidoDetalleResponse(
         pedidoID=int(pedido.idPedido),
-        numeroPedido=_numero_pedido_humano(int(pedido.idPedido)),
+        numeroPedido=_numero_pedido_valor(pedido),
+        codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
         fecha=pedido.fechaPedido,
         fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
         horaPedido=_hora_pedido_str(pedido.fechaPedido),
@@ -296,8 +328,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/pedido/{pedido_id}/factura")
-def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db)):
+@router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
+def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -311,6 +343,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
 
     pedido, cliente, entrega, estado_db = row
+    assert_same_empresa(auth, int(pedido.empresaID))
     estado_nombre = str((estado_db.nombreEstado if estado_db else "") or "")
     if not _estado_permite_factura(estado_nombre):
         raise HTTPException(status_code=400, detail="La factura solo está disponible para pedidos APROBADO/PAGADO")
@@ -335,7 +368,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db)):
     )
 
     contenido_lineas = [
-        f"Pedido N°: {pedido.idPedido}",
+        f"Pedido N°: {_numero_pedido_humano(pedido)}",
         f"Fecha Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
         f"Fecha Entrega: {_fecha_hora_humano(entrega.fechaEntrega if entrega else None)}",
         f"Cliente: {str(cliente.nombreCompleto or '-')}",
@@ -367,11 +400,12 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db)):
     return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
-@router.put("/pedido/{pedido_id}/aprobar")
-def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db)):
+@router.put("/pedido/{pedido_id}/aprobar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    assert_same_empresa(auth, int(pedido.empresaID))
 
     pendientes = _ids_estado_pendiente(db)
     if pendientes and int(pedido.estadoPedidoID) not in pendientes:
@@ -384,6 +418,14 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db)):
     pedido.estadoPedidoID = estado_aprobado.idEstadoPedido
     pedido.motivoRechazo = None
     pedido.updatedAt = datetime.now(timezone.utc)
+
+    produccion = asegurar_produccion_desde_pedido_aprobado(
+        db=db,
+        pedido=pedido,
+        dias_anticipacion=_dias_anticipacion_produccion(),
+        usuario="pedido.aprobar",
+    )
+
     db.commit()
 
     return {
@@ -391,11 +433,12 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db)):
         "pedidoID": pedido_id,
         "estado": str(estado_aprobado.nombreEstado),
         "notificaProduccion": True,
+        "produccion": produccion,
     }
 
 
-@router.put("/pedido/{pedido_id}/rechazar")
-def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session = Depends(get_db)):
+@router.put("/pedido/{pedido_id}/rechazar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     motivo = (payload.motivo or "").strip()
     if not motivo:
         raise HTTPException(status_code=400, detail="El motivo de rechazo es obligatorio")
@@ -403,6 +446,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    assert_same_empresa(auth, int(pedido.empresaID))
 
     pendientes = _ids_estado_pendiente(db)
     if pendientes and int(pedido.estadoPedidoID) not in pendientes:
@@ -425,14 +469,19 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     }
 
 
-@router.post("/pedido/checkout", response_model=PedidoCheckoutResponse)
-def checkout(data: PedidoCheckoutRequest, db: Session = Depends(get_db)):
+@router.post("/pedido/checkout", response_model=PedidoCheckoutResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
+@limiter.limit("60/minute")
+def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     """Endpoint de checkout: delega la lógica transaccional al servicio de pedidos."""
+    assert_same_empresa(auth, int(data.empresaID))
     return checkout_pedido(db=db, payload=data)
 
 
-@router.post("/pedido")
-def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
+@router.post("/pedido", dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
+@limiter.limit("60/minute")
+def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+
+    assert_same_empresa(auth, int(data.empresaId))
 
     try:
 
@@ -467,7 +516,7 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
         # 3️⃣ Crear cliente (simplificado)
         cliente = Cliente(
             empresaID=data.empresaId,
-            nombres=data.cliente.nombres,
+            nombreCompleto=data.cliente.nombres,
             telefono=data.cliente.telefono,
             email=data.cliente.email,
             activo=True
@@ -479,9 +528,17 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
         # 4️⃣ Crear pedido
         fecha_pedido = datetime.now(timezone.utc)
 
+        numero_pedido, codigo_pedido = generar_numeracion_pedido(
+            db=db,
+            empresa_id=int(data.empresaId),
+            sucursal_id=int(data.sucursalId),
+        )
+
         pedido = Pedido(
             empresaID=data.empresaId,
             sucursalID=data.sucursalId,
+            numeroPedido=numero_pedido,
+            codigoPedido=codigo_pedido,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
             fechaPedidoDate=fecha_pedido.date(),
@@ -500,6 +557,8 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
             producto = next(p for p in productos_db if p.idProducto == item.productoId)
 
             detalle = PedidoDetalle(
+                empresaID=data.empresaId,
+                sucursalID=data.sucursalId,
                 pedidoID=pedido.idPedido,
                 productoID=producto.idProducto,
                 cantidad=item.cantidad,
@@ -514,6 +573,8 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
         return {
             "status": "ok",
             "idPedido": pedido.idPedido,
+            "numeroPedido": int(pedido.numeroPedido),
+            "codigoPedido": str(pedido.codigoPedido),
             "total": total
         }
 
@@ -521,17 +582,19 @@ def crear_pedido(data: PedidoCreate, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     
-@router.put("/pedido/{pedido_id}/estado/{nuevo_estado_id}")
+@router.put("/pedido/{pedido_id}/estado/{nuevo_estado_id}", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def cambiar_estado(
     pedido_id: int,
     nuevo_estado_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
 ):
     # 1️⃣ Buscar pedido
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
 
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    assert_same_empresa(auth, int(pedido.empresaID))
 
     estado_actual = pedido.estadoPedidoID
 
@@ -551,6 +614,21 @@ def cambiar_estado(
     # 3️⃣ Actualizar estado
     pedido.estadoPedidoID = nuevo_estado_id
 
+    estado_destino = (
+        db.query(EstadoPedido)
+        .filter(EstadoPedido.idEstadoPedido == nuevo_estado_id)
+        .first()
+    )
+
+    produccion = None
+    if estado_destino and str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
+        produccion = asegurar_produccion_desde_pedido_aprobado(
+            db=db,
+            pedido=pedido,
+            dias_anticipacion=_dias_anticipacion_produccion(),
+            usuario="pedido.cambiar_estado",
+        )
+
     db.commit()
 
-    return {"status": "ok", "nuevoEstado": nuevo_estado_id}
+    return {"status": "ok", "nuevoEstado": nuevo_estado_id, "produccion": produccion}

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Petalops | Arquitectura Operativa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="background-orb orb-a" aria-hidden="true"></div>
+    <div class="background-orb orb-b" aria-hidden="true"></div>
+
+    <main class="layout">
+      <header class="hero reveal">
+        <p class="eyebrow">Arquitectura | Petalops</p>
+        <h1>Petalops</h1>
+        <p class="subtitle">
+          Plataforma operativa para pedidos, produccion, domicilios, catalogo e inventario.
+        </p>
+      </header>
+
+      <section class="panel reveal delay-1">
+        <label for="apiBase">Base URL del API</label>
+        <div class="row">
+          <input id="apiBase" type="text" value="http://127.0.0.1:8001" />
+          <button id="btnPing" class="btn">Ping</button>
+          <button id="btnHealth" class="btn btn-alt">Health</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel reveal delay-2">
+          <h2>Catalogo</h2>
+          <div class="field">
+            <label for="empresaCatalogo">Empresa ID</label>
+            <input id="empresaCatalogo" type="number" value="1" min="1" />
+          </div>
+          <button id="btnCatalogo" class="btn">Consultar catalogo</button>
+        </article>
+
+        <article class="panel reveal delay-3">
+          <h2>Barrios</h2>
+          <div class="field">
+            <label for="empresaBarrio">Empresa ID</label>
+            <input id="empresaBarrio" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="sucursalBarrio">Sucursal ID</label>
+            <input id="sucursalBarrio" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="queryBarrio">Busqueda</label>
+            <input id="queryBarrio" type="text" value="ce" minlength="2" />
+          </div>
+          <button id="btnBarrios" class="btn">Buscar barrios</button>
+        </article>
+
+        <article class="panel reveal delay-4">
+          <h2>Cliente</h2>
+          <div class="field">
+            <label for="empresaCliente">Empresa ID</label>
+            <input id="empresaCliente" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="identCliente">Identificacion</label>
+            <input id="identCliente" type="text" value="123456" />
+          </div>
+          <button id="btnCliente" class="btn">Buscar cliente</button>
+        </article>
+
+        <article class="panel reveal delay-5">
+          <h2>Produccion (hoy)</h2>
+          <div class="field">
+            <label for="empresaProduccion">Empresa ID</label>
+            <input id="empresaProduccion" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="sucursalProduccion">Sucursal ID</label>
+            <input id="sucursalProduccion" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="fechaProduccion">Fecha</label>
+            <input id="fechaProduccion" type="date" />
+          </div>
+          <div class="row">
+            <button id="btnProduccionModulo" class="btn">Abrir modulo</button>
+            <button id="btnAsignarHoyManual" class="btn btn-alt">Asignar hoy</button>
+          </div>
+        </article>
+
+        <article class="panel reveal delay-6">
+          <h2>Pedidos</h2>
+          <div class="field">
+            <label for="empresaPedidos">Empresa ID</label>
+            <input id="empresaPedidos" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="sucursalPedidos">Sucursal ID (opcional)</label>
+            <input id="sucursalPedidos" type="number" value="1" min="1" />
+          </div>
+          <button id="btnPedidos" class="btn">Ver pedidos</button>
+        </article>
+      </section>
+
+      <section class="panel reveal delay-7">
+        <h2>Resultado</h2>
+        <pre id="output">Sin consultas todavia.</pre>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

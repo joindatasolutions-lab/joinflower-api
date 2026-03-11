@@ -1,5 +1,6 @@
 from sqlalchemy import Column, BigInteger, DateTime, ForeignKey, String, Text, Numeric
 from sqlalchemy.orm import relationship
+from sqlalchemy import Column, BigInteger, DateTime, ForeignKey, Integer, Numeric, String, Text
 from app.database import Base
 
 
@@ -8,9 +9,13 @@ class Entrega(Base):
 
     idEntrega = Column(BigInteger, primary_key=True, index=True)
     empresaID = Column(BigInteger, ForeignKey("Empresa.idEmpresa"), nullable=False)
+    sucursalID = Column(BigInteger, nullable=True, index=True)
     pedidoID = Column(BigInteger, ForeignKey("Pedido.idPedido"), nullable=False)
+    produccionID = Column(BigInteger, ForeignKey("Produccion.idProduccion"), nullable=True, index=True)
+    domiciliarioID = Column(BigInteger, ForeignKey("Domiciliario.idDomiciliario"), nullable=True, index=True)
     empleadoID = Column(BigInteger, ForeignKey("Empleado.idEmpleado"), nullable=True)
     estadoEntregaID = Column(BigInteger, nullable=False)
+    estado = Column(String(30), nullable=True, index=True)
     tipoEntrega = Column(String(30), nullable=True)
     destinatario = Column(String(200), nullable=True)
     telefonoDestino = Column(String(30), nullable=True)
@@ -23,7 +28,21 @@ class Entrega(Base):
     mensaje = Column(Text, nullable=True)
     firma = Column(String(150), nullable=True)
     observacionGeneral = Column(Text, nullable=True)
-    createdAt = Column(DateTime, nullable=False)
+    fechaAsignacion = Column(DateTime)
+    fechaSalida = Column(DateTime)
+    fechaEntregaProgramada = Column(DateTime)
+    fechaEntrega = Column(DateTime)
+    latitudEntrega = Column(Numeric(10, 7), nullable=True)
+    longitudEntrega = Column(Numeric(10, 7), nullable=True)
+    firmaNombre = Column(String(180), nullable=True)
+    firmaDocumento = Column(String(50), nullable=True)
+    firmaImagenUrl = Column(Text, nullable=True)
+    evidenciaFotoUrl = Column(Text, nullable=True)
+    observaciones = Column(Text, nullable=True)
+    motivoNoEntregado = Column(Text, nullable=True)
+    intentoNumero = Column(Integer, nullable=False, default=1)
+    reprogramadaPara = Column(DateTime)
+    createdAt = Column(DateTime)
     updatedAt = Column(DateTime)
     sucursalID = Column(BigInteger)
     produccionID = Column(BigInteger, ForeignKey("Produccion.idProduccion"), nullable=True)

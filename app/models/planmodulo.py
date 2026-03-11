@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 from sqlalchemy import Column, BigInteger, String, Boolean
+=======
+from sqlalchemy import BigInteger, Boolean, Column, String
+>>>>>>> origin/main
 
 from app.database import Base
 
