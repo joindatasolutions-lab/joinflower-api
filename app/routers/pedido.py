@@ -40,6 +40,10 @@ router = APIRouter()
 pedido_logger = get_logger("pedido")
 
 
+def _activo_truthy(column):
+    return func.lower(cast(column, String)).in_(["true", "t", "1"])
+
+
 def _numero_pedido_humano(pedido: Pedido) -> str:
     if pedido.codigoPedido:
         return str(pedido.codigoPedido)
@@ -116,7 +120,7 @@ def _buscar_estado_por_nombre(db: Session, *nombres: str) -> EstadoPedido | None
     nombres_upper = [nombre.upper() for nombre in nombres]
     return (
         db.query(EstadoPedido)
-        .filter(func.upper(EstadoPedido.nombreEstado).in_(nombres_upper), EstadoPedido.activo == True)
+        .filter(func.upper(EstadoPedido.nombreEstado).in_(nombres_upper), _activo_truthy(EstadoPedido.activo))
         .order_by(EstadoPedido.idEstadoPedido.asc())
         .first()
     )
@@ -125,7 +129,7 @@ def _buscar_estado_por_nombre(db: Session, *nombres: str) -> EstadoPedido | None
 def _ids_estado_pendiente(db: Session) -> set[int]:
     estados = (
         db.query(EstadoPedido)
-        .filter(func.upper(EstadoPedido.nombreEstado).in_(["PENDIENTE", "CREADO"]), EstadoPedido.activo == True)
+        .filter(func.upper(EstadoPedido.nombreEstado).in_(["PENDIENTE", "CREADO"]), _activo_truthy(EstadoPedido.activo))
         .all()
     )
     return {int(estado.idEstadoPedido) for estado in estados}

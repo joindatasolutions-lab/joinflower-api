@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import String, cast, or_
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -18,6 +18,10 @@ from app.models.producto import Producto
 from app.models.sucursal import Sucursal
 from app.models.sucursal_contador_pedido import SucursalContadorPedido
 from app.schemas.pedido import PedidoCheckoutRequest
+
+
+def _activo_truthy(column):
+    return cast(column, String).in_(["1", "true", "True", "t", "T"])
 
 
 def _normalizar_telefono_completo(indicativo: str | None, telefono: str | None) -> str | None:
@@ -111,7 +115,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             db.query(EstadoPedido)
             .filter(
                 EstadoPedido.nombreEstado == "CREADO",
-                EstadoPedido.activo == True,
+                _activo_truthy(EstadoPedido.activo),
             )
             .first()
         )
