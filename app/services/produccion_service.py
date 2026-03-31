@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import String, func
+from sqlalchemy import String, func, text
 from sqlalchemy.orm import Session
 
 from app.models.entrega import Entrega
@@ -18,6 +18,25 @@ ESTADO_CANCELADO = "Cancelado"
 
 def _activo_truthy(column):
     return func.lower(func.cast(column, String)).in_(["true", "t", "1"])
+
+
+def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
+    rows = db.execute(
+        text(
+            """
+            SELECT id_estado_produccion, lower(coalesce(codigo, nombre))
+            FROM petalops.estado_produccion
+            """
+        )
+    ).fetchall()
+
+    by_code = {str(code): int(state_id) for state_id, code in rows}
+    return {
+        "pendiente": by_code.get("pendiente", 1),
+        "en_proceso": by_code.get("en_proceso", 3),
+        "terminado": by_code.get("terminado", 4),
+        "cancelado": by_code.get("cancelado", 5),
+    }
 
 
 def estado_florista_norm(value: str | None) -> str:
@@ -206,6 +225,7 @@ def asegurar_produccion_desde_pedido_aprobado(
     dias_anticipacion: int,
     usuario: str = "system",
 ) -> dict[str, Any]:
+    estados = _resolve_estado_produccion_ids(db)
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
     fecha_programada = calcular_fecha_programada(
         fecha_entrega=(entrega.fechaEntrega if entrega else None),
@@ -217,7 +237,7 @@ def asegurar_produccion_desde_pedido_aprobado(
         db.query(Produccion)
         .filter(
             Produccion.pedidoID == pedido.idPedido,
-            func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
+            Produccion.estado != estados["cancelado"],
         )
         .first()
     )
@@ -260,7 +280,7 @@ def asegurar_produccion_desde_pedido_aprobado(
         floristaID=(int(florista.idFlorista) if florista else None),
         fechaProgramadaProduccion=fecha_programada,
         fechaAsignacion=(now_utc if florista else None),
-        estado=ESTADO_PENDIENTE,
+        estado=estados["pendiente"],
         prioridad="MEDIA",
         tiempoEstimadoMin=tiempo_estimado,
         ordenProduccion=siguiente_orden,
