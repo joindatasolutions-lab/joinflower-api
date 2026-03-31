@@ -4,18 +4,19 @@ from app.database import Base
 
 
 class Categoria(Base):
-    __tablename__ = "Categoria"
+    __tablename__ = "categoria"
+    __table_args__ = {"schema": "petalops"}
 
-    idCategoria = Column(BigInteger, primary_key=True, index=True)
-    empresaID = Column(BigInteger, ForeignKey("Empresa.idEmpresa"), nullable=False)
+    idCategoria = Column("idcategoria", BigInteger, primary_key=True, index=True)
+    empresaID = Column("empresaid", BigInteger, ForeignKey("petalops.Empresa.idEmpresa"), nullable=False)
 
-    nombreCategoria = Column(String(100), nullable=False)
-    descripcion = Column(String(250))
-    orden = Column(BigInteger)
-    activo = Column(Boolean)
+    nombreCategoria = Column("nombrecategoria", String(100), nullable=False)
+    descripcion = Column("descripcion", String(250))
+    orden = Column("orden", BigInteger)
+    activo = Column("activo", Boolean)
 
-    createdAt = Column(DateTime)
-    updatedAt = Column(DateTime)
+    createdAt = Column("createdat", DateTime)
+    updatedAt = Column("updatedat", DateTime)
 
     # Relación inversa
     productos = relationship("Producto", back_populates="categoria")

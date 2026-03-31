@@ -4,6 +4,7 @@ from app.database import Base
 
 class TransicionEstadoPedido(Base):
     __tablename__ = "TransicionEstadoPedido"
+    __table_args__ = {"schema": "petalops"}
 
     idTransicionEstadoPedido = Column(BigInteger, primary_key=True, index=True)
 

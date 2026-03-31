@@ -2,10 +2,12 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import String, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.logger import get_logger
+from app.core.ordering import sort_operativo
 from app.database import get_db
 from app.models.cliente import Cliente
 from app.models.entrega import Entrega
@@ -46,6 +48,14 @@ router = APIRouter(
     tags=["Produccion"],
     dependencies=[Depends(require_module_access("produccion", "puedeVer"))],
 )
+produccion_logger = get_logger("produccion")
+
+
+def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, "module": "produccion"},
+    )
 
 ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
@@ -214,9 +224,9 @@ def _build_items(
         q = q.filter(Produccion.fechaProgramadaProduccion == fecha_programada)
 
     if estado:
-        q = q.filter(func.upper(Produccion.estado) == _estado_produccion_norm(estado).upper())
+        q = q.filter(func.upper(func.cast(Produccion.estado, String)) == _estado_produccion_norm(estado).upper())
     elif not incluir_cancelado:
-        q = q.filter(func.upper(Produccion.estado) != "CANCELADO")
+        q = q.filter(func.upper(func.cast(Produccion.estado, String)) != "CANCELADO")
 
     rows = q.order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.ordenProduccion.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
@@ -253,7 +263,11 @@ def _build_items(
             )
         )
 
-    return items
+    return sort_operativo(
+        items,
+        due_at=lambda item: item.fechaEntrega,
+        priority=lambda item: item.prioridad,
+    )
 
 
 def _dias_anticipacion_default() -> int:
@@ -291,7 +305,7 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
             db.query(Produccion.idProduccion)
             .filter(
                 Produccion.pedidoID == pedido.idPedido,
-                func.upper(Produccion.estado) != "CANCELADO",
+                func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
             )
             .first()
         )
@@ -353,7 +367,7 @@ def listar_floristas(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    q = db.query(Florista).filter(Florista.empresaID == empresa_id)
+    q = db.query(Florista).filter(Florista.empresaID == empresa_id, func.upper(Florista.cargo) == "FLORISTA")
     if sucursal_id is not None:
         q = q.filter(Florista.sucursalID == sucursal_id)
     if solo_activos:
@@ -383,7 +397,8 @@ def listar_floristas(
 def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     florista = db.query(Florista).filter(Florista.idFlorista == florista_id).first()
     if not florista:
-        raise HTTPException(status_code=404, detail="Florista no encontrado")
+        produccion_logger.warning("Florista no encontrado. florista_id=%s", florista_id)
+        raise _err("PRODUCCION_FLORISTA_NOT_FOUND", "Florista no encontrado", status_code=404)
     assert_same_empresa(auth, int(florista.empresaID))
 
     nuevo_estado = _estado_florista_norm(payload.estado)
@@ -416,7 +431,7 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
                 Produccion.empresaID == florista.empresaID,
                 Produccion.sucursalID == florista.sucursalID,
                 Produccion.floristaID == florista.idFlorista,
-                func.upper(Produccion.estado) == "ENPRODUCCION",
+                func.upper(func.cast(Produccion.estado, String)) == "ENPRODUCCION",
             )
             .scalar()
             or 0
@@ -601,7 +616,8 @@ def kanban_produccion(
 def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
-        raise HTTPException(status_code=404, detail="Registro de producción no encontrado")
+        produccion_logger.warning("Producción no encontrada. produccion_id=%s", produccion_id)
+        raise _err("PRODUCCION_NOT_FOUND", "Registro de producción no encontrado", status_code=404)
     assert_same_empresa(auth, int(produccion.empresaID))
 
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
@@ -625,7 +641,8 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
             .first()
         )
         if not florista:
-            raise HTTPException(status_code=404, detail="Florista no encontrado")
+            produccion_logger.warning("Florista no encontrado. florista_id=%s", payload.floristaID)
+            raise _err("PRODUCCION_FLORISTA_NOT_FOUND", "Florista no encontrado", status_code=404)
     else:
         florista = _seleccionar_florista_auto(
             db,
@@ -700,7 +717,8 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
 def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
-        raise HTTPException(status_code=404, detail="Registro de producción no encontrado")
+        produccion_logger.warning("Producción no encontrada. produccion_id=%s", produccion_id)
+        raise _err("PRODUCCION_NOT_FOUND", "Registro de producción no encontrado", status_code=404)
     assert_same_empresa(auth, int(produccion.empresaID))
 
     estado_actual = _estado_produccion_norm(produccion.estado)
@@ -781,7 +799,8 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
 def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcularPedidoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
     if not pedido:
-        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+        produccion_logger.warning("Pedido no encontrado. pedido_id=%s", pedido_id)
+        raise _err("PRODUCCION_PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
     assert_same_empresa(auth, int(pedido.empresaID))
 
     produccion = (
@@ -791,7 +810,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
         .first()
     )
     if not produccion:
-        raise HTTPException(status_code=404, detail="No existe producción asociada al pedido")
+        raise _err("PRODUCCION_NOT_FOUND", "No existe producción asociada al pedido", status_code=404)
 
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido_id).first()
     tiempo_estimado = _calcular_tiempo_estimado_pedido(db, pedido_id)
@@ -1035,16 +1054,22 @@ def metricas_operacion(
 
     rows = q.all()
 
-    capacidades = (
-        db.query(func.sum(Florista.capacidadDiaria))
-        .filter(
-            Florista.empresaID == empresa_id,
-            Florista.sucursalID == (sucursal_id if sucursal_id is not None else Florista.sucursalID),
-            Florista.activo == True,
-            func.upper(Florista.estado) == "ACTIVO",
-        )
-    )
-    capacidad_total_base = int(capacidades.scalar() or 0)
+    # En el esquema actual no existe tabla florista; derivamos capacidad desde producción:
+    # número de empleados asignados únicos por día (mínimo 1 por empleado).
+    capacidad_por_dia: dict[date, int] = {}
+    for row in rows:
+        if row.fechaProgramadaProduccion is None:
+            continue
+        day = row.fechaProgramadaProduccion
+        if day not in capacidad_por_dia:
+            capacidad_por_dia[day] = 0
+    for day in list(capacidad_por_dia.keys()):
+        asignados = {
+            int(r.floristaID)
+            for r in rows
+            if r.fechaProgramadaProduccion == day and r.floristaID is not None
+        }
+        capacidad_por_dia[day] = len(asignados)
 
     by_date: dict[date, dict] = {}
     for row in rows:
@@ -1063,7 +1088,7 @@ def metricas_operacion(
     items = []
     for day in fechas:
         carga = int(by_date[day]["carga"])
-        capacidad = max(capacidad_total_base, 0)
+        capacidad = max(int(capacidad_por_dia.get(day, 0)), 0)
         utilizacion = (carga * 100.0 / capacidad) if capacidad > 0 else 0.0
         sobrecarga = max(carga - capacidad, 0)
 

@@ -31,10 +31,13 @@ from app.schemas.pedido import (
 )
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado
+from app.core.logger import get_logger
+from app.core.ordering import sort_operativo
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
 from app.middlewares.rate_limit import limiter
 
 router = APIRouter()
+pedido_logger = get_logger("pedido")
 
 
 def _numero_pedido_humano(pedido: Pedido) -> str:
@@ -146,11 +149,12 @@ def listar_pedidos(
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
-):
+):  
+
     assert_same_empresa(auth, empresa_id)
     base = (
-        db.query(Pedido.idPedido)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        db.query(Pedido.idPedido, Pedido.fechaPedido)
+        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.empresaID == empresa_id)
@@ -177,7 +181,7 @@ def listar_pedidos(
                 or_(
                     cast(Pedido.idPedido, String).like(term),
                     cast(Pedido.numeroPedido, String).like(term),
-                    Pedido.codigoPedido.like(term),
+                    func.coalesce(Pedido.codigoPedido, "").like(term),
                     Cliente.nombreCompleto.like(term),
                     Cliente.telefono.like(term),
                     Cliente.identificacion.like(term),
@@ -187,7 +191,7 @@ def listar_pedidos(
             )
         )
 
-    total = base.distinct().count()
+    total = db.query(func.count()).select_from(base.subquery()).scalar()
 
     ids_page = (
         base.distinct()
@@ -203,7 +207,7 @@ def listar_pedidos(
 
     pedido_rows = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.idPedido.in_(pedido_ids))
@@ -212,7 +216,7 @@ def listar_pedidos(
 
     detalles_rows = (
         db.query(PedidoDetalle.pedidoID, Producto.nombreProducto)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
+        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
         .filter(PedidoDetalle.pedidoID.in_(pedido_ids))
         .all()
     )
@@ -236,7 +240,7 @@ def listar_pedidos(
                 fecha=pedido.fechaPedido,
                 fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
-                cliente=str(cliente.nombreCompleto or "Cliente"),
+                cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
                 destinatario=str((entrega.destinatario if entrega else None) or ""),
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
                 horaEntrega=(entrega.rangoHora if entrega else None),
@@ -244,95 +248,132 @@ def listar_pedidos(
                 total=float(pedido.totalNeto or 0),
                 metodoPago=None,
                 estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
-                telefono=str(cliente.telefono or ""),
+                telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
             )
         )
+
+    items = sort_operativo(
+        items,
+        due_at=lambda item: item.fechaEntrega,
+        priority=lambda _: None,
+    )
 
     return PedidoListResponse(items=items, total=total, page=page, pageSize=page_size)
 
 
 @router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    row = (
-        db.query(Pedido, Cliente, Entrega, EstadoPedido)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
-        .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-        .filter(Pedido.idPedido == pedido_id)
-        .first()
-    )
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Pedido no encontrado")
-
-    pedido, cliente, entrega, estado_db = row
-    assert_same_empresa(auth, int(pedido.empresaID))
-
-    detalles = (
-        db.query(PedidoDetalle, Producto)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(PedidoDetalle.pedidoID == pedido.idPedido)
-        .all()
-    )
-
-    productos = [
-        PedidoDetalleProducto(
-            productoID=int(producto.idProducto),
-            nombreProducto=str(producto.nombreProducto or "Producto"),
-            cantidad=float(detalle.cantidad or 0),
-            precioUnitario=float(detalle.precioUnitario or 0),
-            subtotal=float(detalle.subtotal or 0),
+    try:
+        row = (
+            db.query(Pedido, Cliente, Entrega, EstadoPedido)
+            .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
+            .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
+            .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+            .filter(Pedido.idPedido == pedido_id)
+            .first()
         )
-        for detalle, producto in detalles
-    ]
 
-    return PedidoDetalleResponse(
-        pedidoID=int(pedido.idPedido),
-        numeroPedido=_numero_pedido_valor(pedido),
-        codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
-        fecha=pedido.fechaPedido,
-        fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
-        horaPedido=_hora_pedido_str(pedido.fechaPedido),
-        estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
-        empresaID=int(pedido.empresaID),
-        sucursalID=int(pedido.sucursalID),
-        motivoRechazo=pedido.motivoRechazo,
-        cliente={
-            "nombre": cliente.nombreCompleto,
-            "telefono": cliente.telefono,
-            "telefonoCompleto": getattr(cliente, "telefonoCompleto", None),
-            "email": cliente.email,
-            "identificacion": cliente.identificacion,
-            "tipoIdent": getattr(cliente, "tipoIdent", None),
-        },
-        destinatario={
-            "nombre": entrega.destinatario if entrega else None,
-            "telefono": entrega.telefonoDestino if entrega else None,
-            "direccion": entrega.direccion if entrega else None,
-            "barrio": entrega.barrioNombre if entrega else None,
-            "fechaEntrega": entrega.fechaEntrega.isoformat() if entrega and entrega.fechaEntrega else None,
-            "horaEntrega": entrega.rangoHora if entrega else None,
-            "mensajeTarjeta": entrega.mensaje if entrega else None,
-        },
-        financiero={
-            "subtotal": float(pedido.totalBruto or 0),
-            "iva": float(pedido.totalIva or 0),
-            "domicilio": 0.0,
-            "total": float(pedido.totalNeto or 0),
-            "estadoPago": None,
-            "metodoPago": None,
-            "cuentaBancaria": None,
-        },
-        productos=productos,
-    )
+        if not row:
+            pedido_logger.warning("Pedido no encontrado. pedido_id=%s", pedido_id)
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "PEDIDO_NOT_FOUND",
+                    "message": "Pedido no encontrado",
+                    "module": "pedido",
+                },
+            )
+
+        pedido, cliente, entrega, estado_db = row
+        assert_same_empresa(auth, int(pedido.empresaID))
+
+        detalles = (
+            db.query(PedidoDetalle, Producto)
+            .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
+            .filter(PedidoDetalle.pedidoID == pedido.idPedido)
+            .all()
+        )
+
+        productos = [
+            PedidoDetalleProducto(
+                productoID=int(producto.idProducto),
+                nombreProducto=str(producto.nombreProducto or "Producto"),
+                cantidad=float(detalle.cantidad or 0),
+                precioUnitario=float(detalle.precioUnitario or 0),
+                subtotal=float(detalle.subtotal or 0),
+            )
+            for detalle, producto in detalles
+        ]
+
+        return PedidoDetalleResponse(
+            pedidoID=int(pedido.idPedido),
+            numeroPedido=_numero_pedido_valor(pedido),
+            codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+            fecha=pedido.fechaPedido,
+            fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
+            horaPedido=_hora_pedido_str(pedido.fechaPedido),
+            estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
+            empresaID=int(pedido.empresaID),
+            sucursalID=int(pedido.sucursalID),
+            motivoRechazo=pedido.motivoRechazo,
+            cliente={
+                "nombre": cliente.nombreCompleto,
+                "telefono": cliente.telefono,
+                "telefonoCompleto": getattr(cliente, "telefonoCompleto", None),
+                "email": cliente.email,
+                "identificacion": cliente.identificacion,
+                "tipoIdent": getattr(cliente, "tipoIdent", None),
+            },
+            destinatario={
+                "nombre": entrega.destinatario if entrega else None,
+                "telefono": entrega.telefonoDestino if entrega else None,
+                "direccion": entrega.direccion if entrega else None,
+                "barrio": entrega.barrioNombre if entrega else None,
+                "fechaEntrega": entrega.fechaEntrega.isoformat() if entrega and entrega.fechaEntrega else None,
+                "horaEntrega": entrega.rangoHora if entrega else None,
+                "mensajeTarjeta": entrega.mensaje if entrega else None,
+            },
+            financiero={
+                "subtotal": float(pedido.totalBruto or 0),
+                "iva": float(pedido.totalIva or 0),
+                "domicilio": 0.0,
+                "total": float(pedido.totalNeto or 0),
+                "estadoPago": None,
+                "metodoPago": None,
+                "cuentaBancaria": None,
+            },
+            productos=productos,
+        )
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        pedido_logger.error("Error SQL al obtener detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_DB_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
+    except Exception:
+        pedido_logger.error("Error inesperado al obtener detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_INTERNAL_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
 
 
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.idPedido == pedido_id)
@@ -350,7 +391,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     detalles = (
         db.query(PedidoDetalle, Producto)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
+        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
         .filter(PedidoDetalle.pedidoID == pedido.idPedido)
         .all()
     )

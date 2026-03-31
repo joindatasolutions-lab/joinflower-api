@@ -40,6 +40,11 @@ class LoginResponse(BaseModel):
     user: AuthMeResponse
 
 
+class ImpersonateRequest(BaseModel):
+    empresaID: int
+    sucursalID: int | None = None
+
+
 class TokenPayload(BaseModel):
     userID: int
     empresaID: int

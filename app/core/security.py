@@ -1,17 +1,18 @@
-import os
+﻿import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from passlib import exc
 from passlib.context import CryptContext
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.permisomodulo import PermisoModulo
-from app.models.planmodulo import PlanModulo
+from app.models.PermisoModulo import PermisoModulo
+from app.models.PlanModulo import PlanModulo
 from app.models.rol import Rol
 from app.models.usuario import Usuario
 from app.schemas.auth import AuthContext
@@ -29,11 +30,19 @@ GLOBAL_JOIN_LOGINS = {
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
+def _safe_int(value, default=None):
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def auth_schema_error() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Esquema de autenticación no inicializado. Ejecuta sql/alter_auth_multitenant.sql",
+        detail="Esquema de autenticaciÃ³n no inicializado. Ejecuta sql/alter_auth_multitenant.sql",
     )
 
 
@@ -114,47 +123,84 @@ def create_access_token(*, user_id: int, empresa_id: int, sucursal_id: int | Non
 
 
 def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
+    table_row = db.execute(
+        text(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'petalops'
+              AND lower(table_name) = 'empresa'
+            ORDER BY CASE WHEN table_name = 'empresa' THEN 0 ELSE 1 END
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not table_row:
+        return {"exists": False, "planID": None, "estado": None}
+
+    table_name = str(table_row[0])
+
+    cols_rows = db.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'petalops'
+              AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).all()
+    cols = {str(row[0]) for row in cols_rows}
+
+    id_col = (
+        "id_empresa" if "id_empresa" in cols
+        else ("idempresa" if "idempresa" in cols else ("idEmpresa" if "idEmpresa" in cols else None))
+    )
+    plan_col = (
+        "plan_id" if "plan_id" in cols
+        else ("planid" if "planid" in cols else ("planID" if "planID" in cols else None))
+    )
+    estado_col = "estado" if "estado" in cols else None
+
+    if id_col is None:
+        return {"exists": False, "planID": None, "estado": None}
+
+    q_table = f'"{table_name}"'
+    q_id_col = f'"{id_col}"'
+    plan_select = f'"{plan_col}" AS plan_id' if plan_col else "NULL AS plan_id"
+    estado_select = f'"{estado_col}" AS estado' if estado_col else "NULL AS estado"
+
     try:
         row = db.execute(
-            text("SELECT idEmpresa, planID, estado FROM Empresa WHERE idEmpresa = :empresa_id LIMIT 1"),
+            text(
+                f"SELECT {q_id_col} AS empresa_id, {plan_select}, {estado_select} "
+                f"FROM petalops.{q_table} WHERE {q_id_col} = :empresa_id LIMIT 1"
+            ),
             {"empresa_id": int(empresa_id)},
         ).mappings().first()
-    except SQLAlchemyError:
-        try:
-            row = db.execute(
-                text("SELECT idEmpresa FROM Empresa WHERE idEmpresa = :empresa_id LIMIT 1"),
-                {"empresa_id": int(empresa_id)},
-            ).mappings().first()
-        except SQLAlchemyError as exc:
-            raise auth_schema_error() from exc
-
-        if not row:
-            return {"exists": False, "planID": None, "estado": None}
-        return {"exists": True, "planID": None, "estado": None}
+    except SQLAlchemyError as exc:
+        print(f"âŒ ERROR en load_empresa_auth_meta: {exc}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if not row:
         return {"exists": False, "planID": None, "estado": None}
-
     return {
         "exists": True,
-        "planID": (int(row.get("planID")) if row.get("planID") is not None else None),
+        "planID": (int(row.get("plan_id")) if row.get("plan_id") is not None else None),
         "estado": row.get("estado"),
     }
-
 
 def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, bool] | None:
     try:
         rows = db.execute(
-            text(
-                """
-                SELECT modulo, activo
-                FROM EmpresaModulo
-                WHERE empresaID = :empresa_id
-                """
-            ),
+            text("SELECT modulo, activo FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
             {"empresa_id": int(empresa_id)},
         ).mappings().all()
-    except SQLAlchemyError:
+    except SQLAlchemyError as e:
+        print(f"âŒ ERROR en load_empresa_module_overrides: {e}")
+        db.rollback()
         return None
 
     if not rows:
@@ -170,16 +216,12 @@ def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, boo
 def load_usuario_module_overrides(db: Session, user_id: int) -> dict[str, bool] | None:
     try:
         rows = db.execute(
-            text(
-                """
-                SELECT modulo, activo
-                FROM UsuarioModulo
-                WHERE userID = :user_id
-                """
-            ),
+            text("SELECT modulo, activo FROM petalops.usuario_modulo WHERE usuario_id = :user_id"),
             {"user_id": int(user_id)},
         ).mappings().all()
-    except SQLAlchemyError:
+    except SQLAlchemyError as e:
+        print(f"âŒ ERROR en load_usuario_module_overrides: {e}")
+        db.rollback()
         return None
 
     if not rows:
@@ -190,110 +232,145 @@ def load_usuario_module_overrides(db: Session, user_id: int) -> dict[str, bool] 
         for row in rows
         if row.get("modulo")
     }
-
-
 def _build_auth_context(db: Session, payload: dict) -> AuthContext:
-    user_id = int(payload.get("userID"))
-    empresa_id = int(payload.get("empresaID"))
-    rol_id = int(payload.get("rolID"))
+    user_id = _safe_int(payload.get("userID"))
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalido o expirado")
+
+    empresa_id = _safe_int(payload.get("empresaID"), 0)
+    rol_id = _safe_int(payload.get("rolID"), 0)
     sucursal_id = payload.get("sucursalID")
     plan_id = payload.get("planID")
 
     usuario = (
         db.query(Usuario)
-        .filter(
-            Usuario.idUsuario == user_id,
-            Usuario.empresaID == empresa_id,
-            Usuario.estado == "Activo",
-        )
+        .filter(Usuario.idusuario == user_id)
         .first()
     )
     if not usuario:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario inválido o inactivo")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario invalido o inactivo")
+    if str(usuario.estado or "").strip().upper() != "ACTIVO":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario invalido o inactivo")
 
-    empresa_meta = load_empresa_auth_meta(db, empresa_id)
-    if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+    is_superadmin_user = bool(getattr(usuario, "esSuperadmin", False))
+    if not is_superadmin_user and is_global_join_login(usuario.login):
+        is_superadmin_user = True
 
-    rol = (
-        db.query(Rol)
-        .filter(Rol.idRol == rol_id, Rol.empresaID == empresa_id)
-        .first()
-    )
-    if not rol:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol inválido para la empresa")
-
-    permisos_rows = db.query(PermisoModulo).filter(PermisoModulo.rolID == rol_id).all()
-    permisos: dict[str, dict[str, bool]] = {}
-    for row in permisos_rows:
-        modulo = normalize_module_name(row.modulo)
-        permisos[modulo] = {
-            "puedeVer": bool(row.puedeVer),
-            "puedeCrear": bool(row.puedeCrear),
-            "puedeEditar": bool(row.puedeEditar),
-            "puedeEliminar": bool(row.puedeEliminar),
+    if is_superadmin_user:
+        empresa_id = _safe_int(usuario.empresaID, 0)
+        rol_id = _safe_int(usuario.rolID, 0)
+        effective_plan_id = None
+        rol_nombre = "super_admin"
+        # Superadmin no depende de plan para acceder a módulos.
+        modulos_plan: set[str] = {
+            "pedidos",
+            "produccion",
+            "domicilios",
+            "catalogo",
+            "usuarios",
+            "inventario",
+            "reportes",
         }
-
-    effective_plan_id = empresa_meta["planID"] if empresa_meta["planID"] is not None else (int(plan_id) if plan_id is not None else None)
-    plan_modules_rows = []
-    if effective_plan_id is not None:
-        plan_modules_rows = db.query(PlanModulo).filter(PlanModulo.planID == effective_plan_id).all()
-
-    if plan_modules_rows:
-        modulos_plan = {
-            normalize_module_name(row.modulo)
-            for row in plan_modules_rows
-            if bool(row.activo)
+        permisos: dict[str, dict[str, bool]] = {
+            modulo: {
+                "puedeVer": True,
+                "puedeCrear": True,
+                "puedeEditar": True,
+                "puedeEliminar": True,
+            }
+            for modulo in modulos_plan
         }
     else:
-        # If the plan matrix does not exist yet, do not block modules by plan.
-        modulos_plan = set(permisos.keys())
+        if usuario.empresaID is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario invalido o inactivo")
+        if int(usuario.empresaID) != int(empresa_id):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token invalido o expirado")
 
-    overrides = load_empresa_module_overrides(db, empresa_id)
-    if overrides is not None:
-        # Empresa overrides are partial toggles over plan modules, not a full replacement.
-        for modulo, activo in overrides.items():
-            if bool(activo):
-                modulos_plan.add(modulo)
-            else:
-                modulos_plan.discard(modulo)
+        empresa_meta = load_empresa_auth_meta(db, empresa_id)
+        if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
 
-    user_overrides = load_usuario_module_overrides(db, user_id)
-    if user_overrides is not None:
-        modulos_usuario = {modulo for modulo, activo in user_overrides.items() if activo}
-        modulos_plan = modulos_plan.intersection(modulos_usuario)
+        rol = (
+            db.query(Rol)
+            .filter(Rol.idRol == rol_id, Rol.empresaID == empresa_id)
+            .first()
+        )
+        if not rol:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol invalido para la empresa")
 
-        for modulo, data in permisos.items():
-            if modulo not in modulos_usuario:
-                data["puedeVer"] = False
-                data["puedeCrear"] = False
-                data["puedeEditar"] = False
-                data["puedeEliminar"] = False
+        rol_nombre = str(rol.nombreRol or "SinRol")
+
+        permisos_rows = db.query(PermisoModulo).filter(PermisoModulo.rolID == rol_id).all()
+        permisos = {}
+        for row in permisos_rows:
+            modulo = normalize_module_name(row.modulo)
+            permisos[modulo] = {
+                "puedeVer": bool(row.puedeVer),
+                "puedeCrear": bool(row.puedeCrear),
+                "puedeEditar": bool(row.puedeEditar),
+                "puedeEliminar": bool(row.puedeEliminar),
+            }
+
+        effective_plan_id = (
+            empresa_meta["planID"]
+            if empresa_meta["planID"] is not None
+            else _safe_int(plan_id)
+        )
+        plan_modules_rows = []
+        if effective_plan_id is not None:
+            plan_modules_rows = db.query(PlanModulo).filter(PlanModulo.planID == effective_plan_id).all()
+
+        if plan_modules_rows:
+            modulos_plan = {
+                normalize_module_name(row.modulo)
+                for row in plan_modules_rows
+                if bool(row.activo)
+            }
+        else:
+            modulos_plan = set(permisos.keys())
+
+        overrides = load_empresa_module_overrides(db, empresa_id)
+        if overrides is not None:
+            for modulo, activo in overrides.items():
+                if bool(activo):
+                    modulos_plan.add(modulo)
+                else:
+                    modulos_plan.discard(modulo)
+
+        user_overrides = load_usuario_module_overrides(db, user_id)
+        if user_overrides is not None:
+            modulos_usuario = {modulo for modulo, activo in user_overrides.items() if activo}
+            modulos_plan = modulos_plan.intersection(modulos_usuario)
+
+            for modulo, data in permisos.items():
+                if modulo not in modulos_usuario:
+                    data["puedeVer"] = False
+                    data["puedeCrear"] = False
+                    data["puedeEditar"] = False
+                    data["puedeEliminar"] = False
 
     return AuthContext(
         userID=user_id,
         empresaID=empresa_id,
-        sucursalID=(int(usuario.sucursalID) if usuario.sucursalID is not None else (int(sucursal_id) if sucursal_id is not None else None)),
+        sucursalID=(_safe_int(usuario.sucursalID) if usuario.sucursalID is not None else _safe_int(sucursal_id)),
         rolID=rol_id,
         planID=effective_plan_id,
-        rol=str(rol.nombreRol or "SinRol"),
+        rol=rol_nombre,
         nombre=str(usuario.nombre or ""),
         login=str(usuario.login or ""),
         email=str(usuario.email or ""),
-        esGlobalJoin=is_global_join_login(usuario.login),
+        esGlobalJoin=(is_global_join_login(usuario.login) or is_superadmin_user),
         ultimoLogin=usuario.ultimoLogin,
         permisos=permisos,
         modulosActivosPlan=modulos_plan,
     )
-
-
 def get_current_auth_context(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> AuthContext:
     credentials_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token inválido o expirado",
+        detail="Token invalido o expirado",
     )
 
     try:
@@ -308,23 +385,28 @@ def get_current_auth_context(
     try:
         return _build_auth_context(db, payload)
     except SQLAlchemyError as exc:
-        raise auth_schema_error() from exc
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 def assert_same_empresa(auth: AuthContext, empresa_id: int):
+    if is_super_admin_context(auth):
+        return
     if int(auth.empresaID) != int(empresa_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado por ámbito de empresa")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acceso denegado por Ã¡mbito de empresa")
 
 
 def require_module_access(module: str, action: str = "puedeVer"):
     module_normalized = normalize_module_name(module)
 
     def dependency(auth: AuthContext = Depends(get_current_auth_context)) -> AuthContext:
+        if is_super_admin_context(auth):
+            return auth
+
         if module_normalized not in auth.modulosActivosPlan:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Módulo '{module}' no disponible en el plan")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"MÃ³dulo '{module}' no disponible en el plan")
 
         if not auth.can(module_normalized, action):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Sin permiso {action} para módulo '{module}'")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Sin permiso {action} para mÃ³dulo '{module}'")
 
         return auth
 
@@ -341,3 +423,5 @@ def require_global_join_user(auth: AuthContext = Depends(get_current_auth_contex
     if not is_super_admin_context(auth):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo usuario global JOIN puede acceder")
     return auth
+
+

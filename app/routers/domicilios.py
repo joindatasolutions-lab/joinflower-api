@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.logger import get_logger
+from app.core.ordering import sort_operativo
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
 from app.database import get_db
 from app.models.cliente import Cliente
@@ -38,6 +40,14 @@ router = APIRouter(
     tags=["Domicilios"],
     dependencies=[Depends(require_module_access("domicilios", "puedeVer"))],
 )
+domicilios_logger = get_logger("domicilios")
+
+
+def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, "module": "domicilios"},
+    )
 
 
 def _numero_pedido_valor(pedido: Pedido) -> int:
@@ -56,6 +66,7 @@ def listar_domiciliarios(
 ):
     assert_same_empresa(auth, empresa_id)
     q = db.query(Domiciliario).filter(Domiciliario.empresaID == empresa_id)
+    q = q.filter(func.upper(Domiciliario.cargo) == "DOMICILIARIO")
     if sucursal_id is not None:
         q = q.filter(Domiciliario.sucursalID == sucursal_id)
     if solo_activos:
@@ -67,7 +78,7 @@ def listar_domiciliarios(
             DomiciliarioItem(
                 idDomiciliario=int(row.idDomiciliario),
                 nombre=str(row.nombre or ""),
-                telefono=str(row.telefono or "") or None,
+                telefono=None,
                 activo=bool(row.activo),
             )
             for row in rows
@@ -100,7 +111,7 @@ def listar_admin(
 
     estado_filtro = domicilio_service.estado_from_filtro(filtro)
     if estado_filtro:
-        q = q.filter(func.upper(Entrega.estado) == estado_filtro.upper())
+        q = q.filter(Entrega.estadoEntregaID == domicilio_service.estado_id(estado_filtro))
 
     rango = domicilio_service.filtro_rango_fecha(filtro, fecha)
     if rango:
@@ -111,7 +122,7 @@ def listar_admin(
 
     items: list[DomicilioAdminItem] = []
     for entrega, pedido, cliente, produccion, domiciliario in rows:
-        estado = domicilio_service.estado_norm(entrega.estado)
+        estado = domicilio_service.estado_norm(entrega.estadoEntregaID)
         lat, lng = domicilio_service.payload_lat_lng(entrega)
         items.append(
             DomicilioAdminItem(
@@ -138,6 +149,11 @@ def listar_admin(
             )
         )
 
+    items = sort_operativo(
+        items,
+        due_at=lambda item: item.fechaEntregaProgramada,
+        priority=lambda item: item.prioridad,
+    )
     return DomicilioAdminListResponse(items=items, total=len(items))
 
 
@@ -150,33 +166,34 @@ def asignar_domiciliario(
 ):
     entrega = db.query(Entrega).filter(Entrega.idEntrega == entrega_id).first()
     if not entrega:
-        raise HTTPException(status_code=404, detail="Entrega no encontrada")
+        domicilios_logger.warning("Entrega no encontrada. entrega_id=%s", entrega_id)
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada", status_code=404)
     assert_same_empresa(auth, int(entrega.empresaID))
 
-    estado_actual = domicilio_service.estado_norm(entrega.estado)
+    estado_actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
     if payload.domiciliarioID is None:
         entrega.domiciliarioID = None
-        entrega.estado = ESTADO_PENDIENTE
+        entrega.estadoEntregaID = domicilio_service.estado_id(ESTADO_PENDIENTE)
     else:
         domiciliario = db.query(Domiciliario).filter(Domiciliario.idDomiciliario == payload.domiciliarioID).first()
         if not domiciliario or int(domiciliario.empresaID) != int(entrega.empresaID):
-            raise HTTPException(status_code=400, detail="Domiciliario invalido para la empresa")
+            raise _err("DOMICILIO_DOMICILIARIO_INVALID", "Domiciliario invalido para la empresa", status_code=400)
 
         if entrega.sucursalID and int(domiciliario.sucursalID) != int(entrega.sucursalID):
-            raise HTTPException(status_code=400, detail="Domiciliario no pertenece a la sucursal de la entrega")
+            raise _err("DOMICILIO_SCOPE_INVALID", "Domiciliario no pertenece a la sucursal de la entrega", status_code=400)
 
         nuevo_estado = ESTADO_ASIGNADO
         if estado_actual not in {ESTADO_PENDIENTE, ESTADO_ASIGNADO, ESTADO_NO_ENTREGADO}:
-            raise HTTPException(status_code=400, detail=f"No se puede asignar desde estado {estado_actual}")
+            raise _err("DOMICILIO_TRANSITION_INVALID", f"No se puede asignar desde estado {estado_actual}", status_code=400)
 
         entrega.domiciliarioID = int(domiciliario.idDomiciliario)
         entrega.fechaAsignacion = datetime.now(timezone.utc)
-        entrega.estado = nuevo_estado
+        entrega.estadoEntregaID = domicilio_service.estado_id(nuevo_estado)
 
     entrega.updatedAt = datetime.now(timezone.utc)
     db.commit()
 
-    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=domicilio_service.estado_norm(entrega.estado))
+    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=domicilio_service.estado_norm(entrega.estadoEntregaID))
 
 
 @router.put("/{entrega_id}/en-ruta", response_model=DomicilioActionResponse, dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))])
@@ -188,16 +205,17 @@ def marcar_en_ruta(
 ):
     entrega = db.query(Entrega).filter(Entrega.idEntrega == entrega_id).first()
     if not entrega:
-        raise HTTPException(status_code=404, detail="Entrega no encontrada")
+        domicilios_logger.warning("Entrega no encontrada. entrega_id=%s", entrega_id)
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada", status_code=404)
     assert_same_empresa(auth, int(entrega.empresaID))
 
-    actual = domicilio_service.estado_norm(entrega.estado)
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
     domicilio_service.assert_transition_allowed(actual, ESTADO_EN_RUTA)
 
     if not entrega.domiciliarioID:
-        raise HTTPException(status_code=400, detail="Debes asignar un domiciliario antes de salir a ruta")
+        raise _err("DOMICILIO_DOMICILIARIO_REQUIRED", "Debes asignar un domiciliario antes de salir a ruta", status_code=400)
 
-    entrega.estado = ESTADO_EN_RUTA
+    entrega.estadoEntregaID = domicilio_service.estado_id(ESTADO_EN_RUTA)
     entrega.fechaSalida = datetime.now(timezone.utc)
     entrega.updatedAt = datetime.now(timezone.utc)
     db.commit()
@@ -214,13 +232,14 @@ def marcar_entregado(
 ):
     entrega = db.query(Entrega).filter(Entrega.idEntrega == entrega_id).first()
     if not entrega:
-        raise HTTPException(status_code=404, detail="Entrega no encontrada")
+        domicilios_logger.warning("Entrega no encontrada. entrega_id=%s", entrega_id)
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada", status_code=404)
     assert_same_empresa(auth, int(entrega.empresaID))
 
-    actual = domicilio_service.estado_norm(entrega.estado)
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
     domicilio_service.assert_transition_allowed(actual, ESTADO_ENTREGADO)
 
-    entrega.estado = ESTADO_ENTREGADO
+    entrega.estadoEntregaID = domicilio_service.estado_id(ESTADO_ENTREGADO)
     entrega.fechaEntrega = datetime.now(timezone.utc)
     entrega.firmaNombre = payload.firmaNombre.strip()
     entrega.firmaDocumento = payload.firmaDocumento.strip()
@@ -244,13 +263,14 @@ def marcar_no_entregado(
 ):
     entrega = db.query(Entrega).filter(Entrega.idEntrega == entrega_id).first()
     if not entrega:
-        raise HTTPException(status_code=404, detail="Entrega no encontrada")
+        domicilios_logger.warning("Entrega no encontrada. entrega_id=%s", entrega_id)
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada", status_code=404)
     assert_same_empresa(auth, int(entrega.empresaID))
 
-    actual = domicilio_service.estado_norm(entrega.estado)
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
     domicilio_service.assert_transition_allowed(actual, ESTADO_NO_ENTREGADO)
 
-    entrega.estado = ESTADO_NO_ENTREGADO
+    entrega.estadoEntregaID = domicilio_service.estado_id(ESTADO_NO_ENTREGADO)
     entrega.motivoNoEntregado = payload.motivo.strip()
     entrega.observaciones = (payload.observaciones or "").strip() or entrega.observaciones
     entrega.intentoNumero = max(int(entrega.intentoNumero or 1), 1) + 1
@@ -282,7 +302,11 @@ def listar_mis_entregas(
             Entrega.empresaID == empresa_id,
             Entrega.domiciliarioID == domiciliario_id,
             func.coalesce(Entrega.reprogramadaPara, Entrega.fechaEntregaProgramada, Entrega.fechaEntrega).between(start, end),
-            func.upper(Entrega.estado).in_([ESTADO_ASIGNADO.upper(), ESTADO_EN_RUTA.upper(), ESTADO_NO_ENTREGADO.upper()]),
+            Entrega.estadoEntregaID.in_([
+                domicilio_service.estado_id(ESTADO_ASIGNADO),
+                domicilio_service.estado_id(ESTADO_EN_RUTA),
+                domicilio_service.estado_id(ESTADO_NO_ENTREGADO),
+            ]),
         )
         .order_by(func.coalesce(Entrega.reprogramadaPara, Entrega.fechaEntregaProgramada, Entrega.fechaEntrega).asc())
     )
@@ -305,10 +329,15 @@ def listar_mis_entregas(
                 barrio=str(entrega.barrioNombre or "") or None,
                 telefonoDestino=str(entrega.telefonoDestino or "") or None,
                 mensaje=str(entrega.mensaje or "") or None,
-                estado=domicilio_service.estado_norm(entrega.estado),
+                estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
                 horaEntrega=str(entrega.rangoHora or "") or None,
                 fechaEntregaProgramada=(entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega),
             )
         )
 
+    items = sort_operativo(
+        items,
+        due_at=lambda item: item.fechaEntregaProgramada,
+        priority=lambda _: None,
+    )
     return DomicilioCourierListResponse(items=items, total=len(items))

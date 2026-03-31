@@ -1,5 +1,5 @@
 -- Seed rapido de empresas para pruebas multi-tenant
--- Ejecutar sobre la base activa (ejemplo: joindata_app)
+-- Ejecutar sobre la base activa (ejempl)
 -- Nota: usa IDs explicitos para facilitar pruebas y filtros.
 
 -- Variante principal (schema con nombreComercial, planID, estado)

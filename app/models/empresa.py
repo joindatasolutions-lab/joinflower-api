@@ -4,6 +4,8 @@ from app.database import Base
 
 
 class Empresa(Base):
-    __tablename__ = "Empresa"
+    __table_args__ = {"schema": "petalops"}
+    __tablename__ = "empresa"
 
-    idEmpresa = Column(BigInteger, primary_key=True, index=True)
+    # Mantener nombre de atributo legacy.
+    idEmpresa = Column("id_empresa", BigInteger, primary_key=True, index=True)

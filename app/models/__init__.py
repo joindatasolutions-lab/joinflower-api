@@ -12,11 +12,12 @@ from .produccion import Produccion
 from .produccionhistorial import ProduccionHistorial
 from .rol import Rol
 from .usuario import Usuario
-from .permisomodulo import PermisoModulo
-from .planmodulo import PlanModulo
+from .PermisoModulo import PermisoModulo
+from .PlanModulo import PlanModulo
 from .domiciliario import Domiciliario
 from .usuariomodulo import UsuarioModulo
 from .proveedor import Proveedor
 from .inventario import Inventario
 from .movimientoinventario import MovimientoInventario
+from .insumo import Insumo
 from .sucursal_contador_pedido import SucursalContadorPedido

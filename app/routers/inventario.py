@@ -2,13 +2,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import String, func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
 from app.database import get_db
 from app.models.inventario import Inventario
+from app.models.insumo import Insumo
 from app.models.movimientoinventario import MovimientoInventario
 from app.models.proveedor import Proveedor
 from app.schemas.inventario import (
@@ -33,6 +34,23 @@ router = APIRouter(
 )
 
 
+def _has_column(db: Session, table_name: str, column_name: str) -> bool:
+    result = db.execute(
+        text(
+            """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'petalops'
+          AND table_name = :table_name
+          AND column_name = :column_name
+        LIMIT 1
+        """
+        ),
+        {"table_name": str(table_name), "column_name": str(column_name)},
+    ).first()
+    return result is not None
+
+
 def _status_stock(activo: bool, stock_actual: Decimal, stock_minimo: Decimal) -> str:
     if not bool(activo):
         return "Inactivo"
@@ -43,21 +61,33 @@ def _status_stock(activo: bool, stock_actual: Decimal, stock_minimo: Decimal) ->
     return "Disponible"
 
 
-def _to_item(row: Inventario, proveedor_nombre: str | None = None) -> InventarioItem:
+def _to_item(
+    row: Inventario,
+    *,
+    codigo: str | None = None,
+    nombre: str | None = None,
+    categoria: str | None = None,
+    subcategoria: str | None = None,
+    color: str | None = None,
+    descripcion: str | None = None,
+    proveedor_id: int | None = None,
+    proveedor_nombre: str | None = None,
+    codigo_proveedor: str | None = None,
+) -> InventarioItem:
     stock_actual = Decimal(row.stockActual or 0)
     stock_minimo = Decimal(row.stockMinimo or 0)
     return InventarioItem(
         inventarioID=int(row.idInventario),
-        empresaID=int(row.empresaID),
-        codigo=str(row.codigo or ""),
-        nombre=str(row.nombre or ""),
-        categoria=str(row.categoria or ""),
-        subcategoria=(str(row.subcategoria) if row.subcategoria is not None else None),
-        color=(str(row.color) if row.color is not None else None),
-        descripcion=(str(row.descripcion) if row.descripcion is not None else None),
-        proveedorID=(int(row.proveedorID) if row.proveedorID is not None else None),
+        empresaID=(int(row.empresaID) if row.empresaID is not None else 0),
+        codigo=str(codigo or f"INS-{int(row.insumoID)}"),
+        nombre=str(nombre or f"Insumo {int(row.insumoID)}"),
+        categoria=str(categoria or "Insumos"),
+        subcategoria=(str(subcategoria) if subcategoria is not None else None),
+        color=(str(color) if color is not None else None),
+        descripcion=(str(descripcion) if descripcion is not None else None),
+        proveedorID=(int(proveedor_id) if proveedor_id is not None else None),
         proveedor=proveedor_nombre,
-        codigoProveedor=(str(row.codigoProveedor) if row.codigoProveedor is not None else None),
+        codigoProveedor=(str(codigo_proveedor) if codigo_proveedor is not None else None),
         stockActual=stock_actual,
         stockMinimo=stock_minimo,
         valorUnitario=Decimal(row.valorUnitario or 0),
@@ -88,7 +118,10 @@ def listar_proveedores(
 ):
     assert_same_empresa(auth, empresa_id)
 
-    query = db.query(Proveedor).filter(Proveedor.empresaID == empresa_id)
+    has_empresa_scope = _has_column(db, "proveedor", "empresa_id")
+    query = db.query(Proveedor)
+    if has_empresa_scope:
+        query = query.filter(Proveedor.empresaID == empresa_id)
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
@@ -119,14 +152,17 @@ def crear_proveedor(
     assert_same_empresa(auth, empresa_id)
 
     now = datetime.now(timezone.utc)
-    proveedor = Proveedor(
-        empresaID=int(empresa_id),
-        nombreProveedor=payload.nombre.strip(),
-        codigoProveedor=(payload.codigoProveedor.strip() if payload.codigoProveedor else None),
-        activo=bool(payload.activo),
-        createdAt=now,
-        updatedAt=now,
-    )
+    proveedor_kwargs = {
+        "nombreProveedor": payload.nombre.strip(),
+        "codigoProveedor": (payload.codigoProveedor.strip() if payload.codigoProveedor else None),
+        "activo": bool(payload.activo),
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    if _has_column(db, "proveedor", "empresa_id"):
+        proveedor_kwargs["empresaID"] = int(empresa_id)
+
+    proveedor = Proveedor(**proveedor_kwargs)
     db.add(proveedor)
     try:
         db.commit()
@@ -157,31 +193,43 @@ def listar_inventario(
     assert_same_empresa(auth, empresa_id)
 
     query = (
-        db.query(Inventario, Proveedor)
-        .outerjoin(Proveedor, Proveedor.idProveedor == Inventario.proveedorID)
+        db.query(Inventario, Insumo, Proveedor)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .outerjoin(Proveedor, Proveedor.idProveedor == Insumo.proveedorID)
         .filter(Inventario.empresaID == empresa_id)
     )
 
     if categoria:
-        query = query.filter(func.upper(Inventario.categoria) == categoria.strip().upper())
+        query = query.filter(func.upper(Insumo.unidadMedida) == categoria.strip().upper())
 
     if proveedor_id is not None:
-        query = query.filter(Inventario.proveedorID == int(proveedor_id))
+        query = query.filter(Proveedor.idProveedor == int(proveedor_id))
 
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
-            Inventario.codigo.like(term)
-            | Inventario.nombre.like(term)
-            | Inventario.subcategoria.like(term)
-            | Inventario.color.like(term)
-            | Inventario.descripcion.like(term)
-            | Inventario.codigoProveedor.like(term)
+            func.cast(Inventario.idInventario, String).like(term)
+            | func.cast(Inventario.insumoID, String).like(term)
+            | Insumo.nombreInsumo.like(term)
+            | Insumo.codigoBarra.like(term)
+            | Insumo.unidadMedida.like(term)
+            | Proveedor.codigoProveedor.like(term)
             | Proveedor.nombreProveedor.like(term)
         )
 
-    rows = query.order_by(Inventario.categoria.asc(), Inventario.nombre.asc()).all()
-    items = [_to_item(item, (str(proveedor.nombreProveedor) if proveedor else None)) for item, proveedor in rows]
+    rows = query.order_by(Insumo.unidadMedida.asc(), Insumo.nombreInsumo.asc()).all()
+    items = [
+        _to_item(
+            item,
+            codigo=(str(insumo.codigoBarra) if insumo and insumo.codigoBarra else None),
+            nombre=(str(insumo.nombreInsumo) if insumo and insumo.nombreInsumo else None),
+            categoria=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else "Insumos"),
+            proveedor_id=(int(proveedor.idProveedor) if proveedor else None),
+            proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
+            codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
+        )
+        for item, insumo, proveedor in rows
+    ]
 
     if solo_criticos:
         items = [item for item in items if item.estadoStock in {"Bajo Stock", "Agotado"}]
@@ -260,7 +308,7 @@ def crear_item_inventario(
         proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
         proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
 
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
 
 
 @router.put("/{inventario_id}", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -309,7 +357,7 @@ def actualizar_item_inventario(
         proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
         proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
 
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
 
 
 @router.put("/{inventario_id}/stock", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -380,7 +428,7 @@ def ajustar_stock_inventario(
         proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
         proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
 
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
 
 
 @router.put("/{inventario_id}/activo", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -413,7 +461,7 @@ def actualizar_activo_inventario(
         proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
         proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
 
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
 
 
 @router.get("/movimientos", response_model=MovimientoInventarioListResponse)
@@ -428,8 +476,9 @@ def listar_movimientos_inventario(
     assert_same_empresa(auth, empresa_id)
 
     query = (
-        db.query(MovimientoInventario, Inventario)
+        db.query(MovimientoInventario, Inventario, Insumo)
         .join(Inventario, Inventario.idInventario == MovimientoInventario.inventarioID)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
         .filter(MovimientoInventario.empresaID == empresa_id)
     )
 
@@ -443,8 +492,8 @@ def listar_movimientos_inventario(
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
-            Inventario.codigo.like(term)
-            | Inventario.nombre.like(term)
+            Insumo.nombreInsumo.like(term)
+            | Insumo.codigoBarra.like(term)
             | MovimientoInventario.motivo.like(term)
         )
 
@@ -454,14 +503,14 @@ def listar_movimientos_inventario(
         MovimientoInventarioItem(
             movimientoID=int(mov.idMovimiento),
             inventarioID=int(mov.inventarioID),
-            codigo=str(inv.codigo or ""),
-            nombre=str(inv.nombre or ""),
+            codigo=(str(ins.codigoBarra) if ins and ins.codigoBarra else f"INS-{int(inv.insumoID)}"),
+            nombre=(str(ins.nombreInsumo) if ins and ins.nombreInsumo else f"Insumo {int(inv.insumoID)}"),
             tipoMovimiento=str(mov.tipoMovimiento or ""),
             cantidad=Decimal(mov.cantidad or 0),
             fecha=mov.fecha,
             motivo=(str(mov.motivo) if mov.motivo is not None else None),
             usuarioID=(int(mov.usuarioID) if mov.usuarioID is not None else None),
         )
-        for mov, inv in rows
+        for mov, inv, ins in rows
     ]
     return MovimientoInventarioListResponse(items=items, total=len(items))

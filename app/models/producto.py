@@ -4,24 +4,20 @@ from app.database import Base
 
 
 class Producto(Base):
-    __tablename__ = "Producto"
+    __tablename__ = "producto"
+    __table_args__ = {"schema": "petalops"}
 
-    idProducto = Column(BigInteger, primary_key=True, index=True)
-    empresaID = Column(BigInteger)
-    codigoProducto = Column(String(50))
-    categoriaID = Column(BigInteger, ForeignKey("Categoria.idCategoria"))
-    nombreProducto = Column(String(200))
-    descripcion = Column(Text)
-    precioBase = Column("precio", Numeric(12,2))
-    porcentajeIva = Column(Numeric(5,2))
-    ivaIncluido = Column(Boolean)
-    tiempoBaseProduccionMin = Column(BigInteger)
-    nivelComplejidad = Column(String(30))
-    activo = Column(Boolean)
-    esDestacado = Column(Boolean)
-    ordenCatalogo = Column(BigInteger)
-    imagenUrl = Column(String(500))
-    createdAt = Column(DateTime)
-    updatedAt = Column(DateTime)
+    idProducto = Column("id_producto", BigInteger, primary_key=True, index=True)
+    empresaID = Column("empresa_id", BigInteger)
+    categoriaID = Column("categoria_id", BigInteger, ForeignKey("petalops.categoria.idcategoria"))
+    nombreProducto = Column("nombre_producto", String(200))
+    descripcion = Column("descripcion", Text)
+    porcentajeIva = Column("porcentaje_iva", Numeric(5,2))
+    ivaIncluido = Column("iva_incluido", Boolean)
+    tiempoBaseMin = Column("tiempo_base_min", BigInteger)
+    nivelComplejidad = Column("nivel_complejidad", String(30))
+    activo = Column("activo", Boolean)
+    createdAt = Column("created_at", DateTime)
+    updatedAt = Column("updated_at", DateTime)
 
     categoria = relationship("Categoria", back_populates="productos")

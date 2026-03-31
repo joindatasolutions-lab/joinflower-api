@@ -7,5 +7,5 @@ CREATE TABLE IF NOT EXISTS UsuarioModulo (
   updatedAt DATETIME NOT NULL,
   PRIMARY KEY (userID, modulo),
   INDEX idx_usuariomodulo_activo (userID, activo),
-  CONSTRAINT fk_usuariomodulo_usuario FOREIGN KEY (userID) REFERENCES Usuario(idUsuario)
+  CONSTRAINT fk_usuariomodulo_usuario FOREIGN KEY (userID) REFERENCES Usuario(idusuario)
 );

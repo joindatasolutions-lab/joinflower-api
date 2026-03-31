@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 import json
 import os
 
@@ -7,6 +7,7 @@ from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.logger import get_logger
 from app.core.security import (
     JWT_EXPIRE_MINUTES,
     auth_schema_error,
@@ -43,6 +44,7 @@ from app.schemas.auth import (
     EmpresaOption,
     LoginRequest,
     LoginResponse,
+    ImpersonateRequest,
     RoleListResponse,
     RoleOption,
     SucursalListResponse,
@@ -55,10 +57,18 @@ from app.schemas.auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+auth_logger = get_logger("auth")
+
+
+def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, "module": "auth"},
+    )
 
 
 STRUCTURAL_ROLES = {"super_admin", "join_superadmin", "empresa_admin", "admin"}
-DEFAULT_MODULES = {"pedidos", "produccion", "domicilios", "catalogo", "usuarios", "inventario"}
+DEFAULT_MODULES = {"pedidos", "produccion", "domicilios", "catalogo", "usuarios", "inventario","reportes"}
 
 DEFAULT_ROLE_MODULE_POLICY = {
     "Admin": {
@@ -91,41 +101,53 @@ DEFAULT_ROLE_MODULE_POLICY = {
     },
 }
 
+def _safe_int(value, default=None):
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def _ensure_empresa_modulo_table(db: Session):
+    db.rollback()
     db.execute(
         text(
             """
-            CREATE TABLE IF NOT EXISTS EmpresaModulo (
-              empresaID BIGINT NOT NULL,
+            CREATE TABLE IF NOT EXISTS petalops.empresa_modulo (
+              empresa_id BIGINT NOT NULL,
               modulo VARCHAR(80) NOT NULL,
-              activo TINYINT(1) NOT NULL DEFAULT 1,
-              updatedAt DATETIME NOT NULL,
-              PRIMARY KEY (empresaID, modulo),
-              INDEX idx_empresa_modulo_activo (empresaID, activo),
-              CONSTRAINT fk_empresamodulo_empresa FOREIGN KEY (empresaID) REFERENCES Empresa(idEmpresa)
-            )
+              activo BOOLEAN NOT NULL DEFAULT TRUE,
+              updatedat TIMESTAMP NOT NULL,
+              PRIMARY KEY (empresa_id, modulo),
+              CONSTRAINT fk_empresamodulo_empresa FOREIGN KEY (empresa_id)
+                REFERENCES petalops.empresa(id_empresa)
+            );
             """
         )
     )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_empresa_modulo_activo ON petalops.empresa_modulo (empresa_id, activo);"))
 
 
 def _ensure_usuario_modulo_table(db: Session):
+    db.rollback()
     db.execute(
         text(
             """
-            CREATE TABLE IF NOT EXISTS UsuarioModulo (
-              userID BIGINT NOT NULL,
+            CREATE TABLE IF NOT EXISTS petalops.usuario_modulo (
+              usuario_id BIGINT NOT NULL,
               modulo VARCHAR(80) NOT NULL,
-              activo TINYINT(1) NOT NULL DEFAULT 1,
-              updatedAt DATETIME NOT NULL,
-              PRIMARY KEY (userID, modulo),
-              INDEX idx_usuariomodulo_activo (userID, activo),
-              CONSTRAINT fk_usuariomodulo_usuario FOREIGN KEY (userID) REFERENCES Usuario(idUsuario)
-            )
+              activo BOOLEAN NOT NULL DEFAULT TRUE,
+              updated_at TIMESTAMP NOT NULL,
+              PRIMARY KEY (usuario_id, modulo),
+              CONSTRAINT fk_usuariomodulo_usuario FOREIGN KEY (usuario_id)
+                REFERENCES petalops.usuario(id_usuario)
+            );
             """
         )
     )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_usuariomodulo_activo ON petalops.usuario_modulo (usuario_id, activo);"))
 
 
 def _plan_user_limit(plan_id: int | None) -> int:
@@ -153,25 +175,25 @@ def _audit_user_action(db: Session, actor, action: str, target: Usuario, extra: 
     db.execute(
         text(
             """
-            INSERT INTO UsuarioAuditoria (
-              empresaID,
-              actorUserID,
-              actorLogin,
-              accion,
-              targetUserID,
-              targetLogin,
-              detalleJSON,
-              createdAt
+            INSERT INTO "UsuarioAuditoria" (
+                "empresaID",
+                "actorUserID",
+                "actorLogin",
+                "accion",
+                "targetUserID",
+                "targetLogin",
+                "detalleJSON",
+                "createdAt"
             )
             VALUES (
-              :empresa_id,
-              :actor_user_id,
-              :actor_login,
-              :accion,
-              :target_user_id,
-              :target_login,
-              :detalle,
-              NOW()
+                :empresa_id,
+                :actor_user_id,
+                :actor_login,
+                :accion,
+                :target_user_id,
+                :target_login,
+                :detalle,
+                CURRENT_TIMESTAMP
             )
             """
         ),
@@ -180,7 +202,7 @@ def _audit_user_action(db: Session, actor, action: str, target: Usuario, extra: 
             "actor_user_id": int(actor.userID),
             "actor_login": str(actor.login),
             "accion": action,
-            "target_user_id": int(target.idUsuario),
+            "target_user_id": int(target.idusuario),
             "target_login": str(target.login),
             "detalle": payload,
         },
@@ -188,23 +210,20 @@ def _audit_user_action(db: Session, actor, action: str, target: Usuario, extra: 
 
 
 def _resolve_empresa_id_for_module_admin(db: Session, empresa_id: int) -> int:
-    row = db.execute(
-        text("SELECT idEmpresa FROM Empresa WHERE idEmpresa = :empresa_id LIMIT 1"),
-        {"empresa_id": int(empresa_id)},
-    ).first()
-    if not row:
+    empresa_meta = load_empresa_auth_meta(db, int(empresa_id))
+    if not empresa_meta.get("exists"):
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
-    return int(row[0])
+    return int(empresa_id)
 
 
 def _load_empresa_columns(db: Session) -> set[str]:
     rows = db.execute(
         text(
             """
-            SELECT COLUMN_NAME
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = 'Empresa'
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'petalops'
+              AND table_name = 'empresa'
             """
         )
     ).all()
@@ -221,7 +240,7 @@ def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaMod
     if effective_plan_id is not None:
         try:
             plan_rows = db.execute(
-                text("SELECT modulo, activo FROM PlanModulo WHERE planID = :plan_id"),
+                text("SELECT modulo, activo FROM petalops.plan_modulo WHERE plan_id = :plan_id"),
                 {"plan_id": int(effective_plan_id)},
             ).all()
             has_plan_rows = len(plan_rows) > 0
@@ -235,9 +254,9 @@ def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaMod
             text(
                 """
                 SELECT DISTINCT pm.modulo
-                FROM PermisoModulo pm
-                JOIN Rol r ON r.idRol = pm.rolID
-                WHERE r.empresaID = :empresa_id
+                FROM petalops.permiso_modulo pm
+                JOIN petalops.rol r ON r.id_rol = pm.rol_id
+                WHERE r.empresa_id = :empresa_id
                 """
             ),
             {"empresa_id": int(empresa_id)},
@@ -249,7 +268,7 @@ def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaMod
 
     _ensure_empresa_modulo_table(db)
     override_rows = db.execute(
-        text("SELECT modulo, activo FROM EmpresaModulo WHERE empresaID = :empresa_id"),
+        text("SELECT modulo, activo FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
         {"empresa_id": int(empresa_id)},
     ).all()
     overrides = {}
@@ -264,7 +283,7 @@ def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaMod
     if effective_plan_id is not None:
         try:
             active_rows = db.execute(
-                text("SELECT modulo FROM PlanModulo WHERE planID = :plan_id AND activo = 1"),
+                text("SELECT modulo FROM petalops.plan_modulo WHERE plan_id = :plan_id AND activo = TRUE"),
                 {"plan_id": int(effective_plan_id)},
             ).all()
             active_from_plan = {normalize_module_name(modulo) for (modulo,) in active_rows}
@@ -301,9 +320,9 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
         db.execute(
             text(
                 """
-                INSERT INTO Rol (empresaID, nombreRol)
+                INSERT INTO petalops.rol (empresa_id, nombre_rol)
                 VALUES (:empresa_id, :nombre_rol)
-                ON DUPLICATE KEY UPDATE nombreRol = VALUES(nombreRol)
+                ON CONFLICT (empresa_id, nombre_rol) DO UPDATE SET nombre_rol = EXCLUDED.nombre_rol
                 """
             ),
             {"empresa_id": int(empresa_id), "nombre_rol": role_name},
@@ -312,9 +331,9 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
         role_row = db.execute(
             text(
                 """
-                SELECT idRol
-                FROM Rol
-                WHERE empresaID = :empresa_id AND nombreRol = :nombre_rol
+                SELECT id_rol
+                FROM petalops.rol
+                WHERE empresa_id = :empresa_id AND nombre_rol = :nombre_rol
                 LIMIT 1
                 """
             ),
@@ -329,22 +348,25 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
             db.execute(
                 text(
                     """
-                    INSERT INTO PermisoModulo (rolID, modulo, puedeVer, puedeCrear, puedeEditar, puedeEliminar)
-                    VALUES (:rol_id, :modulo, :puede_ver, :puede_crear, :puede_editar, :puede_eliminar)
-                    ON DUPLICATE KEY UPDATE
-                      puedeVer = VALUES(puedeVer),
-                      puedeCrear = VALUES(puedeCrear),
-                      puedeEditar = VALUES(puedeEditar),
-                      puedeEliminar = VALUES(puedeEliminar)
+                    INSERT INTO petalops.permiso_modulo
+                    (rol_id, modulo, puede_ver, puede_crear, puede_editar, puede_eliminar, empresa_id)
+                    VALUES
+                    (:rol_id,:modulo,:puede_ver,:puede_crear,:puede_editar,:puede_eliminar,:empresa_id)
+                    ON CONFLICT (rol_id, modulo) DO UPDATE SET
+                      puede_ver = EXCLUDED.puede_ver,
+                      puede_crear = EXCLUDED.puede_crear,
+                      puede_editar = EXCLUDED.puede_editar,
+                      puede_eliminar = EXCLUDED.puede_eliminar
                     """
                 ),
                 {
                     "rol_id": role_id,
                     "modulo": normalize_module_name(modulo),
-                    "puede_ver": int(bool(puede_ver)),
-                    "puede_crear": int(bool(puede_crear)),
-                    "puede_editar": int(bool(puede_editar)),
-                    "puede_eliminar": int(bool(puede_eliminar)),
+                    "puede_ver": bool(puede_ver),
+                    "puede_crear": bool(puede_crear),
+                    "puede_editar": bool(puede_editar),
+                    "puede_eliminar": bool(puede_eliminar),
+                    "empresa_id": int(empresa_id)
                 },
             )
 
@@ -355,45 +377,58 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     try:
         usuario = (
             db.query(Usuario)
-            .filter(
-                Usuario.login == payload.login.strip().lower(),
-                Usuario.estado == "Activo",
-            )
+            .filter(func.lower(Usuario.login) == payload.login.strip().lower())
             .first()
         )
         if not usuario:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
 
-        empresa_meta = load_empresa_auth_meta(db, int(usuario.empresaID))
-        if not empresa_meta["exists"]:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
-
-        if not is_empresa_activa(empresa_meta.get("estado")):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa suspendida o inactiva")
+        is_superadmin_user = bool(getattr(usuario, "esSuperadmin", False))
+        empresa_id = _safe_int(usuario.empresaID)
+        rol_id = _safe_int(usuario.rolID)
 
         if str(usuario.estado or "").strip().upper() != "ACTIVO":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
 
         if not verify_password(payload.password, str(usuario.passwordHash or "")):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
 
-        rol = (
-            db.query(Rol)
-            .filter(Rol.idRol == usuario.rolID, Rol.empresaID == usuario.empresaID)
-            .first()
-        )
-        if not rol:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol inválido para la empresa")
+        if is_superadmin_user:
+            empresa_meta = {"exists": True, "planID": None, "estado": "ACTIVA"}
+        else:
+            if empresa_id is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario sin empresa asignada")
+            if rol_id is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario sin rol asignado")
+
+            empresa_meta = load_empresa_auth_meta(db, empresa_id)
+            if not empresa_meta["exists"]:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales invalidas")
+
+            if not is_empresa_activa(empresa_meta.get("estado")):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa suspendida o inactiva")
+
+            rol = (
+                db.query(Rol)
+                .filter(Rol.idRol == rol_id, Rol.empresaID == empresa_id)
+                .first()
+            )
+            if not rol:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol invalido para la empresa")
 
         usuario.ultimoLogin = datetime.now(timezone.utc)
         usuario.updatedAt = datetime.now(timezone.utc)
         db.commit()
 
+        user_id = _safe_int(usuario.idusuario)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Usuario sin identificador valido")
+
         token = create_access_token(
-            user_id=int(usuario.idUsuario),
-            empresa_id=int(usuario.empresaID),
-            sucursal_id=(int(usuario.sucursalID) if usuario.sucursalID is not None else None),
-            rol_id=int(usuario.rolID),
+            user_id=user_id,
+            empresa_id=(empresa_id if empresa_id is not None else 0),
+            sucursal_id=_safe_int(usuario.sucursalID),
+            rol_id=(rol_id if rol_id is not None else 0),
             plan_id=empresa_meta["planID"],
         )
 
@@ -405,12 +440,68 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
             user=AuthMeResponse(**auth_context.to_me_response()),
         )
     except SQLAlchemyError as exc:
-        raise auth_schema_error() from exc
-
+        auth_logger.error("Error SQL en login", exc_info=True)
+        raise _err("AUTH_LOGIN_DB_ERROR", "Error interno del servidor", status_code=500)
 
 @router.get("/me", response_model=AuthMeResponse)
 def me(auth=Depends(get_current_auth_context)):
     return AuthMeResponse(**auth.to_me_response())
+
+
+@router.post("/impersonate", response_model=LoginResponse)
+def impersonate_empresa(
+    payload: ImpersonateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(require_global_join_user),
+):
+    empresa_id = int(payload.empresaID)
+    empresa_meta = load_empresa_auth_meta(db, empresa_id)
+    if not empresa_meta.get("exists"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empresa no encontrada")
+    if not is_empresa_activa(empresa_meta.get("estado")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa suspendida o inactiva")
+
+    superadmin = db.query(Usuario).filter(Usuario.idusuario == int(auth.userID)).first()
+    if not superadmin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Superusuario no encontrado")
+
+    token = create_access_token(
+        user_id=int(superadmin.idusuario),
+        empresa_id=empresa_id,
+        sucursal_id=(int(payload.sucursalID) if payload.sucursalID is not None else None),
+        rol_id=(int(superadmin.rolID) if superadmin.rolID is not None else 0),
+        plan_id=empresa_meta.get("planID"),
+    )
+    auth_context = get_current_auth_context(token=token, db=db)
+    return LoginResponse(
+        accessToken=token,
+        expiresIn=JWT_EXPIRE_MINUTES * 60,
+        user=AuthMeResponse(**auth_context.to_me_response()),
+    )
+
+
+@router.post("/impersonate/stop", response_model=LoginResponse)
+def stop_impersonation(
+    db: Session = Depends(get_db),
+    auth=Depends(require_global_join_user),
+):
+    superadmin = db.query(Usuario).filter(Usuario.idusuario == int(auth.userID)).first()
+    if not superadmin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Superusuario no encontrado")
+
+    token = create_access_token(
+        user_id=int(superadmin.idusuario),
+        empresa_id=0,
+        sucursal_id=None,
+        rol_id=0,
+        plan_id=None,
+    )
+    auth_context = get_current_auth_context(token=token, db=db)
+    return LoginResponse(
+        accessToken=token,
+        expiresIn=JWT_EXPIRE_MINUTES * 60,
+        user=AuthMeResponse(**auth_context.to_me_response()),
+    )
 
 
 @router.post("/usuarios", response_model=UserCreateResponse)
@@ -451,7 +542,7 @@ def crear_usuario(
             .first()
         )
         if not rol:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol inválido para la empresa")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol invalido para la empresa")
 
         role_name = normalize_role_name(rol.nombreRol)
         if not is_super_admin_context(auth) and role_name in STRUCTURAL_ROLES:
@@ -459,17 +550,17 @@ def crear_usuario(
 
         empresa_meta = load_empresa_auth_meta(db, target_empresa_id)
         active_users = (
-            db.query(func.count(Usuario.idUsuario))
+            db.query(func.count(Usuario.idusuario))
             .filter(Usuario.empresaID == target_empresa_id, Usuario.estado == "Activo")
             .scalar()
         )
         max_users = _plan_user_limit(empresa_meta.get("planID"))
         if int(active_users or 0) >= max_users:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Límite de usuarios alcanzado para el plan ({max_users})")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"LÃ­mite de usuarios alcanzado para el plan ({max_users})")
 
         sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
         if not sucursal:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal inválida")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
 
         available_modules = {
             item.modulo
@@ -496,18 +587,18 @@ def crear_usuario(
         if payload.modulosAcceso is not None:
             _ensure_usuario_modulo_table(db)
             db.execute(
-                text("DELETE FROM UsuarioModulo WHERE userID = :user_id"),
-                {"user_id": int(usuario.idUsuario)},
+                text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"),
+                {"user_id": int(usuario.idusuario)},
             )
             for modulo in selected_user_modules:
                 db.execute(
                     text(
                         """
-                        INSERT INTO UsuarioModulo (userID, modulo, activo, updatedAt)
-                        VALUES (:user_id, :modulo, 1, NOW())
+                        INSERT INTO petalops.usuario_modulo (usuario_id, modulo, activo, updated_at)
+                        VALUES (:user_id, :modulo, TRUE, CURRENT_TIMESTAMP)
                         """
                     ),
-                    {"user_id": int(usuario.idUsuario), "modulo": modulo},
+                    {"user_id": int(usuario.idusuario), "modulo": modulo},
                 )
         _audit_user_action(
             db,
@@ -525,7 +616,7 @@ def crear_usuario(
 
         return UserCreateResponse(
             status="ok",
-            userID=int(usuario.idUsuario),
+            userID=int(usuario.idusuario),
             empresaID=int(usuario.empresaID),
             sucursalID=int(usuario.sucursalID),
             login=str(usuario.login),
@@ -536,7 +627,8 @@ def crear_usuario(
         )
     except SQLAlchemyError as exc:
         db.rollback()
-        raise auth_schema_error() from exc
+        auth_logger.error("Error SQL creando usuario", exc_info=True)
+        raise _err("AUTH_USER_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
 
 
 @router.get("/usuarios", response_model=UserListResponse)
@@ -570,10 +662,10 @@ def listar_usuarios(
             | Usuario.email.like(term)
         )
 
-    rows = query.order_by(Usuario.empresaID.asc(), Usuario.sucursalID.asc(), Usuario.idUsuario.desc()).all()
+    rows = query.order_by(Usuario.empresaID.asc(), Usuario.sucursalID.asc(), Usuario.idusuario.desc()).all()
     items = [
         UserListItem(
-            userID=int(usuario.idUsuario),
+            userID=int(usuario.idusuario),
             empresaID=int(usuario.empresaID),
             sucursalID=int(usuario.sucursalID),
             nombre=str(usuario.nombre or ""),
@@ -596,7 +688,7 @@ def actualizar_estado_usuario(
     db: Session = Depends(get_db),
     auth=Depends(require_admin_role),
 ):
-    usuario = db.query(Usuario).filter(Usuario.idUsuario == user_id).first()
+    usuario = db.query(Usuario).filter(Usuario.idusuario == user_id).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
@@ -626,7 +718,7 @@ def actualizar_estado_usuario(
 
     return UserCreateResponse(
         status="ok",
-        userID=int(usuario.idUsuario),
+        userID=int(usuario.idusuario),
         empresaID=int(usuario.empresaID),
         sucursalID=int(usuario.sucursalID),
         login=str(usuario.login),
@@ -669,16 +761,11 @@ def listar_sucursales(
     rows = db.execute(
         text(
             """
-            SELECT DISTINCT sucursalID
-            FROM (
-                SELECT sucursalID FROM Pedido WHERE empresaID = :empresa_id
-                UNION ALL
-                SELECT sucursalID FROM Produccion WHERE empresaID = :empresa_id
-                UNION ALL
-                SELECT sucursalID FROM Usuario WHERE empresaID = :empresa_id
-            ) t
-            WHERE sucursalID IS NOT NULL
-            ORDER BY sucursalID ASC
+            SELECT id_sucursal
+            FROM petalops.sucursal
+            WHERE empresa_id = :empresa_id
+              AND id_sucursal IS NOT NULL
+            ORDER BY id_sucursal ASC
             """
         ),
         {"empresa_id": empresa_id},
@@ -699,19 +786,20 @@ def listar_empresas(
         rows = db.execute(
             text(
                 """
-                SELECT idEmpresa, COALESCE(nombreComercial, CONCAT('Empresa ', idEmpresa)) AS nombre
-                FROM Empresa
-                ORDER BY idEmpresa ASC
+                SELECT id_empresa, COALESCE(nombre_comercial, nombre_empresa) AS nombre
+                FROM petalops.empresa
+                ORDER BY id_empresa ASC
                 """
             )
         ).all()
     except SQLAlchemyError:
+        db.rollback()
         rows = db.execute(
             text(
                 """
-                SELECT idEmpresa, CONCAT('Empresa ', idEmpresa) AS nombre
-                FROM Empresa
-                ORDER BY idEmpresa ASC
+                SELECT id_empresa, CONCAT('Empresa ', id_empresa) AS nombre
+                FROM petalops.empresa
+                ORDER BY id_empresa ASC
                 """
             )
         ).all()
@@ -733,25 +821,26 @@ def listar_empresas_modulos(
         rows = db.execute(
             text(
                 """
-                SELECT idEmpresa,
-                       COALESCE(nombreComercial, CONCAT('Empresa ', idEmpresa)) AS nombre,
-                       planID,
+                SELECT id_empresa,
+                       COALESCE(nombre_comercial, nombre_empresa, CONCAT('Empresa ', id_empresa)) AS nombre,
+                       plan_id,
                        estado
-                FROM Empresa
-                ORDER BY idEmpresa ASC
+                FROM petalops.empresa
+                ORDER BY id_empresa ASC
                 """
             )
         ).all()
     except SQLAlchemyError:
+        db.rollback()
         rows = db.execute(
             text(
                 """
-                SELECT idEmpresa,
-                       CONCAT('Empresa ', idEmpresa) AS nombre,
-                       NULL AS planID,
-                       'Activo' AS estado
-                FROM Empresa
-                ORDER BY idEmpresa ASC
+                SELECT id_empresa,
+                       CONCAT('Empresa ', id_empresa) AS nombre,
+                       NULL AS plan_id,
+                       'Activo' AS "estado"
+                FROM petalops.empresa
+                ORDER BY id_empresa ASC
                 """
             )
         ).all()
@@ -759,13 +848,18 @@ def listar_empresas_modulos(
     items: list[EmpresaModuloResumenItem] = []
     for row in rows:
         empresa_id = int(row[0])
+        try:
+            modulos = _build_empresa_module_items(db, empresa_id)
+        except Exception:
+            db.rollback()  # â† limpia si falla una empresa
+            modulos = []
         items.append(
             EmpresaModuloResumenItem(
                 empresaID=empresa_id,
                 nombre=str(row[1] or f"Empresa {empresa_id}"),
                 planID=(int(row[2]) if row[2] is not None else None),
                 estado=(str(row[3]) if row[3] is not None else None),
-                items=_build_empresa_module_items(db, empresa_id),
+                items=modulos,
             )
         )
     return EmpresaModuloResumenResponse(items=items)
@@ -791,36 +885,32 @@ def crear_empresa(
             raise HTTPException(status_code=400, detail="planID debe ser mayor o igual a 1")
 
         columns = _load_empresa_columns(db)
-        if "idEmpresa" not in columns:
-            raise HTTPException(status_code=500, detail="Tabla Empresa sin columna idEmpresa")
+        if "id_empresa" not in columns:
+            raise HTTPException(status_code=500, detail="Tabla empresa sin columna id_empresa")
+        if "nombre_empresa" not in columns or "nit" not in columns:
+            raise HTTPException(status_code=500, detail="Tabla empresa sin columnas obligatorias nombre_empresa/nit")
 
-        next_id_row = db.execute(text("SELECT COALESCE(MAX(idEmpresa), 0) + 1 FROM Empresa")).first()
+        next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
-
-        insert_fields = ["idEmpresa"]
-        insert_params = [":id_empresa"]
-        values = {"id_empresa": next_empresa_id}
-
-        if "nombreComercial" in columns:
-            insert_fields.append("nombreComercial")
-            insert_params.append(":nombre")
-            values["nombre"] = nombre
-
-        if "planID" in columns:
-            insert_fields.append("planID")
-            insert_params.append(":plan_id")
-            values["plan_id"] = plan_id
-
-        if "estado" in columns:
-            insert_fields.append("estado")
-            insert_params.append(":estado")
-            values["estado"] = estado
+        nit = f"NIT-{next_empresa_id}"
 
         db.execute(
             text(
-                f"INSERT INTO Empresa ({', '.join(insert_fields)}) VALUES ({', '.join(insert_params)})"
+                """
+                INSERT INTO petalops.empresa
+                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, created_at, updated_at)
+                VALUES
+                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """
             ),
-            values,
+            {
+                "id_empresa": next_empresa_id,
+                "nombre_empresa": nombre,
+                "nit": nit,
+                "estado": 1 if estado == "Activo" else 0,
+                "nombre_comercial": nombre,
+                "plan_id": plan_id,
+            },
         )
         db.commit()
 
@@ -833,7 +923,8 @@ def crear_empresa(
         )
     except SQLAlchemyError as exc:
         db.rollback()
-        raise auth_schema_error() from exc
+        auth_logger.error("Error SQL creando empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
 
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
@@ -856,13 +947,11 @@ def listar_modulos_empresa(
         _ensure_empresa_modulo_table(db)
         items = _build_empresa_module_items(db, normalized_empresa_id)
         response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
-
-        # Configuration cache is short-lived to keep admin updates near real-time.
         set_cache(cache_key, response.model_dump(), ttl=300)
         return response
     except SQLAlchemyError as exc:
-        raise auth_schema_error() from exc
-
+        auth_logger.error("Error SQL listando modulos de empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_MODULOS_DB_ERROR", "Error interno del servidor", status_code=500)
 
 @router.put("/usuarios/modulos", response_model=EmpresaModuloUpdateResponse)
 def actualizar_modulos_empresa(
@@ -882,21 +971,16 @@ def actualizar_modulos_empresa(
 
         # Replace current configuration for this company.
         db.execute(
-            text("DELETE FROM EmpresaModulo WHERE empresaID = :empresa_id"),
+            text("DELETE FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
             {"empresa_id": empresa_id},
         )
         for modulo, activo in normalized_items:
             db.execute(
-                text(
-                    """
-                    INSERT INTO EmpresaModulo (empresaID, modulo, activo, updatedAt)
-                    VALUES (:empresa_id, :modulo, :activo, NOW())
-                    """
-                ),
+                text("INSERT INTO petalops.empresa_modulo (empresa_id, modulo, activo, updatedat) VALUES (:empresa_id, :modulo, :activo, CURRENT_TIMESTAMP)"),
                 {
                     "empresa_id": empresa_id,
                     "modulo": modulo,
-                    "activo": 1 if activo else 0,
+                    "activo": bool(activo),
                 },
             )
 
@@ -917,4 +1001,7 @@ def actualizar_modulos_empresa(
         )
     except SQLAlchemyError as exc:
         db.rollback()
-        raise auth_schema_error() from exc
+        auth_logger.error("Error SQL actualizando modulos de empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_MODULOS_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
+

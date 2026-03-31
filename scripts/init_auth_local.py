@@ -106,9 +106,8 @@ def ensure_inventario_schema(conn):
         text(
             """
             SELECT COUNT(*)
-            FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = 'Inventario'
+            FROM information_schema.tables
+            WHERE table_name = 'Inventario'
             """
         )
     ).scalar()
@@ -120,10 +119,9 @@ def ensure_inventario_schema(conn):
         for row in conn.execute(
             text(
                 """
-                SELECT COLUMN_NAME
-                FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = 'Inventario'
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'Inventario'
                 """
             )
         ).all()
@@ -140,28 +138,30 @@ def ensure_inventario_schema(conn):
         ("codigoProveedor", "VARCHAR(80) NULL"),
         ("stockMinimo", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
         ("valorUnitario", "DECIMAL(12,2) NOT NULL DEFAULT 0"),
-        ("activo", "TINYINT(1) NOT NULL DEFAULT 1"),
-        ("fechaUltimaActualizacion", "DATETIME NULL"),
+        ("activo", "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("fechaUltimaActualizacion", "TIMESTAMP NULL"),
     ]
 
     for column_name, ddl in required_columns:
         if column_name in current_columns:
             continue
-        conn.execute(text(f"ALTER TABLE Inventario ADD COLUMN {column_name} {ddl}"))
+        conn.execute(text(f'ALTER TABLE "Inventario" ADD COLUMN {column_name} {ddl}'))
 
-    index_rows = conn.execute(text("SHOW INDEX FROM Inventario")).all()
-    index_names = {str(row[2]) for row in index_rows if len(row) > 2 and row[2]}
+    index_rows = conn.execute(text("""
+        SELECT indexname FROM pg_indexes WHERE tablename = 'Inventario'
+    """)).all()
+    index_names = {str(row[0]) for row in index_rows if row and row[0]}
 
     if "idx_inventario_empresa_categoria" not in index_names:
-        conn.execute(text("CREATE INDEX idx_inventario_empresa_categoria ON Inventario (empresaID, categoria)"))
+        conn.execute(text('CREATE INDEX idx_inventario_empresa_categoria ON "Inventario" ("empresaID", "categoria")'))
     if "idx_inventario_empresa_activo" not in index_names:
-        conn.execute(text("CREATE INDEX idx_inventario_empresa_activo ON Inventario (empresaID, activo)"))
+        conn.execute(text('CREATE INDEX idx_inventario_empresa_activo ON "Inventario" ("empresaID", "activo")'))
     if "idx_inventario_empresa_stock" not in index_names:
-        conn.execute(text("CREATE INDEX idx_inventario_empresa_stock ON Inventario (empresaID, stockActual, stockMinimo)"))
+        conn.execute(text('CREATE INDEX idx_inventario_empresa_stock ON "Inventario" ("empresaID", "stockActual", "stockMinimo")'))
 
 
 def ensure_admin(conn):
-    empresa_id_row = conn.execute(text("SELECT idEmpresa FROM Empresa ORDER BY idEmpresa ASC LIMIT 1")).first()
+    empresa_id_row = conn.execute(text('SELECT "idEmpresa" FROM "Empresa" ORDER BY "idEmpresa" ASC LIMIT 1')).first()
     if not empresa_id_row:
         raise RuntimeError("No existe ninguna empresa en la tabla Empresa")
 
@@ -171,9 +171,9 @@ def ensure_admin(conn):
     conn.execute(
         text(
             """
-            UPDATE Empresa
-            SET estado = 'Activo', planID = COALESCE(planID, :plan_id), nombreComercial = COALESCE(nombreComercial, 'Empresa Demo')
-            WHERE idEmpresa = :empresa_id
+            UPDATE "Empresa"
+            SET "estado" = 'Activo', "planID" = COALESCE("planID", :plan_id), "nombreComercial" = COALESCE("nombreComercial", 'Empresa Demo')
+            WHERE "idEmpresa" = :empresa_id
             """
         ),
         {"empresa_id": empresa_id, "plan_id": 1},
@@ -185,9 +185,9 @@ def ensure_admin(conn):
         conn.execute(
             text(
                 """
-                INSERT INTO PlanModulo (planID, modulo, activo)
-                VALUES (:plan_id, :modulo, 1)
-                ON DUPLICATE KEY UPDATE activo = VALUES(activo)
+                INSERT INTO "PlanModulo" ("planID", "modulo", "activo")
+                VALUES (:plan_id, :modulo, TRUE)
+                ON CONFLICT ("planID", "modulo") DO UPDATE SET "activo" = EXCLUDED."activo"
                 """
             ),
             {"plan_id": 1, "modulo": modulo},
@@ -198,16 +198,16 @@ def ensure_admin(conn):
         conn.execute(
             text(
                 """
-                INSERT INTO Rol (empresaID, nombreRol)
+                INSERT INTO "Rol" ("empresaID", "nombreRol")
                 VALUES (:empresa_id, :nombre)
-                ON DUPLICATE KEY UPDATE nombreRol = VALUES(nombreRol)
+                ON CONFLICT ("empresaID", "nombreRol") DO UPDATE SET "nombreRol" = EXCLUDED."nombreRol"
                 """
             ),
             {"empresa_id": empresa_id, "nombre": role_name},
         )
 
         role_row = conn.execute(
-            text("SELECT idRol FROM Rol WHERE empresaID = :empresa_id AND nombreRol = :nombre LIMIT 1"),
+            text('SELECT "idRol" FROM "Rol" WHERE "empresaID" = :empresa_id AND "nombreRol" = :nombre LIMIT 1'),
             {"empresa_id": empresa_id, "nombre": role_name},
         ).first()
         if not role_row:
@@ -222,22 +222,22 @@ def ensure_admin(conn):
             conn.execute(
                 text(
                     """
-                    INSERT INTO PermisoModulo (rolID, modulo, puedeVer, puedeCrear, puedeEditar, puedeEliminar)
+                    INSERT INTO "PermisoModulo" ("rolID", "modulo", "puedeVer", "puedeCrear", "puedeEditar", "puedeEliminar")
                     VALUES (:rol_id, :modulo, :puede_ver, :puede_crear, :puede_editar, :puede_eliminar)
-                    ON DUPLICATE KEY UPDATE
-                      puedeVer = VALUES(puedeVer),
-                      puedeCrear = VALUES(puedeCrear),
-                      puedeEditar = VALUES(puedeEditar),
-                      puedeEliminar = VALUES(puedeEliminar)
+                    ON CONFLICT ("rolID", "modulo") DO UPDATE SET
+                      "puedeVer" = EXCLUDED."puedeVer",
+                      "puedeCrear" = EXCLUDED."puedeCrear",
+                      "puedeEditar" = EXCLUDED."puedeEditar",
+                      "puedeEliminar" = EXCLUDED."puedeEliminar"
                     """
                 ),
                 {
                     "rol_id": current_role_id,
                     "modulo": modulo,
-                    "puede_ver": int(bool(puede_ver)),
-                    "puede_crear": int(bool(puede_crear)),
-                    "puede_editar": int(bool(puede_editar)),
-                    "puede_eliminar": int(bool(puede_eliminar)),
+                    "puede_ver": bool(puede_ver),
+                    "puede_crear": bool(puede_crear),
+                    "puede_editar": bool(puede_editar),
+                    "puede_eliminar": bool(puede_eliminar),
                 },
             )
 
@@ -249,16 +249,16 @@ def ensure_admin(conn):
     conn.execute(
         text(
             """
-                        INSERT INTO Usuario (empresaID, sucursalID, nombre, login, email, passwordHash, rolID, estado, createdAt, updatedAt)
-                        VALUES (:empresa_id, :sucursal_id, :nombre, :login, :email, :password_hash, :rol_id, 'Activo', NOW(), NOW())
-            ON DUPLICATE KEY UPDATE
-                            sucursalID = VALUES(sucursalID),
-                            login = VALUES(login),
-              nombre = VALUES(nombre),
-              passwordHash = VALUES(passwordHash),
-              rolID = VALUES(rolID),
-              estado = 'Activo',
-              updatedAt = NOW()
+            INSERT INTO "Usuario" ("empresaID", "sucursalID", "nombre", "login", "email", "passwordHash", "rolID", "estado", "createdAt", "updatedAt")
+            VALUES (:empresa_id, :sucursal_id, :nombre, :login, :email, :password_hash, :rol_id, 'Activo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT ("empresaID", "login") DO UPDATE SET
+                "sucursalID" = EXCLUDED."sucursalID",
+                "login" = EXCLUDED."login",
+                "nombre" = EXCLUDED."nombre",
+                "passwordHash" = EXCLUDED."passwordHash",
+                "rolID" = EXCLUDED."rolID",
+                "estado" = 'Activo',
+                "updatedAt" = CURRENT_TIMESTAMP
             """
         ),
         {

@@ -33,10 +33,9 @@ def test_operational_tables_must_have_empresa_id_column():
             for row in s.execute(
                 text(
                     """
-                    SELECT TABLE_NAME
-                    FROM information_schema.TABLES
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND TABLE_TYPE = 'BASE TABLE'
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'petalops'
                     """
                 )
             ).fetchall()
@@ -46,13 +45,13 @@ def test_operational_tables_must_have_empresa_id_column():
             row[0]
             for row in s.execute(
                 text(
-                    """
-                    SELECT TABLE_NAME
-                    FROM information_schema.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND COLUMN_NAME = 'empresaID'
-                    GROUP BY TABLE_NAME
-                    """
+                                        """
+                                        SELECT table_name
+                                        FROM information_schema.columns
+                                        WHERE table_catalog = current_database()
+                                            AND column_name = 'empresaID'
+                                        GROUP BY table_name
+                                        """
                 )
             ).fetchall()
         }
@@ -82,12 +81,12 @@ def test_tables_with_empresa_id_must_not_have_nulls():
             for row in s.execute(
                 text(
                     """
-                    SELECT TABLE_NAME
-                    FROM information_schema.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND COLUMN_NAME = 'empresaID'
-                    GROUP BY TABLE_NAME
-                    ORDER BY TABLE_NAME
+                    SELECT table_name
+                    FROM information_schema.columns
+                    WHERE table_catalog = current_database()
+                        AND column_name = 'empresaID'
+                    GROUP BY table_name
+                    ORDER BY table_name
                     """
                 )
             ).fetchall()
@@ -96,7 +95,7 @@ def test_tables_with_empresa_id_must_not_have_nulls():
         offenders = []
         for table in tables_with_empresa:
             null_count = int(
-                s.execute(text(f"SELECT COUNT(*) FROM `{table}` WHERE empresaID IS NULL")).scalar() or 0
+                s.execute(text(f'SELECT COUNT(*) FROM petalops."{table}" WHERE "empresaID" IS NULL')).scalar() or 0
             )
             if null_count > 0:
                 offenders.append((table, null_count))

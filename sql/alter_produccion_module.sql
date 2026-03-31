@@ -1,28 +1,29 @@
-CREATE TABLE IF NOT EXISTS Florista (
-  idFlorista BIGINT PRIMARY KEY AUTO_INCREMENT,
-  empresaID BIGINT NOT NULL,
-  sucursalID BIGINT NOT NULL,
-  nombre VARCHAR(150) NOT NULL,
-  capacidadDiaria BIGINT NOT NULL,
-  activo TINYINT(1) NOT NULL DEFAULT 1,
-  especialidades TEXT NULL,
-  createdAt DATETIME NULL,
-  updatedAt DATETIME NULL,
-  INDEX idx_florista_empresa_sucursal_activo (empresaID, sucursalID, activo)
+CREATE TABLE IF NOT EXISTS "Florista" (
+  "idFlorista" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "empresaID" BIGINT NOT NULL,
+  "sucursalID" BIGINT NOT NULL,
+  "nombre" VARCHAR(150) NOT NULL,
+  "capacidadDiaria" BIGINT NOT NULL,
+  "activo" BOOLEAN NOT NULL DEFAULT TRUE,
+  "especialidades" TEXT,
+  "createdAt" TIMESTAMP,
+  "updatedAt" TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS Produccion (
-  idProduccion BIGINT PRIMARY KEY AUTO_INCREMENT,
-  empresaID BIGINT NOT NULL,
-  sucursalID BIGINT NOT NULL,
-  pedidoID BIGINT NOT NULL,
-  floristaID BIGINT NULL,
-  fechaProgramadaProduccion DATE NOT NULL,
-  fechaAsignacion DATETIME NULL,
-  fechaInicio DATETIME NULL,
-  fechaFinalizacion DATETIME NULL,
-  estado VARCHAR(30) NOT NULL,
-  prioridad VARCHAR(20) NOT NULL DEFAULT 'MEDIA',
+CREATE INDEX IF NOT EXISTS idx_florista_empresa_sucursal_activo ON "Florista" ("empresaID", "sucursalID", "activo");
+
+CREATE TABLE IF NOT EXISTS "Produccion" (
+  "idProduccion" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "empresaID" BIGINT NOT NULL,
+  "sucursalID" BIGINT NOT NULL,
+  "pedidoID" BIGINT NOT NULL,
+  "floristaID" BIGINT,
+  "fechaProgramadaProduccion" DATE NOT NULL,
+  "fechaAsignacion" TIMESTAMP,
+  "fechaInicio" TIMESTAMP,
+  "fechaFinalizacion" TIMESTAMP,
+  "estado" VARCHAR(30) NOT NULL,
+  "prioridad" VARCHAR(20) NOT NULL DEFAULT 'MEDIA',
   observacionesInternas TEXT NULL,
   ordenProduccion BIGINT NULL,
   createdAt DATETIME NULL,

@@ -5,6 +5,7 @@ from app.database import Base
 
 class Sucursal(Base):
     __tablename__ = "Sucursal"
+    __table_args__ = {"schema": "petalops"}
 
     idSucursal = Column(BigInteger, primary_key=True, index=True)
     empresaID = Column(BigInteger, nullable=False)

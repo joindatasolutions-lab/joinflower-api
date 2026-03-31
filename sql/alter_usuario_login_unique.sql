@@ -6,7 +6,7 @@ ALTER TABLE Usuario
 
 -- Backfill seguro para usuarios existentes.
 UPDATE Usuario
-SET login = CONCAT('user', idUsuario)
+SET login = CONCAT('user', idusuario)
 WHERE login IS NULL OR TRIM(login) = '';
 
 -- Normaliza a minusculas para consistencia en autenticacion.

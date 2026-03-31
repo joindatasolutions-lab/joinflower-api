@@ -25,8 +25,29 @@ TRANSICIONES_VALIDAS = {
     ESTADO_CANCELADO: set(),
 }
 
+# Fallback IDs when estado_entrega catalog is not seeded yet.
+ESTADO_ID_FALLBACK = {
+    ESTADO_PENDIENTE: 1,
+    ESTADO_ASIGNADO: 2,
+    ESTADO_EN_RUTA: 3,
+    ESTADO_ENTREGADO: 4,
+    ESTADO_NO_ENTREGADO: 5,
+    ESTADO_CANCELADO: 6,
+}
+ESTADO_FROM_ID_FALLBACK = {v: k for k, v in ESTADO_ID_FALLBACK.items()}
 
-def estado_norm(value: str | None) -> str:
+
+def estado_norm(value: str | int | None) -> str:
+    if value is None:
+        return ESTADO_PENDIENTE
+
+    if isinstance(value, (int, float)):
+        return ESTADO_FROM_ID_FALLBACK.get(int(value), ESTADO_PENDIENTE)
+
+    text = str(value).strip()
+    if text.isdigit():
+        return ESTADO_FROM_ID_FALLBACK.get(int(text), ESTADO_PENDIENTE)
+
     text = str(value or "").strip().upper().replace("_", "")
     if text == "PENDIENTE":
         return ESTADO_PENDIENTE
@@ -41,6 +62,13 @@ def estado_norm(value: str | None) -> str:
     if text == "CANCELADO":
         return ESTADO_CANCELADO
     return str(value or "").strip() or ESTADO_PENDIENTE
+
+
+def estado_id(value: str | int | None) -> int:
+    if isinstance(value, (int, float)):
+        return int(value)
+    normalized = estado_norm(value)
+    return ESTADO_ID_FALLBACK.get(normalized, ESTADO_ID_FALLBACK[ESTADO_PENDIENTE])
 
 
 def now_utc() -> datetime:
@@ -88,7 +116,6 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
             pedidoID=int(produccion.pedidoID),
             produccionID=int(produccion.idProduccion),
             estadoEntregaID=1,
-            estado=ESTADO_PENDIENTE,
             intentoNumero=1,
             fechaAsignacion=None,
             createdAt=current_time,
@@ -99,7 +126,7 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
     else:
         entrega.produccionID = int(produccion.idProduccion)
         entrega.sucursalID = int(produccion.sucursalID)
-        entrega.estado = estado_norm(entrega.estado) or ESTADO_PENDIENTE
+        entrega.estadoEntregaID = estado_id(entrega.estadoEntregaID)
         entrega.updatedAt = current_time
 
     if pedido and not entrega.fechaEntregaProgramada:
@@ -108,8 +135,8 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
     if not entrega.fechaEntregaProgramada and entrega.fechaEntrega:
         entrega.fechaEntregaProgramada = entrega.fechaEntrega
 
-    if not entrega.estado:
-        entrega.estado = ESTADO_PENDIENTE
+    if not entrega.estadoEntregaID:
+        entrega.estadoEntregaID = ESTADO_ID_FALLBACK[ESTADO_PENDIENTE]
 
     return entrega
 
@@ -122,7 +149,7 @@ def is_produccion_bloqueada_por_entrega_en_ruta(db, produccion_id: int) -> bool:
     )
     if not row:
         return False
-    return estado_norm(row.estado) == ESTADO_EN_RUTA
+    return estado_norm(row.estadoEntregaID) == ESTADO_EN_RUTA
 
 
 def tiempo_restante_horas(entrega: Entrega) -> int | None:

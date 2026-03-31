@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import String, func
 from sqlalchemy.orm import Session
 
 from app.models.entrega import Entrega
@@ -76,7 +76,7 @@ def count_carga_florista(
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.fechaProgramadaProduccion == fecha_programada,
-            func.upper(Produccion.estado) != "CANCELADO",
+            func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
         )
     )
     if ignore_produccion_id is not None:
@@ -98,7 +98,7 @@ def count_simultaneos_en_produccion(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
-            func.upper(Produccion.estado) == "ENPRODUCCION",
+            func.upper(func.cast(Produccion.estado, String)) == "ENPRODUCCION",
         )
     )
     if ignore_produccion_id is not None:
@@ -156,7 +156,7 @@ def seleccionar_florista_auto(
 
 def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
     rows = (
-        db.query(PedidoDetalle.cantidad, Producto.tiempoBaseProduccionMin)
+        db.query(PedidoDetalle.cantidad)
         .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
         .filter(PedidoDetalle.pedidoID == pedido_id)
         .all()
@@ -166,9 +166,9 @@ def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
         return 30
 
     total = 0
-    for cantidad, tiempo_base in rows:
+    for (cantidad,) in rows:
         qty = max(float(cantidad or 0), 0)
-        base = int(tiempo_base or 30)
+        base = 30
         total += int(round(base * qty))
 
     return max(total, 1)
@@ -213,7 +213,7 @@ def asegurar_produccion_desde_pedido_aprobado(
         db.query(Produccion)
         .filter(
             Produccion.pedidoID == pedido.idPedido,
-            func.upper(Produccion.estado) != "CANCELADO",
+            func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
         )
         .first()
     )
@@ -302,7 +302,7 @@ def asignar_pendientes_hoy(
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.fechaProgramadaProduccion == hoy,
-            func.upper(Produccion.estado) == "PENDIENTE",
+            func.upper(func.cast(Produccion.estado, String)) == "PENDIENTE",
             Produccion.floristaID.is_(None),
         )
         .order_by(Produccion.idProduccion.asc())
@@ -363,7 +363,7 @@ def reasignar_pendientes_por_indisponibilidad(
             Produccion.sucursalID == florista.sucursalID,
             Produccion.floristaID == florista.idFlorista,
             Produccion.fechaProgramadaProduccion >= hoy,
-            func.upper(Produccion.estado) == "PENDIENTE",
+            func.upper(func.cast(Produccion.estado, String)) == "PENDIENTE",
         )
         .all()
     )
