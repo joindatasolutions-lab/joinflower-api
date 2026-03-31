@@ -11,8 +11,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.permisomodulo import PermisoModulo
-from app.models.planmodulo import PlanModulo
 from app.models.rol import Rol
 from app.models.usuario import Usuario
 from app.schemas.auth import AuthContext
@@ -29,6 +27,56 @@ GLOBAL_JOIN_LOGINS = {
 }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def _quote_ident(value: str) -> str:
+    return f'"{value}"'
+
+
+def _schema_table_columns(db: Session) -> dict[str, set[str]]:
+    rows = db.execute(
+        text(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'petalops'
+            """
+        )
+    ).all()
+
+    tables: dict[str, set[str]] = {}
+    for table_name, column_name in rows:
+        tables.setdefault(str(table_name), set()).add(str(column_name))
+    return tables
+
+
+def _resolve_table_spec(
+    db: Session,
+    table_candidates: list[str],
+    column_candidates: dict[str, list[str]],
+) -> tuple[str, dict[str, str]] | tuple[None, None]:
+    tables = _schema_table_columns(db)
+    lower_tables = {name.lower(): name for name in tables}
+
+    for candidate in table_candidates:
+        actual_table = lower_tables.get(candidate.lower())
+        if not actual_table:
+            continue
+
+        actual_columns = tables[actual_table]
+        resolved_columns: dict[str, str] = {}
+        complete = True
+        for alias, options in column_candidates.items():
+            actual_column = next((option for option in options if option in actual_columns), None)
+            if not actual_column:
+                complete = False
+                break
+            resolved_columns[alias] = actual_column
+
+        if complete:
+            return actual_table, resolved_columns
+
+    return None, None
 
 def _safe_int(value, default=None):
     try:
@@ -77,7 +125,10 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         return False
 
     if password_hash.startswith("$2"):
-        return pwd_context.verify(plain_password, password_hash)
+        try:
+            return pwd_context.verify(plain_password, password_hash)
+        except (exc.UnknownHashError, ValueError):
+            return False
 
     # Transitional fallback for legacy records with plain passwords.
     return plain_password == password_hash
@@ -194,8 +245,27 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
 
 def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, bool] | None:
     try:
+        table_name, columns = _resolve_table_spec(
+            db,
+            ["empresa_modulo", "empresamodulo", "EmpresaModulo"],
+            {
+                "empresa_id": ["empresa_id", "empresaid", "empresaID"],
+                "modulo": ["modulo"],
+                "activo": ["activo"],
+            },
+        )
+        if not table_name or not columns:
+            return None
+
         rows = db.execute(
-            text("SELECT modulo, activo FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
+            text(
+                f"""
+                SELECT {_quote_ident(columns["modulo"])} AS modulo,
+                       {_quote_ident(columns["activo"])} AS activo
+                FROM petalops.{_quote_ident(table_name)}
+                WHERE {_quote_ident(columns["empresa_id"])} = :empresa_id
+                """
+            ),
             {"empresa_id": int(empresa_id)},
         ).mappings().all()
     except SQLAlchemyError as e:
@@ -215,8 +285,27 @@ def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, boo
 
 def load_usuario_module_overrides(db: Session, user_id: int) -> dict[str, bool] | None:
     try:
+        table_name, columns = _resolve_table_spec(
+            db,
+            ["usuario_modulo", "usuariomodulo", "UsuarioModulo"],
+            {
+                "user_id": ["usuario_id", "userid", "userID"],
+                "modulo": ["modulo"],
+                "activo": ["activo"],
+            },
+        )
+        if not table_name or not columns:
+            return None
+
         rows = db.execute(
-            text("SELECT modulo, activo FROM petalops.usuario_modulo WHERE usuario_id = :user_id"),
+            text(
+                f"""
+                SELECT {_quote_ident(columns["modulo"])} AS modulo,
+                       {_quote_ident(columns["activo"])} AS activo
+                FROM petalops.{_quote_ident(table_name)}
+                WHERE {_quote_ident(columns["user_id"])} = :user_id
+                """
+            ),
             {"user_id": int(user_id)},
         ).mappings().all()
     except SQLAlchemyError as e:
@@ -300,15 +389,42 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
 
         rol_nombre = str(rol.nombreRol or "SinRol")
 
-        permisos_rows = db.query(PermisoModulo).filter(PermisoModulo.rolID == rol_id).all()
+        permiso_table, permiso_columns = _resolve_table_spec(
+            db,
+            ["permiso_modulo", "permisomodulo", "PermisoModulo"],
+            {
+                "rol_id": ["rol_id", "rolid", "rolID"],
+                "modulo": ["modulo"],
+                "puede_ver": ["puede_ver", "puedever", "puedeVer"],
+                "puede_crear": ["puede_crear", "puedecrear", "puedeCrear"],
+                "puede_editar": ["puede_editar", "puedeeditar", "puedeEditar"],
+                "puede_eliminar": ["puede_eliminar", "puedeeliminar", "puedeEliminar"],
+            },
+        )
+        permisos_rows = []
+        if permiso_table and permiso_columns:
+            permisos_rows = db.execute(
+                text(
+                    f"""
+                    SELECT {_quote_ident(permiso_columns["modulo"])} AS modulo,
+                           {_quote_ident(permiso_columns["puede_ver"])} AS puede_ver,
+                           {_quote_ident(permiso_columns["puede_crear"])} AS puede_crear,
+                           {_quote_ident(permiso_columns["puede_editar"])} AS puede_editar,
+                           {_quote_ident(permiso_columns["puede_eliminar"])} AS puede_eliminar
+                    FROM petalops.{_quote_ident(permiso_table)}
+                    WHERE {_quote_ident(permiso_columns["rol_id"])} = :rol_id
+                    """
+                ),
+                {"rol_id": int(rol_id)},
+            ).mappings().all()
         permisos = {}
         for row in permisos_rows:
-            modulo = normalize_module_name(row.modulo)
+            modulo = normalize_module_name(row.get("modulo"))
             permisos[modulo] = {
-                "puedeVer": bool(row.puedeVer),
-                "puedeCrear": bool(row.puedeCrear),
-                "puedeEditar": bool(row.puedeEditar),
-                "puedeEliminar": bool(row.puedeEliminar),
+                "puedeVer": bool(row.get("puede_ver")),
+                "puedeCrear": bool(row.get("puede_crear")),
+                "puedeEditar": bool(row.get("puede_editar")),
+                "puedeEliminar": bool(row.get("puede_eliminar")),
             }
 
         effective_plan_id = (
@@ -318,13 +434,33 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         )
         plan_modules_rows = []
         if effective_plan_id is not None:
-            plan_modules_rows = db.query(PlanModulo).filter(PlanModulo.planID == effective_plan_id).all()
+            plan_table, plan_columns = _resolve_table_spec(
+                db,
+                ["plan_modulo", "planmodulo", "PlanModulo"],
+                {
+                    "plan_id": ["plan_id", "planid", "planID"],
+                    "modulo": ["modulo"],
+                    "activo": ["activo"],
+                },
+            )
+            if plan_table and plan_columns:
+                plan_modules_rows = db.execute(
+                    text(
+                        f"""
+                        SELECT {_quote_ident(plan_columns["modulo"])} AS modulo,
+                               {_quote_ident(plan_columns["activo"])} AS activo
+                        FROM petalops.{_quote_ident(plan_table)}
+                        WHERE {_quote_ident(plan_columns["plan_id"])} = :plan_id
+                        """
+                    ),
+                    {"plan_id": int(effective_plan_id)},
+                ).mappings().all()
 
         if plan_modules_rows:
             modulos_plan = {
-                normalize_module_name(row.modulo)
+                normalize_module_name(row.get("modulo"))
                 for row in plan_modules_rows
-                if bool(row.activo)
+                if bool(row.get("activo"))
             }
         else:
             modulos_plan = set(permisos.keys())
