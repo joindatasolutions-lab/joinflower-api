@@ -11,8 +11,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.PermisoModulo import PermisoModulo
-from app.models.PlanModulo import PlanModulo
+from app.models.permisomodulo import PermisoModulo
+from app.models.planmodulo import PlanModulo
 from app.models.rol import Rol
 from app.models.usuario import Usuario
 from app.schemas.auth import AuthContext

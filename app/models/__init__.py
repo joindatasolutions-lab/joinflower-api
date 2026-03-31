@@ -12,8 +12,8 @@ from .produccion import Produccion
 from .produccionhistorial import ProduccionHistorial
 from .rol import Rol
 from .usuario import Usuario
-from .PermisoModulo import PermisoModulo
-from .PlanModulo import PlanModulo
+from .permisomodulo import PermisoModulo
+from .planmodulo import PlanModulo
 from .domiciliario import Domiciliario
 from .usuariomodulo import UsuarioModulo
 from .proveedor import Proveedor
