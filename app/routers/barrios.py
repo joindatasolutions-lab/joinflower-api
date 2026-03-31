@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -7,6 +8,10 @@ from app.core.security import assert_same_empresa, get_current_auth_context, req
 from app.services.cache import get_cache, set_cache
 
 router = APIRouter()
+
+
+def _activo_truthy(column):
+    return func.lower(cast(column, String)).in_(["true", "t", "1"])
 
 
 @router.get("/barrios/search", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -30,7 +35,7 @@ def search_barrios(
     barrios = (
         db.query(Barrio)
         .filter(
-            Barrio.activo == True,
+            _activo_truthy(Barrio.activo),
             Barrio.empresaID == empresa_id,
             Barrio.sucursalID == sucursal_id,
             Barrio.nombreBarrio.ilike(f"%{texto}%"),

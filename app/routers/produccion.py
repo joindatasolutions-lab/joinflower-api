@@ -51,6 +51,10 @@ router = APIRouter(
 produccion_logger = get_logger("produccion")
 
 
+def _activo_truthy(column):
+    return func.lower(func.cast(column, String)).in_(["true", "t", "1"])
+
+
 def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -371,7 +375,7 @@ def listar_floristas(
     if sucursal_id is not None:
         q = q.filter(Florista.sucursalID == sucursal_id)
     if solo_activos:
-        q = q.filter(Florista.activo == True)
+        q = q.filter(_activo_truthy(Florista.activo))
 
     rows = q.order_by(Florista.nombre.asc()).all()
 

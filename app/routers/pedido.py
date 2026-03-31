@@ -535,7 +535,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             db.query(Producto)
             .filter(
                 Producto.idProducto.in_([i.productoId for i in data.items]),
-                Producto.activo == True,
+                _activo_truthy(Producto.activo),
                 Producto.empresaID == data.empresaId
             )
             .all()

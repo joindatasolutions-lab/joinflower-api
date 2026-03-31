@@ -131,7 +131,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             db.query(Producto)
             .filter(
                 Producto.idProducto.in_(producto_ids),
-                Producto.activo == True,
+                _activo_truthy(Producto.activo),
                 Producto.empresaID == payload.empresaID,
             )
             .all()

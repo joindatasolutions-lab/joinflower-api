@@ -16,6 +16,10 @@ ESTADO_PENDIENTE = "Pendiente"
 ESTADO_CANCELADO = "Cancelado"
 
 
+def _activo_truthy(column):
+    return func.lower(func.cast(column, String)).in_(["true", "t", "1"])
+
+
 def estado_florista_norm(value: str | None) -> str:
     text = str(value or "").strip().upper()
     if text == "ACTIVO":
@@ -120,7 +124,7 @@ def seleccionar_florista_auto(
         .filter(
             Florista.empresaID == empresa_id,
             Florista.sucursalID == sucursal_id,
-            Florista.activo == True,
+            _activo_truthy(Florista.activo),
         )
         .all()
     )

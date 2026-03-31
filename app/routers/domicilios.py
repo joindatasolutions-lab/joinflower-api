@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
@@ -43,6 +43,10 @@ router = APIRouter(
 domicilios_logger = get_logger("domicilios")
 
 
+def _activo_truthy(column):
+    return func.lower(cast(column, String)).in_(["true", "t", "1"])
+
+
 def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -70,7 +74,7 @@ def listar_domiciliarios(
     if sucursal_id is not None:
         q = q.filter(Domiciliario.sucursalID == sucursal_id)
     if solo_activos:
-        q = q.filter(Domiciliario.activo == True)
+        q = q.filter(_activo_truthy(Domiciliario.activo))
 
     rows = q.order_by(Domiciliario.nombre.asc()).all()
     return DomiciliarioListResponse(

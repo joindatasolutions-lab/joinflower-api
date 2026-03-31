@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session, joinedload
 from app.core.logger import get_logger
 from app.database import get_db
@@ -9,6 +10,10 @@ from app.services.cache import get_cache, set_cache
 
 router = APIRouter()
 catalogo_logger = get_logger("catalogo")
+
+
+def _activo_truthy(column):
+    return func.lower(cast(column, String)).in_(["true", "t", "1"])
 
 
 def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
@@ -32,7 +37,7 @@ def obtener_catalogo(empresa_id: int, db: Session = Depends(get_db), auth=Depend
             db.query(Producto)
             .options(joinedload(Producto.categoria))
             .filter(
-                Producto.activo == True,
+                _activo_truthy(Producto.activo),
                 Producto.empresaID == empresa_id
             )
             .order_by(Producto.nombreProducto.asc())
