@@ -7,17 +7,28 @@ from sqlalchemy.orm import Session
 from app.models.entrega import Entrega
 from app.models.florista import Florista
 from app.models.pedidodetalle import PedidoDetalle
+from app.models.perfilflorista import PerfilFlorista
 from app.models.pedido import Pedido
 from app.models.producto import Producto
 from app.models.produccion import Produccion
 from app.models.produccionhistorial import ProduccionHistorial
 
 ESTADO_PENDIENTE = "Pendiente"
+ESTADO_EN_PRODUCCION = "EnProduccion"
+ESTADO_PARA_ENTREGA = "ParaEntrega"
 ESTADO_CANCELADO = "Cancelado"
 
 
 def _activo_truthy(column):
     return func.lower(func.cast(column, String)).in_(["true", "t", "1"])
+
+
+def _as_date(value: date | datetime | None) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    return value
 
 
 def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
@@ -34,9 +45,109 @@ def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
     return {
         "pendiente": by_code.get("pendiente", 1),
         "en_proceso": by_code.get("en_proceso", 3),
-        "terminado": by_code.get("terminado", 4),
+        "terminado": by_code.get("terminado", by_code.get("listo", 4)),
         "cancelado": by_code.get("cancelado", 5),
     }
+
+
+def _resolve_estado_produccion_labels(db: Session) -> dict[int, str]:
+    default_ids = _resolve_estado_produccion_ids(db)
+    labels: dict[int, str] = {
+        int(default_ids["pendiente"]): ESTADO_PENDIENTE,
+        int(default_ids["en_proceso"]): ESTADO_EN_PRODUCCION,
+        int(default_ids["terminado"]): ESTADO_PARA_ENTREGA,
+        int(default_ids["cancelado"]): ESTADO_CANCELADO,
+    }
+    rows = db.execute(
+        text(
+            """
+            SELECT id_estado_produccion, lower(coalesce(codigo, nombre))
+            FROM petalops.estado_produccion
+            """
+        )
+    ).fetchall()
+
+    for state_id, raw_code in rows:
+        code = str(raw_code or "").strip().lower()
+        if code == "pendiente":
+            labels[int(state_id)] = ESTADO_PENDIENTE
+        elif code == "en_proceso":
+            labels[int(state_id)] = ESTADO_EN_PRODUCCION
+        elif code in {"terminado", "listo"}:
+            labels[int(state_id)] = ESTADO_PARA_ENTREGA
+        elif code == "cancelado":
+            labels[int(state_id)] = ESTADO_CANCELADO
+    return labels
+
+
+def estado_produccion_norm(value: str | int | None, db: Session | None = None) -> str:
+    if value is None:
+        return ESTADO_PENDIENTE
+
+    if isinstance(value, (int, float)) and db is not None:
+        labels = _resolve_estado_produccion_labels(db)
+        return labels.get(int(value), str(int(value)))
+
+    text_value = str(value or "").strip()
+    if text_value.isdigit() and db is not None:
+        labels = _resolve_estado_produccion_labels(db)
+        return labels.get(int(text_value), text_value)
+
+    text = text_value.upper().replace("_", "")
+    if text in {"PENDIENTE"}:
+        return ESTADO_PENDIENTE
+    if text in {"ENPRODUCCION", "ENPROCESO"}:
+        return ESTADO_EN_PRODUCCION
+    if text in {"PARAENTREGA", "LISTO", "TERMINADO"}:
+        return ESTADO_PARA_ENTREGA
+    if text in {"CANCELADO"}:
+        return ESTADO_CANCELADO
+    return text_value
+
+
+def estado_produccion_id(db: Session, value: str | int | None) -> int:
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    normalized = estado_produccion_norm(value)
+    ids = _resolve_estado_produccion_ids(db)
+    if normalized == ESTADO_PENDIENTE:
+        return ids["pendiente"]
+    if normalized == ESTADO_EN_PRODUCCION:
+        return ids["en_proceso"]
+    if normalized == ESTADO_PARA_ENTREGA:
+        return ids["terminado"]
+    if normalized == ESTADO_CANCELADO:
+        return ids["cancelado"]
+    return ids["pendiente"]
+
+
+def transicion_produccion_permitida(db: Session, empresa_id: int, origen: str | int | None, destino: str | int | None) -> bool:
+    origen_id = estado_produccion_id(db, origen)
+    destino_id = estado_produccion_id(db, destino)
+
+    transitions = db.execute(
+        text(
+            """
+            SELECT estado_origen_id, estado_destino_id
+            FROM petalops.transicion_estado_produccion
+            WHERE empresa_id = :empresa_id
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).fetchall()
+
+    if transitions:
+        return any(int(row[0]) == origen_id and int(row[1]) == destino_id for row in transitions)
+
+    ids = _resolve_estado_produccion_ids(db)
+    fallback = {
+        ids["pendiente"]: {ids["en_proceso"], ids["cancelado"]},
+        ids["en_proceso"]: {ids["terminado"], ids["cancelado"]},
+        ids["terminado"]: set(),
+        ids["cancelado"]: set(),
+    }
+    return destino_id in fallback.get(origen_id, set())
 
 
 def estado_florista_norm(value: str | None) -> str:
@@ -50,19 +161,6 @@ def estado_florista_norm(value: str | None) -> str:
     return str(value or "Activo").strip() or "Activo"
 
 
-def estado_produccion_norm(value: str | None) -> str:
-    text = str(value or "").strip().upper().replace("_", "")
-    if text in {"PENDIENTE"}:
-        return "Pendiente"
-    if text in {"ENPRODUCCION"}:
-        return "EnProduccion"
-    if text in {"PARAENTREGA", "LISTO"}:
-        return "ParaEntrega"
-    if text in {"CANCELADO"}:
-        return "Cancelado"
-    return str(value or "").strip()
-
-
 def calcular_fecha_programada(fecha_entrega: datetime | None, dias_anticipacion: int) -> date:
     base = fecha_entrega.date() if fecha_entrega else date.today()
     return base - timedelta(days=max(dias_anticipacion, 0))
@@ -72,8 +170,8 @@ def is_florista_in_incapacity(florista: Florista, fecha_programada: date) -> boo
     if estado_florista_norm(florista.estado) != "Incapacidad":
         return False
 
-    start = florista.fechaInicioIncapacidad
-    end = florista.fechaFinIncapacidad
+    start = _as_date(florista.fechaInicioIncapacidad)
+    end = _as_date(florista.fechaFinIncapacidad)
 
     if start and end:
         return start <= fecha_programada <= end
@@ -92,6 +190,7 @@ def count_carga_florista(
     fecha_programada: date,
     ignore_produccion_id: int | None = None,
 ) -> int:
+    estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
         .filter(
@@ -99,7 +198,7 @@ def count_carga_florista(
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.fechaProgramadaProduccion == fecha_programada,
-            func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
+            Produccion.estado != estados["cancelado"],
         )
     )
     if ignore_produccion_id is not None:
@@ -115,13 +214,14 @@ def count_simultaneos_en_produccion(
     florista_id: int,
     ignore_produccion_id: int | None = None,
 ) -> int:
+    estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
-            func.upper(func.cast(Produccion.estado, String)) == "ENPRODUCCION",
+            Produccion.estado == estados["en_proceso"],
         )
     )
     if ignore_produccion_id is not None:
@@ -140,6 +240,7 @@ def seleccionar_florista_auto(
 ) -> Florista | None:
     floristas = (
         db.query(Florista)
+        .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
         .filter(
             Florista.empresaID == empresa_id,
             Florista.sucursalID == sucursal_id,
@@ -321,12 +422,13 @@ def asignar_pendientes_hoy(
 ) -> dict[str, int]:
     hoy = date.today()
 
+    estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(Produccion)
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.fechaProgramadaProduccion == hoy,
-            func.upper(func.cast(Produccion.estado, String)) == "PENDIENTE",
+            Produccion.estado == estados["pendiente"],
             Produccion.floristaID.is_(None),
         )
         .order_by(Produccion.idProduccion.asc())
@@ -380,6 +482,7 @@ def reasignar_pendientes_por_indisponibilidad(
     motivo: str,
 ) -> dict[str, int]:
     hoy = date.today()
+    estados = _resolve_estado_produccion_ids(db)
     pendientes = (
         db.query(Produccion)
         .filter(
@@ -387,7 +490,7 @@ def reasignar_pendientes_por_indisponibilidad(
             Produccion.sucursalID == florista.sucursalID,
             Produccion.floristaID == florista.idFlorista,
             Produccion.fechaProgramadaProduccion >= hoy,
-            func.upper(func.cast(Produccion.estado, String)) == "PENDIENTE",
+            Produccion.estado == estados["pendiente"],
         )
         .all()
     )
@@ -447,17 +550,29 @@ def sincronizar_incapacidades_y_reasignar(
     if sucursal_id is not None:
         q_base = q_base.filter(Florista.sucursalID == sucursal_id)
 
-    floristas_incapacidad = q_base.filter(func.upper(Florista.estado) == "INCAPACIDAD").all()
+    floristas_incapacidad = (
+        q_base
+        .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+        .filter(
+            PerfilFlorista.fechaInicioIncapacidad.is_not(None),
+            PerfilFlorista.fechaInicioIncapacidad <= hoy,
+            (PerfilFlorista.fechaFinIncapacidad.is_(None) | (PerfilFlorista.fechaFinIncapacidad >= hoy)),
+        )
+        .all()
+    )
 
     reactivados = 0
     reasignadas = 0
     sin_reemplazo = 0
 
     for florista in floristas_incapacidad:
-        fin = florista.fechaFinIncapacidad
+        fin = _as_date(florista.fechaFinIncapacidad)
         if fin and fin < hoy:
-            florista.estado = "Activo"
-            florista.activo = True
+            perfil = db.query(PerfilFlorista).filter(PerfilFlorista.empleadoID == florista.idFlorista).first()
+            if perfil:
+                perfil.fechaInicioIncapacidad = None
+                perfil.fechaFinIncapacidad = None
+            florista.activo = 1
             florista.updatedAt = datetime.now(timezone.utc)
             reactivados += 1
             continue

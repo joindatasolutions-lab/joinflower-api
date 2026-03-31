@@ -13,6 +13,7 @@ from app.models.cliente import Cliente
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
 from app.models.florista import Florista
+from app.models.perfilflorista import PerfilFlorista
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
@@ -73,25 +74,8 @@ ESTADOS_VALIDOS = {
     ESTADO_CANCELADO,
 }
 
-TRANSICIONES_VALIDAS = {
-    ESTADO_PENDIENTE: {ESTADO_EN_PRODUCCION, ESTADO_CANCELADO},
-    ESTADO_EN_PRODUCCION: {ESTADO_PARA_ENTREGA, ESTADO_CANCELADO},
-    ESTADO_PARA_ENTREGA: set(),
-    ESTADO_CANCELADO: set(),
-}
-
-
-def _estado_produccion_norm(value: str | None) -> str:
-    text = str(value or "").strip().upper().replace("_", "")
-    if text in {"PENDIENTE"}:
-        return ESTADO_PENDIENTE
-    if text in {"ENPRODUCCION"}:
-        return ESTADO_EN_PRODUCCION
-    if text in {"PARAENTREGA", "LISTO"}:
-        return ESTADO_PARA_ENTREGA
-    if text in {"CANCELADO"}:
-        return ESTADO_CANCELADO
-    return str(value or "").strip()
+def _estado_produccion_norm(value: str | int | None, db: Session | None = None) -> str:
+    return produccion_service.estado_produccion_norm(value, db=db)
 
 
 def _estado_florista_norm(value: str | None) -> str:
@@ -228,9 +212,9 @@ def _build_items(
         q = q.filter(Produccion.fechaProgramadaProduccion == fecha_programada)
 
     if estado:
-        q = q.filter(func.upper(func.cast(Produccion.estado, String)) == _estado_produccion_norm(estado).upper())
+        q = q.filter(Produccion.estado == produccion_service.estado_produccion_id(db, estado))
     elif not incluir_cancelado:
-        q = q.filter(func.upper(func.cast(Produccion.estado, String)) != "CANCELADO")
+        q = q.filter(Produccion.estado != produccion_service.estado_produccion_id(db, ESTADO_CANCELADO))
 
     rows = q.order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.ordenProduccion.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
@@ -257,7 +241,7 @@ def _build_items(
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 floristaAsignado=(florista.nombre if florista else None),
-                estado=_estado_produccion_norm(produccion.estado),
+                estado=_estado_produccion_norm(produccion.estado, db=db),
                 fechaAsignacion=produccion.fechaAsignacion,
                 tiempoRestanteHoras=tiempo_restante_horas,
                 tiempoEstimadoMin=(int(produccion.tiempoEstimadoMin) if produccion.tiempoEstimadoMin is not None else None),
@@ -309,7 +293,7 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
             db.query(Produccion.idProduccion)
             .filter(
                 Produccion.pedidoID == pedido.idPedido,
-                func.upper(func.cast(Produccion.estado, String)) != "CANCELADO",
+                Produccion.estado != produccion_service.estado_produccion_id(db, ESTADO_CANCELADO),
             )
             .first()
         )
@@ -348,7 +332,7 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
                 floristaID=int(florista.idFlorista) if florista else None,
                 fechaProgramadaProduccion=fecha_programada,
                 fechaAsignacion=now_utc if florista else None,
-                estado=ESTADO_PENDIENTE,
+                estado=produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE),
                 prioridad="MEDIA",
                 tiempoEstimadoMin=tiempo_estimado,
                 ordenProduccion=siguiente_orden,
@@ -371,7 +355,11 @@ def listar_floristas(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    q = db.query(Florista).filter(Florista.empresaID == empresa_id, func.upper(Florista.cargo) == "FLORISTA")
+    q = (
+        db.query(Florista)
+        .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+        .filter(Florista.empresaID == empresa_id, func.upper(Florista.cargo) == "FLORISTA")
+    )
     if sucursal_id is not None:
         q = q.filter(Florista.sucursalID == sucursal_id)
     if solo_activos:
@@ -409,11 +397,26 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     if nuevo_estado not in {"Activo", "Inactivo", "Incapacidad"}:
         raise HTTPException(status_code=400, detail="Estado de florista inválido")
 
-    florista.estado = nuevo_estado
-    florista.activo = nuevo_estado == "Activo"
-    florista.fechaInicioIncapacidad = payload.fechaInicioIncapacidad
-    florista.fechaFinIncapacidad = payload.fechaFinIncapacidad
+    florista.activo = 1 if nuevo_estado == "Activo" else 0
     florista.updatedAt = datetime.now(timezone.utc)
+
+    perfil = db.query(PerfilFlorista).filter(PerfilFlorista.empleadoID == florista.idFlorista).first()
+    if not perfil:
+        perfil = PerfilFlorista(
+            empleadoID=int(florista.idFlorista),
+            capacidadDiaria=max(int(florista.capacidadDiaria or 1), 1),
+            trabajosSimultaneosPermitidos=max(int(florista.trabajosSimultaneosPermitidos or 1), 1),
+            especialidades=florista.especialidades,
+        )
+        db.add(perfil)
+        db.flush()
+
+    if nuevo_estado == "Incapacidad":
+        perfil.fechaInicioIncapacidad = payload.fechaInicioIncapacidad or date.today()
+        perfil.fechaFinIncapacidad = payload.fechaFinIncapacidad
+    else:
+        perfil.fechaInicioIncapacidad = None
+        perfil.fechaFinIncapacidad = None
 
     reasignadas = 0
     sin_reemplazo = 0
@@ -435,7 +438,7 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
                 Produccion.empresaID == florista.empresaID,
                 Produccion.sucursalID == florista.sucursalID,
                 Produccion.floristaID == florista.idFlorista,
-                func.upper(func.cast(Produccion.estado, String)) == "ENPRODUCCION",
+                Produccion.estado == produccion_service.estado_produccion_id(db, ESTADO_EN_PRODUCCION),
             )
             .scalar()
             or 0
@@ -571,7 +574,7 @@ def resumen_produccion(
         ESTADO_CANCELADO: 0,
     }
     for item in items:
-        key = _estado_produccion_norm(item.estado)
+        key = _estado_produccion_norm(item.estado, db=db)
         counters[key] = counters.get(key, 0) + 1
 
     return ProduccionResumenResponse(
@@ -606,7 +609,7 @@ def kanban_produccion(
         ESTADO_CANCELADO: [],
     }
     for item in items:
-        grouped[_estado_produccion_norm(item.estado)].append(item)
+        grouped[_estado_produccion_norm(item.estado, db=db)].append(item)
 
     return ProduccionKanbanResponse(
         pendiente=grouped[ESTADO_PENDIENTE],
@@ -630,13 +633,14 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     if fecha_programada > date.today():
         raise HTTPException(status_code=400, detail="No se permite asignar producciones con fecha futura")
 
-    estado_actual = _estado_produccion_norm(produccion.estado)
+    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
     if estado_actual == ESTADO_EN_PRODUCCION and not (payload.motivo and payload.usuarioCambio):
         raise HTTPException(status_code=400, detail="Para reasignar en EnProduccion debes indicar motivo y usuarioCambio")
 
     if payload.floristaID is not None:
         florista = (
             db.query(Florista)
+            .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
             .filter(
                 Florista.idFlorista == payload.floristaID,
                 Florista.empresaID == produccion.empresaID,
@@ -725,8 +729,8 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
         raise _err("PRODUCCION_NOT_FOUND", "Registro de producción no encontrado", status_code=404)
     assert_same_empresa(auth, int(produccion.empresaID))
 
-    estado_actual = _estado_produccion_norm(produccion.estado)
-    nuevo_estado = _estado_produccion_norm(payload.nuevoEstado)
+    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
+    nuevo_estado = _estado_produccion_norm(payload.nuevoEstado, db=db)
 
     if nuevo_estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Estado inválido. Usa: {', '.join(sorted(ESTADOS_VALIDOS))}")
@@ -737,14 +741,24 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
         raise HTTPException(status_code=400, detail="No se permite modificar Producción cuando el domicilio está EnRuta")
 
-    if nuevo_estado not in TRANSICIONES_VALIDAS.get(estado_actual, set()):
+    if not produccion_service.transicion_produccion_permitida(
+        db=db,
+        empresa_id=int(produccion.empresaID),
+        origen=produccion.estado,
+        destino=nuevo_estado,
+    ):
         raise HTTPException(status_code=400, detail=f"Transición no permitida: {estado_actual} -> {nuevo_estado}")
 
     if nuevo_estado == ESTADO_EN_PRODUCCION:
         if not produccion.floristaID:
             raise HTTPException(status_code=400, detail="No puedes iniciar producción sin florista asignado")
 
-        florista = db.query(Florista).filter(Florista.idFlorista == produccion.floristaID).first()
+        florista = (
+            db.query(Florista)
+            .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+            .filter(Florista.idFlorista == produccion.floristaID)
+            .first()
+        )
         if not florista:
             raise HTTPException(status_code=400, detail="Florista asignado no existe")
 
@@ -769,7 +783,7 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
             raise HTTPException(status_code=400, detail="El florista alcanzó sus trabajos simultáneos permitidos")
 
     now_utc = datetime.now(timezone.utc)
-    produccion.estado = nuevo_estado
+    produccion.estado = produccion_service.estado_produccion_id(db, nuevo_estado)
 
     if nuevo_estado == ESTADO_EN_PRODUCCION and not produccion.fechaInicio:
         produccion.fechaInicio = now_utc
@@ -819,7 +833,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido_id).first()
     tiempo_estimado = _calcular_tiempo_estimado_pedido(db, pedido_id)
     fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, _dias_anticipacion_default())
-    estado_actual = _estado_produccion_norm(produccion.estado)
+    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
 
     if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
         raise HTTPException(status_code=400, detail="No se puede recalcular producción: el domicilio ya está EnRuta")
@@ -873,7 +887,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
         if not payload.productoEstructuralCambiado and not payload.forceCancelarYCrearNueva:
             raise HTTPException(status_code=400, detail="En EnProduccion no se permite cambio estructural sin cancelar y recrear")
 
-        produccion.estado = ESTADO_CANCELADO
+        produccion.estado = produccion_service.estado_produccion_id(db, ESTADO_CANCELADO)
         produccion.observacionesInternas = (produccion.observacionesInternas or "") + f"\nCancelado por cambio estructural del pedido v{int(pedido.version or 1)+1}."
         produccion.updatedAt = now_utc
 
@@ -890,7 +904,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
             fechaFinalizacion=None,
             tiempoEstimadoMin=tiempo_estimado,
             tiempoRealMin=None,
-            estado=ESTADO_PENDIENTE,
+            estado=produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE),
             prioridad=produccion.prioridad or "MEDIA",
             observacionesInternas=f"Nueva producción por cambio estructural pedido v{pedido.version}",
             ordenProduccion=produccion.ordenProduccion,
@@ -998,7 +1012,7 @@ def metricas_productividad(
             "cancelaciones": 0,
         })
 
-        estado = _estado_produccion_norm(p.estado)
+        estado = _estado_produccion_norm(p.estado, db=db)
         if estado == ESTADO_PARA_ENTREGA:
             bucket["completadas"] += 1
         if p.tiempoRealMin is not None:
@@ -1079,11 +1093,11 @@ def metricas_operacion(
     for row in rows:
         day = row.fechaProgramadaProduccion
         b = by_date.setdefault(day, {"carga": 0, "retrasos": 0, "completadas": 0})
-        if _estado_produccion_norm(row.estado) != ESTADO_CANCELADO:
+        if _estado_produccion_norm(row.estado, db=db) != ESTADO_CANCELADO:
             b["carga"] += 1
         if row.fechaFinalizacion and row.fechaProgramadaProduccion and row.fechaFinalizacion.date() > row.fechaProgramadaProduccion:
             b["retrasos"] += 1
-        if _estado_produccion_norm(row.estado) == ESTADO_PARA_ENTREGA:
+        if _estado_produccion_norm(row.estado, db=db) == ESTADO_PARA_ENTREGA:
             b["completadas"] += 1
 
     fechas = sorted(by_date.keys())
