@@ -32,7 +32,16 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://localhost:3000",
+    "https://petalops.joindata.com.co",
 ]
+
+extra_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if extra_origins:
+    ALLOWED_ORIGINS.extend(extra_origins)
 
 app = FastAPI(
     title="PetalOps API",
