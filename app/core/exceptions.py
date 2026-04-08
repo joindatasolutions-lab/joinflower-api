@@ -51,6 +51,20 @@ def _error_payload(code: str, message: str, module: str, request_id: str) -> dic
     }
 
 
+def _validation_message(errors: list[dict]) -> str:
+    if not errors:
+        return "Datos de entrada invalidos"
+
+    first = errors[0]
+    loc = first.get("loc") or []
+    field = ".".join(str(part) for part in loc if str(part) != "body")
+    msg = str(first.get("msg") or "Datos de entrada invalidos").strip()
+
+    if field:
+        return f"{field}: {msg}"
+    return msg or "Datos de entrada invalidos"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(APIError)
     async def handle_api_error(request: Request, exc: APIError):
@@ -92,7 +106,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=422,
             content=_error_payload(
                 "VALIDATION_ERROR",
-                "Datos de entrada invalidos",
+                _validation_message(exc.errors()),
                 module,
                 _request_id(request),
             ),
@@ -107,7 +121,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=422,
             content=_error_payload(
                 "VALIDATION_ERROR",
-                "Datos de entrada invalidos",
+                _validation_message(exc.errors()),
                 module,
                 _request_id(request),
             ),

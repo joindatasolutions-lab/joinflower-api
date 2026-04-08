@@ -42,7 +42,13 @@ from app.schemas.produccion import (
     ReasignacionHistorialResponse,
 )
 from app.services import domicilio_service, produccion_service
-from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.security import (
+    assert_same_empresa,
+    get_current_auth_context,
+    is_empresa_admin_context,
+    is_super_admin_context,
+    require_module_access,
+)
 
 router = APIRouter(
     prefix="/produccion",
@@ -61,6 +67,12 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message, "module": "produccion"},
     )
+
+
+def _require_production_admin(auth=Depends(get_current_auth_context)):
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=403, detail="Solo administradores pueden ejecutar acciones de producción")
+    return auth
 
 ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
@@ -262,7 +274,7 @@ def _dias_anticipacion_default() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
 
 
-@router.post("/generar-desde-pedidos", dependencies=[Depends(require_module_access("produccion", "puedeCrear"))])
+@router.post("/generar-desde-pedidos", dependencies=[Depends(require_module_access("produccion", "puedeCrear")), Depends(_require_production_admin)])
 def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     assert_same_empresa(auth, int(payload.empresaID))
     dias_anticipacion = payload.diasAnticipacion if payload.diasAnticipacion is not None else _dias_anticipacion_default()
@@ -385,7 +397,7 @@ def listar_floristas(
     )
 
 
-@router.put("/floristas/{florista_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+@router.put("/floristas/{florista_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
 def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     florista = db.query(Florista).filter(Florista.idFlorista == florista_id).first()
     if not florista:
@@ -456,7 +468,7 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     }
 
 
-@router.post("/floristas/sincronizar-incapacidades", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+@router.post("/floristas/sincronizar-incapacidades", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
 def sincronizar_incapacidades(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
@@ -495,12 +507,14 @@ def listar_produccion(
     )
 
     if auto_asignar_pendientes_hoy and target_fecha == date.today():
-        stats = produccion_service.asignar_pendientes_hoy(
+        stats = produccion_service.asignar_pendientes_por_fecha(
             db=db,
             empresa_id=empresa_id,
+            fecha_objetivo=target_fecha,
             sucursal_id=sucursal_id,
+            incluir_vencidas=False,
             usuario="produccion.listar",
-            motivo="Asignación automática al abrir módulo Producción",
+            motivo="Asignación automática al abrir módulo Producción (hoy)",
         )
         db.commit()
         auto_resumen = AutoAsignacionResumen(
@@ -541,6 +555,50 @@ def asignar_pendientes_hoy(
     return AutoAsignacionResponse(
         status="ok",
         fecha=date.today(),
+        empresaID=empresa_id,
+        sucursalID=sucursal_id,
+        evaluadas=int(stats["evaluadas"]),
+        asignadas=int(stats["asignadas"]),
+        sinDisponibilidad=int(stats["sinDisponibilidad"]),
+    )
+
+
+
+@router.post(
+    "/asignar-pendientes-fecha",
+    response_model=AutoAsignacionResponse,
+    dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)],
+)
+def asignar_pendientes_por_fecha(
+    empresa_id: int = Query(..., alias="empresaID"),
+    fecha: date = Query(...),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    incluir_vencidas: bool = Query(False, alias="incluirVencidas"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    if fecha > date.today():
+        raise HTTPException(status_code=400, detail="Solo se permiten fechas de hoy o anteriores")
+
+    stats = produccion_service.asignar_pendientes_por_fecha(
+        db=db,
+        empresa_id=empresa_id,
+        fecha_objetivo=fecha,
+        sucursal_id=sucursal_id,
+        incluir_vencidas=incluir_vencidas,
+        usuario="produccion.asignar_pendientes_fecha",
+        motivo=(
+            "Asignación manual de pendientes hasta fecha objetivo"
+            if incluir_vencidas
+            else "Asignación manual de pendientes por fecha objetivo"
+        ),
+    )
+    db.commit()
+
+    return AutoAsignacionResponse(
+        status="ok",
+        fecha=fecha,
         empresaID=empresa_id,
         sucursalID=sucursal_id,
         evaluadas=int(stats["evaluadas"]),
@@ -619,7 +677,7 @@ def kanban_produccion(
     )
 
 
-@router.put("/{produccion_id}/asignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+@router.put("/{produccion_id}/asignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
 def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
@@ -705,7 +763,7 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     }
 
 
-@router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+@router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     if not payload.motivo.strip():
         raise HTTPException(status_code=400, detail="motivo es obligatorio")
@@ -723,6 +781,9 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
 
 @router.put("/{produccion_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    if is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=403, detail="Acción no disponible para rol Administrador")
+
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
     if not produccion:
         produccion_logger.warning("Producción no encontrada. produccion_id=%s", produccion_id)
@@ -813,8 +874,11 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     }
 
 
-@router.post("/pedido/{pedido_id}/recalcular", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
+@router.post("/pedido/{pedido_id}/recalcular", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
 def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcularPedidoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    if is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=403, detail="Acción no disponible para rol Administrador")
+
     pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
     if not pedido:
         produccion_logger.warning("Pedido no encontrado. pedido_id=%s", pedido_id)

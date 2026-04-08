@@ -249,7 +249,7 @@ def seleccionar_florista_auto(
         .all()
     )
 
-    ranking: list[tuple[float, int, int, Florista]] = []
+    ranking: list[tuple[int, float, int, Florista]] = []
     for florista in floristas:
         fid = int(florista.idFlorista)
         if excluded_florista_id is not None and fid == excluded_florista_id:
@@ -272,7 +272,7 @@ def seleccionar_florista_auto(
             continue
 
         ratio = ocupacion / capacidad
-        ranking.append((ratio, ocupacion, fid, florista))
+        ranking.append((ocupacion, ratio, fid, florista))
 
     ranking.sort(key=lambda item: (item[0], item[1], item[2]))
     return ranking[0][3] if ranking else None
@@ -420,19 +420,40 @@ def asignar_pendientes_hoy(
     usuario: str = "system",
     motivo: str = "Asignación automática al abrir módulo de Producción",
 ) -> dict[str, int]:
-    hoy = date.today()
+    return asignar_pendientes_por_fecha(
+        db=db,
+        empresa_id=empresa_id,
+        fecha_objetivo=date.today(),
+        sucursal_id=sucursal_id,
+        incluir_vencidas=False,
+        usuario=usuario,
+        motivo=motivo,
+    )
 
+
+def asignar_pendientes_por_fecha(
+    db: Session,
+    empresa_id: int,
+    fecha_objetivo: date,
+    sucursal_id: int | None = None,
+    incluir_vencidas: bool = False,
+    usuario: str = "system",
+    motivo: str = "Asignación manual de pendientes",
+) -> dict[str, int]:
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(Produccion)
         .filter(
             Produccion.empresaID == empresa_id,
-            Produccion.fechaProgramadaProduccion == hoy,
             Produccion.estado == estados["pendiente"],
             Produccion.floristaID.is_(None),
         )
-        .order_by(Produccion.idProduccion.asc())
+        .order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.idProduccion.asc())
     )
+    if incluir_vencidas:
+        q = q.filter(Produccion.fechaProgramadaProduccion <= fecha_objetivo)
+    else:
+        q = q.filter(Produccion.fechaProgramadaProduccion == fecha_objetivo)
     if sucursal_id is not None:
         q = q.filter(Produccion.sucursalID == sucursal_id)
 
@@ -473,7 +494,6 @@ def asignar_pendientes_hoy(
         "asignadas": asignadas,
         "sinDisponibilidad": sin_disponibilidad,
     }
-
 
 def reasignar_pendientes_por_indisponibilidad(
     db: Session,
@@ -592,3 +612,4 @@ def sincronizar_incapacidades_y_reasignar(
         "reasignadas": reasignadas,
         "sinReemplazo": sin_reemplazo,
     }
+

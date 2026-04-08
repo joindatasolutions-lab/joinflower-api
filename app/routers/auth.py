@@ -10,10 +10,13 @@ from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.core.security import (
     JWT_EXPIRE_MINUTES,
+    _quote_ident,
+    _resolve_table_spec,
     auth_schema_error,
     create_access_token,
     get_current_auth_context,
     load_empresa_auth_meta,
+    load_usuario_module_overrides,
     pwd_context,
     require_admin_role,
     is_empresa_admin_context,
@@ -51,9 +54,12 @@ from app.schemas.auth import (
     SucursalOption,
     UserCreateRequest,
     UserCreateResponse,
+    UserDeleteResponse,
+    UserDetailResponse,
     UserListItem,
     UserListResponse,
     UserStatusUpdateRequest,
+    UserUpdateRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -111,7 +117,6 @@ def _safe_int(value, default=None):
 
 
 def _ensure_empresa_modulo_table(db: Session):
-    db.rollback()
     db.execute(
         text(
             """
@@ -131,7 +136,6 @@ def _ensure_empresa_modulo_table(db: Session):
 
 
 def _ensure_usuario_modulo_table(db: Session):
-    db.rollback()
     db.execute(
         text(
             """
@@ -172,18 +176,35 @@ def _plan_user_limit(plan_id: int | None) -> int:
 
 def _audit_user_action(db: Session, actor, action: str, target: Usuario, extra: dict | None = None):
     payload = json.dumps(extra or {}, ensure_ascii=True)
+    table_name, columns = _resolve_table_spec(
+        db,
+        ["usuario_auditoria", "usuarioauditoria", "UsuarioAuditoria"],
+        {
+            "empresa_id": ["empresa_id", "empresaid", "empresaID"],
+            "actor_user_id": ["actor_user_id", "actoruserid", "actorUserID"],
+            "actor_login": ["actor_login", "actorlogin", "actorLogin"],
+            "accion": ["accion"],
+            "target_user_id": ["target_user_id", "targetuserid", "targetUserID"],
+            "target_login": ["target_login", "targetlogin", "targetLogin"],
+            "detalle_json": ["detalle_json", "detallejson", "detalleJSON"],
+            "created_at": ["created_at", "createdat", "createdAt"],
+        },
+    )
+    if not table_name or not columns:
+        return
+
     db.execute(
         text(
-            """
-            INSERT INTO "UsuarioAuditoria" (
-                "empresaID",
-                "actorUserID",
-                "actorLogin",
-                "accion",
-                "targetUserID",
-                "targetLogin",
-                "detalleJSON",
-                "createdAt"
+            f"""
+            INSERT INTO petalops.{_quote_ident(table_name)} (
+                {_quote_ident(columns["empresa_id"])},
+                {_quote_ident(columns["actor_user_id"])},
+                {_quote_ident(columns["actor_login"])},
+                {_quote_ident(columns["accion"])},
+                {_quote_ident(columns["target_user_id"])},
+                {_quote_ident(columns["target_login"])},
+                {_quote_ident(columns["detalle_json"])},
+                {_quote_ident(columns["created_at"])}
             )
             VALUES (
                 :empresa_id,
@@ -313,6 +334,174 @@ def _normalize_module_list(values: list[str] | None) -> list[str]:
         seen.add(module)
         normalized.append(module)
     return normalized
+
+
+def _load_role_viewable_modules(db: Session, rol_id: int) -> set[str]:
+    permiso_table, permiso_columns = _resolve_table_spec(
+        db,
+        ["permiso_modulo", "permisomodulo", "PermisoModulo"],
+        {
+            "rol_id": ["rol_id", "rolid", "rolID"],
+            "modulo": ["modulo"],
+            "puede_ver": ["puede_ver", "puedever", "puedeVer"],
+        },
+    )
+    if not permiso_table or not permiso_columns:
+        return set()
+
+    rows = db.execute(
+        text(
+            f"""
+            SELECT {_quote_ident(permiso_columns["modulo"])} AS modulo
+            FROM petalops.{_quote_ident(permiso_table)}
+            WHERE {_quote_ident(permiso_columns["rol_id"])} = :rol_id
+              AND {_quote_ident(permiso_columns["puede_ver"])} = TRUE
+            """
+        ),
+        {"rol_id": int(rol_id)},
+    ).mappings().all()
+
+    return {
+        normalize_module_name(row.get("modulo"))
+        for row in rows
+        if row.get("modulo")
+    }
+
+
+def _get_target_user_for_admin(db: Session, auth, user_id: int) -> tuple[Usuario, Rol | None]:
+    usuario = db.query(Usuario).filter(Usuario.idusuario == user_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if not is_super_admin_context(auth) and int(usuario.empresaID or 0) != int(auth.empresaID):
+        raise HTTPException(status_code=403, detail="No puedes modificar usuarios de otra empresa")
+
+    target_role = db.query(Rol).filter(Rol.idRol == usuario.rolID).first()
+    if target_role:
+        target_role_name = normalize_role_name(target_role.nombreRol)
+        if not is_super_admin_context(auth) and target_role_name in STRUCTURAL_ROLES:
+            raise HTTPException(status_code=403, detail="No puedes modificar usuarios de rol estructural")
+
+    return usuario, target_role
+
+
+def _load_user_modules(db: Session, user_id: int) -> list[str]:
+    overrides = load_usuario_module_overrides(db, int(user_id))
+    if not overrides:
+        return []
+    return sorted([modulo for modulo, activo in overrides.items() if bool(activo)])
+
+
+def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, rol_nombre: str) -> None:
+    role_name = normalize_role_name(rol_nombre)
+    cargo = str(rol_nombre or "").strip() or "Operativo"
+    is_florista_role = role_name == "florista"
+
+    empleado = db.execute(
+        text(
+            """
+            SELECT id_empleado
+            FROM petalops.empleado
+            WHERE usuario_id = :usuario_id
+            ORDER BY id_empleado ASC
+            LIMIT 1
+            """
+        ),
+        {"usuario_id": int(usuario.idusuario)},
+    ).mappings().first()
+
+    empleado_id: int | None = int(empleado["id_empleado"]) if empleado else None
+    activo_flag = 1 if str(usuario.estado or "").strip().lower() == "activo" else 0
+
+    if empleado_id is None:
+        empleado_id = int(
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.empleado (
+                        empresa_id, sucursal_id, nombre_empleado, cargo, activo,
+                        created_at, updated_at, usuario, email, password_hash, usuario_id, is_superuser
+                    )
+                    VALUES (
+                        :empresa_id, :sucursal_id, :nombre_empleado, :cargo, :activo,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :password_hash, :usuario_id, 0
+                    )
+                    RETURNING id_empleado
+                    """
+                ),
+                {
+                    "empresa_id": int(usuario.empresaID),
+                    "sucursal_id": int(usuario.sucursalID),
+                    "nombre_empleado": str(usuario.nombre or "").strip(),
+                    "cargo": cargo,
+                    "activo": activo_flag,
+                    "usuario_login": str(usuario.login or "").strip(),
+                    "email": str(usuario.email or "").strip(),
+                    "password_hash": str(usuario.passwordHash or "").strip(),
+                    "usuario_id": int(usuario.idusuario),
+                },
+            ).scalar()
+        )
+    else:
+        db.execute(
+            text(
+                """
+                UPDATE petalops.empleado
+                SET empresa_id = :empresa_id,
+                    sucursal_id = :sucursal_id,
+                    nombre_empleado = :nombre_empleado,
+                    cargo = :cargo,
+                    activo = :activo,
+                    updated_at = CURRENT_TIMESTAMP,
+                    usuario = :usuario_login,
+                    email = :email,
+                    password_hash = :password_hash
+                WHERE id_empleado = :empleado_id
+                """
+            ),
+            {
+                "empleado_id": int(empleado_id),
+                "empresa_id": int(usuario.empresaID),
+                "sucursal_id": int(usuario.sucursalID),
+                "nombre_empleado": str(usuario.nombre or "").strip(),
+                "cargo": cargo,
+                "activo": activo_flag,
+                "usuario_login": str(usuario.login or "").strip(),
+                "email": str(usuario.email or "").strip(),
+                "password_hash": str(usuario.passwordHash or "").strip(),
+            },
+        )
+
+    if is_florista_role:
+        existing_profile = db.execute(
+            text(
+                """
+                SELECT empleado_id
+                FROM petalops.perfil_florista
+                WHERE empleado_id = :empleado_id
+                LIMIT 1
+                """
+            ),
+            {"empleado_id": int(empleado_id)},
+        ).first()
+        if not existing_profile:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.perfil_florista (
+                        empleado_id, capacidad_diaria, trab_simul_permi, especialidades, fecha_ini_incap, fecha_fin_incap
+                    )
+                    VALUES (
+                        :empleado_id, :capacidad_diaria, :trab_simul_permi, NULL, NULL, NULL
+                    )
+                    """
+                ),
+                {
+                    "empleado_id": int(empleado_id),
+                    "capacidad_diaria": 12,
+                    "trab_simul_permi": 1,
+                },
+            )
 
 
 def _ensure_default_operational_roles(db: Session, empresa_id: int):
@@ -567,8 +756,16 @@ def crear_usuario(
             for item in _build_empresa_module_items(db, target_empresa_id)
             if bool(item.activo)
         }
+        role_viewable_modules = _load_role_viewable_modules(db, int(payload.rolID))
+        effective_modules = (
+            available_modules.intersection(role_viewable_modules)
+            if role_viewable_modules
+            else set(available_modules)
+        )
         requested_user_modules = _normalize_module_list(payload.modulosAcceso)
-        selected_user_modules = [module for module in requested_user_modules if module in available_modules]
+        selected_user_modules = [module for module in requested_user_modules if module in effective_modules]
+        if payload.modulosAcceso is not None and not selected_user_modules and effective_modules:
+            selected_user_modules = sorted(effective_modules)
 
         usuario = Usuario(
             empresaID=target_empresa_id,
@@ -584,6 +781,7 @@ def crear_usuario(
         )
         db.add(usuario)
         db.flush()
+        _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
         if payload.modulosAcceso is not None:
             _ensure_usuario_modulo_table(db)
             db.execute(
@@ -681,6 +879,165 @@ def listar_usuarios(
     return UserListResponse(items=items, total=len(items))
 
 
+@router.get("/usuarios/id/{user_id}", response_model=UserDetailResponse)
+def obtener_usuario(
+    user_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para consultar usuarios")
+    usuario, target_role = _get_target_user_for_admin(db, auth, user_id)
+    rol_nombre = str(target_role.nombreRol or "") if target_role else ""
+    return UserDetailResponse(
+        userID=int(usuario.idusuario),
+        empresaID=int(usuario.empresaID),
+        sucursalID=int(usuario.sucursalID),
+        nombre=str(usuario.nombre or ""),
+        login=str(usuario.login or ""),
+        email=str(usuario.email or ""),
+        rolID=int(usuario.rolID),
+        rol=rol_nombre,
+        estado=str(usuario.estado or ""),
+        modulosAcceso=_load_user_modules(db, int(usuario.idusuario)),
+        ultimoLogin=usuario.ultimoLogin,
+    )
+
+
+@router.put("/usuarios/id/{user_id}", response_model=UserCreateResponse)
+def actualizar_usuario(
+    user_id: int,
+    payload: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    try:
+        if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para actualizar usuarios")
+
+        usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
+
+        login = payload.login.strip().lower()
+        email = payload.email.strip().lower()
+        estado = (payload.estado or "Activo").strip().title()
+        if estado not in {"Activo", "Inactivo"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="estado debe ser Activo o Inactivo")
+
+        target_empresa_id = int(usuario.empresaID)
+
+        existing_login = (
+            db.query(Usuario)
+            .filter(Usuario.login == login, Usuario.idusuario != int(usuario.idusuario))
+            .first()
+        )
+        if existing_login:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
+
+        existing_email = (
+            db.query(Usuario)
+            .filter(
+                Usuario.empresaID == target_empresa_id,
+                Usuario.email == email,
+                Usuario.idusuario != int(usuario.idusuario),
+            )
+            .first()
+        )
+        if existing_email:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email ya existe en la empresa")
+
+        rol = (
+            db.query(Rol)
+            .filter(Rol.idRol == payload.rolID, Rol.empresaID == target_empresa_id)
+            .first()
+        )
+        if not rol:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol invalido para la empresa")
+
+        role_name = normalize_role_name(rol.nombreRol)
+        if not is_super_admin_context(auth) and role_name in STRUCTURAL_ROLES:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa Admin no puede asignar roles estructurales")
+
+        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
+        if not sucursal:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
+
+        available_modules = {
+            item.modulo
+            for item in _build_empresa_module_items(db, target_empresa_id)
+            if bool(item.activo)
+        }
+        role_viewable_modules = _load_role_viewable_modules(db, int(payload.rolID))
+        effective_modules = (
+            available_modules.intersection(role_viewable_modules)
+            if role_viewable_modules
+            else set(available_modules)
+        )
+        requested_user_modules = _normalize_module_list(payload.modulosAcceso)
+        selected_user_modules = [module for module in requested_user_modules if module in effective_modules]
+        if payload.modulosAcceso is not None and not selected_user_modules and effective_modules:
+            selected_user_modules = sorted(effective_modules)
+
+        usuario.nombre = payload.nombre.strip()
+        usuario.login = login
+        usuario.email = email
+        usuario.rolID = int(payload.rolID)
+        usuario.sucursalID = int(payload.sucursalID)
+        usuario.estado = estado
+        if payload.password:
+            usuario.passwordHash = pwd_context.hash(payload.password)
+        usuario.updatedAt = datetime.now(timezone.utc)
+        _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
+
+        if payload.modulosAcceso is not None:
+            _ensure_usuario_modulo_table(db)
+            db.execute(
+                text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"),
+                {"user_id": int(usuario.idusuario)},
+            )
+            for modulo in selected_user_modules:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO petalops.usuario_modulo (usuario_id, modulo, activo, updated_at)
+                        VALUES (:user_id, :modulo, TRUE, CURRENT_TIMESTAMP)
+                        """
+                    ),
+                    {"user_id": int(usuario.idusuario), "modulo": modulo},
+                )
+
+        _audit_user_action(
+            db,
+            actor=auth,
+            action="USER_UPDATED",
+            target=usuario,
+            extra={
+                "rolID": int(usuario.rolID),
+                "sucursalID": int(usuario.sucursalID),
+                "estado": estado,
+                "modulosAcceso": selected_user_modules,
+                "passwordUpdated": bool(payload.password),
+            },
+        )
+        db.commit()
+        db.refresh(usuario)
+
+        return UserCreateResponse(
+            status="ok",
+            userID=int(usuario.idusuario),
+            empresaID=int(usuario.empresaID),
+            sucursalID=int(usuario.sucursalID),
+            login=str(usuario.login),
+            email=str(usuario.email),
+            rolID=int(usuario.rolID),
+            estado=str(usuario.estado),
+            modulosAcceso=(selected_user_modules if payload.modulosAcceso is not None else None),
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        auth_logger.error("Error SQL actualizando usuario", exc_info=True)
+        raise _err("AUTH_USER_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
 @router.put("/usuarios/{user_id}/estado", response_model=UserCreateResponse)
 def actualizar_estado_usuario(
     user_id: int,
@@ -688,18 +1045,7 @@ def actualizar_estado_usuario(
     db: Session = Depends(get_db),
     auth=Depends(require_admin_role),
 ):
-    usuario = db.query(Usuario).filter(Usuario.idusuario == user_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    if not is_super_admin_context(auth) and int(usuario.empresaID) != int(auth.empresaID):
-        raise HTTPException(status_code=403, detail="No puedes modificar usuarios de otra empresa")
-
-    target_role = db.query(Rol).filter(Rol.idRol == usuario.rolID).first()
-    if target_role:
-        target_role_name = normalize_role_name(target_role.nombreRol)
-        if not is_super_admin_context(auth) and target_role_name in STRUCTURAL_ROLES:
-            raise HTTPException(status_code=403, detail="No puedes modificar usuarios de rol estructural")
+    usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
 
     estado = str(payload.estado or "").strip().title()
     if estado not in {"Activo", "Inactivo"}:
@@ -726,6 +1072,47 @@ def actualizar_estado_usuario(
         rolID=int(usuario.rolID),
         estado=str(usuario.estado),
     )
+
+
+@router.delete("/usuarios/id/{user_id}", response_model=UserDeleteResponse)
+def eliminar_usuario(
+    user_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    try:
+        if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para eliminar usuarios")
+
+        usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
+        target_id = int(usuario.idusuario)
+        if int(auth.userID) == target_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No puedes eliminar tu propio usuario")
+
+        _ensure_usuario_modulo_table(db)
+        db.execute(text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"), {"user_id": target_id})
+        _audit_user_action(
+            db,
+            actor=auth,
+            action="USER_DELETED",
+            target=usuario,
+            extra={
+                "login": str(usuario.login or ""),
+                "email": str(usuario.email or ""),
+                "rolID": int(usuario.rolID),
+            },
+        )
+        db.delete(usuario)
+        db.commit()
+        return UserDeleteResponse(status="ok", userID=target_id)
+    except SQLAlchemyError:
+        db.rollback()
+        auth_logger.error("Error SQL eliminando usuario", exc_info=True)
+        raise _err(
+            "AUTH_USER_DELETE_DB_ERROR",
+            "No fue posible eliminar el usuario. Revisa si tiene movimientos o referencias asociadas.",
+            status_code=500,
+        )
 
 
 @router.get("/usuarios/roles", response_model=RoleListResponse)
