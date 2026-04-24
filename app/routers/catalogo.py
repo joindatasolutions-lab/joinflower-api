@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import String, cast, func
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session, joinedload
 from app.core.logger import get_logger
 from app.database import get_db
 from app.models.producto import Producto
-from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.security import assert_same_empresa, get_current_auth_context
 from app.services.cache import get_cache, set_cache
 
 router = APIRouter()
@@ -23,26 +23,44 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
     )
 
 
-@router.get("/catalogo/{empresa_id}", dependencies=[Depends(require_module_access("catalogo", "puedeVer"))])
-def obtener_catalogo(empresa_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+@router.get("/catalogo/{empresa_id}")
+def obtener_catalogo(
+    empresa_id: int,
+    q: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
     try:
         assert_same_empresa(auth, empresa_id)
+        if not (auth.can("catalogo", "puedeVer") or auth.can("pedidos", "puedeVer")):
+            raise _err("CATALOGO_FORBIDDEN", "No tienes acceso al catálogo", status_code=403)
 
-        cache_key = f"catalogo:{empresa_id}"
-        cached = get_cache(cache_key)
-        if cached is not None:
-            return cached
+        term = str(q or "").strip()
+        cache_key = f"catalogo:{empresa_id}:{term.lower()}" if term else f"catalogo:{empresa_id}"
+        if not term:
+            cached = get_cache(cache_key)
+            if cached is not None:
+                return cached
 
-        productos = (
+        productos_query = (
             db.query(Producto)
             .options(joinedload(Producto.categoria))
             .filter(
                 _activo_truthy(Producto.activo),
                 Producto.empresaID == empresa_id
             )
-            .order_by(Producto.nombreProducto.asc())
-            .all()
         )
+
+        if term:
+            like = f"%{term}%"
+            productos_query = productos_query.filter(
+                or_(
+                    Producto.nombreProducto.ilike(like),
+                    Producto.descripcion.ilike(like),
+                )
+            )
+
+        productos = productos_query.order_by(Producto.nombreProducto.asc()).all()
 
         response = [
             {
@@ -57,8 +75,9 @@ def obtener_catalogo(empresa_id: int, db: Session = Depends(get_db), auth=Depend
             for p in productos
         ]
 
-        # Product catalog is read-heavy and changes less frequently.
-        set_cache(cache_key, response, ttl=600)
+        if not term:
+            # Product catalog is read-heavy and changes less frequently.
+            set_cache(cache_key, response, ttl=600)
         return response
     except SQLAlchemyError:
         catalogo_logger.error("Error SQL al obtener catálogo. empresa_id=%s", empresa_id, exc_info=True)
