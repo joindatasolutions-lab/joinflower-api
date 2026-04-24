@@ -127,6 +127,7 @@ class PedidoDetalleResponse(BaseModel):
     cliente: dict
     destinatario: dict
     financiero: dict
+    camposEmpresa: Optional[dict] = None
     productos: List[PedidoDetalleProducto]
 
 

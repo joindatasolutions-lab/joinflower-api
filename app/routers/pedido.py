@@ -271,6 +271,68 @@ def _flora_phase2_ready(db: Session) -> bool:
     )
 
 
+def _empresa_menu_ready(db: Session) -> bool:
+    return _table_exists(db, "empresa_menu")
+
+
+def _load_empresa_menu_rows(db: Session, *, empresa_id: int, seccion: str = "pedido_detalle") -> list[dict]:
+    if not _empresa_menu_ready(db):
+        return []
+
+    rows = db.execute(
+        text(
+            """
+            SELECT codigo, titulo, seccion, tipo_control, opciones_json, requerido_aprobacion, activo, orden
+            FROM petalops.empresa_menu
+            WHERE empresa_id = :empresa_id
+              AND seccion = :seccion
+              AND activo = TRUE
+            ORDER BY orden ASC, titulo ASC
+            """
+        ),
+        {"empresa_id": int(empresa_id), "seccion": seccion},
+    ).mappings().all()
+
+    result = []
+    for row in rows:
+        opciones = row.get("opciones_json")
+        if isinstance(opciones, str):
+            try:
+                opciones = json.loads(opciones)
+            except ValueError:
+                opciones = []
+        if not isinstance(opciones, list):
+            opciones = []
+        result.append(
+            {
+                "codigo": str(row["codigo"]),
+                "titulo": str(row["titulo"]),
+                "seccion": str(row["seccion"]),
+                "tipoControl": str(row["tipo_control"]),
+                "opciones": [str(item) for item in opciones if str(item).strip()],
+                "requeridoAprobacion": bool(row["requerido_aprobacion"]),
+                "activo": bool(row["activo"]),
+                "orden": int(row["orden"] or 0),
+            }
+        )
+    return result
+
+
+def _load_empresa_menu_config(db: Session, *, empresa_id: int, seccion: str = "pedido_detalle") -> dict[str, dict]:
+    rows = _load_empresa_menu_rows(db, empresa_id=int(empresa_id), seccion=seccion)
+    return {row["codigo"]: row for row in rows}
+
+
+def _tenant_order_rules(db: Session, empresa_id: int) -> dict:
+    config = _load_empresa_menu_config(db, empresa_id=int(empresa_id))
+    payment_field = config.get("pedido_metodos_pago")
+    channel_field = config.get("pedido_canal_venta")
+    return {
+        "require_payment_before_approval": bool(payment_field and payment_field["requeridoAprobacion"]),
+        "require_sales_channel_before_approval": bool(channel_field and channel_field["requeridoAprobacion"]),
+    }
+
+
 def _safe_parse_json(raw: str | None) -> dict:
     text_value = str(raw or "").strip()
     if not text_value:
@@ -315,7 +377,7 @@ def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | No
 
 
 def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
-    if int(empresa_id) == FLORA_EMPRESA_ID and _flora_phase2_ready(db):
+    if _flora_phase2_ready(db):
         metodos_rows = db.execute(
             text(
                 """
@@ -387,7 +449,7 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
 
 
 def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
-    rules = _tenant_order_rules(int(empresa_id))
+    rules = _tenant_order_rules(db, int(empresa_id))
     pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
 
     missing = []
@@ -830,6 +892,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
         pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
+        campos_empresa = _load_empresa_menu_rows(db, empresa_id=int(pedido.empresaID))
 
         return PedidoDetalleResponse(
             pedidoID=int(pedido.idPedido),
@@ -870,6 +933,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "cuentaBancaria": pago_resumen["cuentaBancaria"],
                 "canalFlora": pago_resumen["canalFlora"],
             },
+            camposEmpresa={"pedidoDetalle": campos_empresa},
             productos=productos,
         )
     except HTTPException:
@@ -993,11 +1057,13 @@ def actualizar_detalle_pedido(
                 if payload.mensajeTarjeta is not None:
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
 
-        if int(pedido.empresaID) == FLORA_EMPRESA_ID and (
-            payload.metodosPago is not None or payload.canalFlora is not None
-        ):
+        if payload.metodosPago is not None or payload.canalFlora is not None:
+            menu_config = _load_empresa_menu_config(db, empresa_id=int(pedido.empresaID))
+            payment_field = menu_config.get("pedido_metodos_pago")
+            channel_field = menu_config.get("pedido_canal_venta")
             metodos_pago = [str(item or "").strip() for item in (payload.metodosPago or []) if str(item or "").strip()]
-            invalid_payment_methods = [item for item in metodos_pago if item not in FLORA_PAYMENT_METHODS]
+            allowed_payment_methods = set(payment_field["opciones"]) if payment_field else set()
+            invalid_payment_methods = [item for item in metodos_pago if allowed_payment_methods and item not in allowed_payment_methods]
             if invalid_payment_methods:
                 raise HTTPException(
                     status_code=400,
@@ -1005,7 +1071,8 @@ def actualizar_detalle_pedido(
                 )
 
             canal_flora = str(payload.canalFlora or "").strip() or None
-            if canal_flora and canal_flora not in FLORA_SALES_CHANNELS:
+            allowed_channels = set(channel_field["opciones"]) if channel_field else set()
+            if canal_flora and allowed_channels and canal_flora not in allowed_channels:
                 raise HTTPException(
                     status_code=400,
                     detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
