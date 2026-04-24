@@ -79,6 +79,18 @@ FLORA_SALES_CHANNELS = {
 }
 
 
+def _tenant_order_rules(empresa_id: int) -> dict:
+    if int(empresa_id) == FLORA_EMPRESA_ID:
+        return {
+            "require_payment_before_approval": True,
+            "require_sales_channel_before_approval": True,
+        }
+    return {
+        "require_payment_before_approval": False,
+        "require_sales_channel_before_approval": False,
+    }
+
+
 def _activo_truthy(column):
     return func.lower(cast(column, String)).in_(["true", "t", "1"])
 
@@ -372,6 +384,23 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
         "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
         "canalFlora": _extract_canal_flora(row.get("raw_respuesta")),
     }
+
+
+def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
+    rules = _tenant_order_rules(int(empresa_id))
+    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
+
+    missing = []
+    if rules["require_payment_before_approval"] and not pago_resumen["metodosPago"]:
+        missing.append("método de pago")
+    if rules["require_sales_channel_before_approval"] and not pago_resumen["canalFlora"]:
+        missing.append("medio de venta")
+
+    if not missing:
+        return {"puedeAprobar": True, "motivo": None, "pagoResumen": pago_resumen}
+
+    motivo = "Debes confirmar " + " y ".join(missing) + " antes de aprobar."
+    return {"puedeAprobar": False, "motivo": motivo, "pagoResumen": pago_resumen}
 
 
 def _upsert_pago_flora(
@@ -708,6 +737,12 @@ def listar_pedidos(
     items: list[PedidoListItem] = []
     for pedido_id in pedido_ids:
         pedido, cliente, entrega, estado_db = rows_map[pedido_id]
+        approval_gate = _approval_gate_summary(
+            db,
+            pedido_id=pedido_id,
+            empresa_id=int(pedido.empresaID),
+        )
+
         items.append(
             PedidoListItem(
                 pedidoID=pedido_id,
@@ -725,6 +760,9 @@ def listar_pedidos(
                 productos=productos_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
                 metodoPago=pago_por_pedido.get(pedido_id),
+                canalFlora=approval_gate["pagoResumen"]["canalFlora"],
+                puedeAprobar=approval_gate["puedeAprobar"],
+                motivoBloqueoAprobacion=approval_gate["motivo"],
                 estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
@@ -1090,6 +1128,14 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
+
+    approval_gate = _approval_gate_summary(
+        db,
+        pedido_id=int(pedido.idPedido),
+        empresa_id=int(pedido.empresaID),
+    )
+    if not approval_gate["puedeAprobar"]:
+        raise HTTPException(status_code=400, detail=approval_gate["motivo"])
 
     pendientes = _ids_estado_pendiente(db)
     if pendientes and int(pedido.estadoPedidoID) not in pendientes:

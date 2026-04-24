@@ -90,6 +90,9 @@ class PedidoListItem(BaseModel):
     productos: List[str]
     total: float
     metodoPago: Optional[str] = None
+    canalFlora: Optional[str] = None
+    puedeAprobar: Optional[bool] = None
+    motivoBloqueoAprobacion: Optional[str] = None
     estado: str
     telefono: Optional[str] = None
     telefonoCompleto: Optional[str] = None
