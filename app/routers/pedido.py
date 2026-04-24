@@ -1,3 +1,4 @@
+import json
 import os
 from decimal import Decimal
 
@@ -40,6 +41,42 @@ from app.middlewares.rate_limit import limiter
 
 router = APIRouter()
 pedido_logger = get_logger("pedido")
+
+FLORA_EMPRESA_ID = 3
+FLORA_PAYMENT_METHODS = {
+    "Cuenta por cobrar",
+    "Efectivo",
+    "Canje",
+    "Contraentrega",
+    "Cotizacion",
+    "Obsequio",
+    "Paypal",
+    "Link bold",
+    "Link payu",
+    "Link wompi",
+    "Datafono credibanco",
+    "Datafono Bold",
+    "Transferencia 0257",
+    "Transferencia 0005",
+    "Transferencia 3220",
+    "Transferencia 4038",
+    "Transferencia 4966",
+    "Transferencia 3671",
+    "Transferencia 6913",
+    "Transferencia 5431",
+    "Transferencia 1340",
+    "Transferencia Jaque",
+    "Transferencia QR",
+    "Anulado",
+}
+FLORA_SALES_CHANNELS = {
+    "Huawei",
+    "Samsung",
+    "Andrea",
+    "Página Web",
+    "Presencial",
+    "Rappi",
+}
 
 
 def _activo_truthy(column):
@@ -192,6 +229,182 @@ def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int
     return Decimal(str(row[0]))
 
 
+def _parse_payment_methods(value: str | None) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split("|") if str(part).strip()]
+
+
+def _safe_parse_json(raw: str | None) -> dict:
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return {}
+    try:
+        parsed = json.loads(text_value)
+    except (TypeError, ValueError):
+        return {"_legacyRawRespuesta": text_value}
+    return parsed if isinstance(parsed, dict) else {"_legacyRawRespuesta": parsed}
+
+
+def _extract_canal_flora(raw_respuesta: str | None) -> str | None:
+    payload = _safe_parse_json(raw_respuesta)
+    metadata = payload.get("_petalopsMetadata")
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get("canalFlora")
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | None) -> str | None:
+    payload = _safe_parse_json(raw_respuesta)
+    metadata = payload.get("_petalopsMetadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    cleaned_channel = str(canal_flora or "").strip()
+    if cleaned_channel:
+        metadata["canalFlora"] = cleaned_channel
+    else:
+        metadata.pop("canalFlora", None)
+
+    if metadata:
+        payload["_petalopsMetadata"] = metadata
+    else:
+        payload.pop("_petalopsMetadata", None)
+
+    if not payload:
+        return None
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
+    row = db.execute(
+        text(
+            """
+            SELECT metodo_pago, proveedor, referencia, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+
+    if not row:
+        return {
+            "metodoPago": None,
+            "metodosPago": [],
+            "cuentaBancaria": None,
+            "canalFlora": None,
+        }
+
+    metodo_pago = str(row.get("metodo_pago") or "").strip() or None
+    metodos_pago = _parse_payment_methods(metodo_pago)
+    return {
+        "metodoPago": metodo_pago,
+        "metodosPago": metodos_pago,
+        "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
+        "canalFlora": _extract_canal_flora(row.get("raw_respuesta")),
+    }
+
+
+def _upsert_pago_flora(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    monto: Decimal,
+    metodos_pago: list[str],
+    canal_flora: str | None,
+):
+    row = db.execute(
+        text(
+            """
+            SELECT id_pago, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+
+    metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+    raw_respuesta = _serialize_pago_metadata(row.get("raw_respuesta") if row else None, canal_flora=canal_flora)
+
+    if row:
+        db.execute(
+            text(
+                """
+                UPDATE petalops.pago
+                SET metodo_pago = :metodo_pago,
+                    raw_respuesta = :raw_respuesta,
+                    monto = :monto,
+                    updated_at = NOW()
+                WHERE id_pago = :id_pago
+                  AND empresa_id = :empresa_id
+                """
+            ),
+            {
+                "id_pago": int(row["id_pago"]),
+                "empresa_id": int(empresa_id),
+                "metodo_pago": metodo_pago,
+                "raw_respuesta": raw_respuesta,
+                "monto": monto,
+            },
+        )
+        return
+
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.pago (
+                empresa_id,
+                pedido_id,
+                proveedor,
+                referencia,
+                transaccion_id,
+                moneda,
+                monto,
+                metodo_pago,
+                checkouturl,
+                raw_respuesta,
+                estado_pago_id,
+                fecha_pago,
+                created_at,
+                updated_at
+            ) VALUES (
+                :empresa_id,
+                :pedido_id,
+                'manual',
+                NULL,
+                NULL,
+                'COP',
+                :monto,
+                :metodo_pago,
+                NULL,
+                :raw_respuesta,
+                NULL,
+                NOW(),
+                NOW(),
+                NOW()
+            )
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "pedido_id": int(pedido_id),
+            "monto": monto,
+            "metodo_pago": metodo_pago,
+            "raw_respuesta": raw_respuesta,
+        },
+    )
+
+
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 @limiter.limit("100/minute")
 def listar_pedidos(
@@ -278,9 +491,23 @@ def listar_pedidos(
         .all()
     )
 
+    pagos_rows = db.execute(
+        text(
+            """
+            SELECT pedido_id, metodo_pago
+            FROM petalops.pago
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = ANY(:pedido_ids)
+            """
+        ),
+        {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+    ).all()
+
     productos_por_pedido: dict[int, list[str]] = {}
     for pedido_id, nombre_producto in detalles_rows:
         productos_por_pedido.setdefault(int(pedido_id), []).append(str(nombre_producto or "Producto"))
+
+    pago_por_pedido = {int(row[0]): (str(row[1]).strip() if row[1] is not None else None) for row in pagos_rows}
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
 
@@ -303,7 +530,7 @@ def listar_pedidos(
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
-                metodoPago=None,
+                metodoPago=pago_por_pedido.get(pedido_id),
                 estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
@@ -370,6 +597,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         ]
 
         fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
+        pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
 
         return PedidoDetalleResponse(
             pedidoID=int(pedido.idPedido),
@@ -405,8 +633,10 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "domicilio": 0.0,
                 "total": float(pedido.totalNeto or 0),
                 "estadoPago": None,
-                "metodoPago": None,
-                "cuentaBancaria": None,
+                "metodoPago": pago_resumen["metodoPago"],
+                "metodosPago": pago_resumen["metodosPago"],
+                "cuentaBancaria": pago_resumen["cuentaBancaria"],
+                "canalFlora": pago_resumen["canalFlora"],
             },
             productos=productos,
         )
@@ -443,6 +673,8 @@ class ActualizarDetallePedidoRequest(BaseModel):
     direccion: str | None = None
     barrioNombre: str | None = None
     mensajeTarjeta: str | None = None
+    metodosPago: list[str] | None = None
+    canalFlora: str | None = None
 
 
 @router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
@@ -529,50 +761,33 @@ def actualizar_detalle_pedido(
                 if payload.mensajeTarjeta is not None:
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
 
-        payload.productoID = None
-        payload.fechaEntrega = None
-        payload.horaEntrega = None
-
-        # Actualizar producto en el primer detalle si se envió productoID.
-        # Si el catálogo no expone un precio vigente en esta entidad, preservamos el snapshot actual.
-        if payload.productoID is not None:
-            detalle = (
-                db.query(PedidoDetalle)
-                .filter(PedidoDetalle.pedidoID == pedido_id)
-                .first()
-            )
-            if detalle:
-                producto = (
-                    db.query(Producto)
-                    .filter(
-                        Producto.idProducto == payload.productoID,
-                        Producto.empresaID == pedido.empresaID,
-                        _activo_truthy(Producto.activo),
-                    )
-                    .first()
+        if int(pedido.empresaID) == FLORA_EMPRESA_ID and (
+            payload.metodosPago is not None or payload.canalFlora is not None
+        ):
+            metodos_pago = [str(item or "").strip() for item in (payload.metodosPago or []) if str(item or "").strip()]
+            invalid_payment_methods = [item for item in metodos_pago if item not in FLORA_PAYMENT_METHODS]
+            if invalid_payment_methods:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "PAYMENT_METHOD_INVALID", "message": f"Métodos de pago inválidos: {', '.join(invalid_payment_methods)}"},
                 )
-                if not producto:
-                    raise HTTPException(status_code=400, detail={"code": "PRODUCTO_NOT_FOUND", "message": "Producto no encontrado"})
-                detalle.productoID = payload.productoID
-                precio_unitario = float(detalle.precioUnitario or 0)
-                detalle.subtotal = precio_unitario * float(detalle.cantidad or 1)
 
-        # Actualizar fecha y hora programada de entrega en el intento más reciente.
-        if payload.fechaEntrega is not None or payload.horaEntrega is not None:
-            entrega = (
-                db.query(Entrega)
-                .filter(Entrega.pedidoID == pedido_id)
-                .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
-                .first()
+            canal_flora = str(payload.canalFlora or "").strip() or None
+            if canal_flora and canal_flora not in FLORA_SALES_CHANNELS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
+                )
+
+            monto_pago = Decimal(str(pedido.totalNeto or pedido.totalBruto or 0))
+            _upsert_pago_flora(
+                db,
+                pedido_id=int(pedido.idPedido),
+                empresa_id=int(pedido.empresaID),
+                monto=monto_pago,
+                metodos_pago=metodos_pago,
+                canal_flora=canal_flora,
             )
-            if entrega:
-                if payload.fechaEntrega is not None:
-                    try:
-                        entrega.fechaEntregaProgramada = datetime.fromisoformat(payload.fechaEntrega)
-                    except ValueError:
-                        raise HTTPException(status_code=400, detail={"code": "FECHA_INVALIDA", "message": "Formato de fecha inválido"})
-                if payload.horaEntrega is not None:
-                    entrega.rangoHora = payload.horaEntrega or None
 
         db.commit()
         return {"status": "ok", "pedidoID": pedido_id}
