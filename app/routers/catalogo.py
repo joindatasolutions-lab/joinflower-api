@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import String, cast, func, or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 from app.core.logger import get_logger
 from app.database import get_db
 from app.models.producto import Producto
@@ -44,7 +44,6 @@ def obtener_catalogo(
 
         productos_query = (
             db.query(Producto)
-            .options(joinedload(Producto.categoria))
             .filter(
                 _activo_truthy(Producto.activo),
                 Producto.empresaID == empresa_id
@@ -70,7 +69,7 @@ def obtener_catalogo(
                 "imagenUrl": getattr(p, "imagenUrl", None),
                 "esDestacado": False,
                 "ordenCatalogo": None,
-                "nombreCategoria": p.categoria.nombreCategoria if p.categoria else None
+                "nombreCategoria": None,
             }
             for p in productos
         ]
