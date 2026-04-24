@@ -58,6 +58,12 @@ router = APIRouter(
 produccion_logger = get_logger("produccion")
 
 
+def _utc_now_naive() -> datetime:
+    # These production timestamps are stored in PostgreSQL as timestamp without time zone.
+    # Keep writes naive and consistent to avoid subtracting aware vs naive datetimes.
+    return datetime.utcnow()
+
+
 def _activo_truthy(column):
     return func.lower(func.cast(column, String)).in_(["true", "t", "1"])
 
@@ -335,7 +341,7 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
             or 0
         ) + 1
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = _utc_now_naive()
         db.add(
             Produccion(
                 empresaID=int(pedido.empresaID),
@@ -410,7 +416,7 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
         raise HTTPException(status_code=400, detail="Estado de florista inválido")
 
     florista.activo = 1 if nuevo_estado == "Activo" else 0
-    florista.updatedAt = datetime.now(timezone.utc)
+    florista.updatedAt = _utc_now_naive()
 
     perfil = db.query(PerfilFlorista).filter(PerfilFlorista.empleadoID == florista.idFlorista).first()
     if not perfil:
@@ -730,7 +736,7 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     )
 
     anterior = int(produccion.floristaID) if produccion.floristaID else None
-    now_utc = datetime.now(timezone.utc)
+    now_utc = _utc_now_naive()
 
     produccion.floristaID = int(florista.idFlorista)
     produccion.fechaProgramadaProduccion = fecha_programada
@@ -843,7 +849,7 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
         if simultaneos >= max_simultaneos:
             raise HTTPException(status_code=400, detail="El florista alcanzó sus trabajos simultáneos permitidos")
 
-    now_utc = datetime.now(timezone.utc)
+    now_utc = _utc_now_naive()
     produccion.estado = produccion_service.estado_produccion_id(db, nuevo_estado)
 
     if nuevo_estado == ESTADO_EN_PRODUCCION and not produccion.fechaInicio:
@@ -902,7 +908,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
     if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
         raise HTTPException(status_code=400, detail="No se puede recalcular producción: el domicilio ya está EnRuta")
 
-    now_utc = datetime.now(timezone.utc)
+    now_utc = _utc_now_naive()
 
     if estado_actual == ESTADO_PENDIENTE:
         produccion.tiempoEstimadoMin = tiempo_estimado

@@ -109,6 +109,41 @@ def _normalize_movimiento_tipo(value: str) -> str:
     return mapping[normalized]
 
 
+def _get_proveedor_for_empresa(db: Session, empresa_id: int, proveedor_id: int) -> Proveedor | None:
+    query = db.query(Proveedor).filter(Proveedor.idProveedor == int(proveedor_id))
+    if _has_column(db, "proveedor", "empresa_id"):
+        query = query.filter((Proveedor.empresaID == int(empresa_id)) | (Proveedor.empresaID.is_(None)))
+    return query.first()
+
+
+def _load_item_relations(db: Session, item: Inventario) -> tuple[Insumo | None, Proveedor | None]:
+    insumo = (
+        db.query(Insumo)
+        .filter(
+            Insumo.idInsumo == int(item.insumoID),
+            Insumo.empresaID == int(item.empresaID),
+        )
+        .first()
+    )
+    proveedor = None
+    if insumo and insumo.proveedorID is not None:
+        proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == int(insumo.proveedorID)).first()
+    return insumo, proveedor
+
+
+def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
+    insumo, proveedor = _load_item_relations(db, item)
+    return _to_item(
+        item,
+        codigo=(str(insumo.codigoBarra) if insumo and insumo.codigoBarra else None),
+        nombre=(str(insumo.nombreInsumo) if insumo and insumo.nombreInsumo else None),
+        categoria=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else "Insumos"),
+        proveedor_id=(int(insumo.proveedorID) if insumo and insumo.proveedorID is not None else None),
+        proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
+        codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
+    )
+
+
 @router.get("/proveedores", response_model=ProveedorListResponse)
 def listar_proveedores(
     empresa_id: int = Query(..., alias="empresaID"),
@@ -152,24 +187,47 @@ def crear_proveedor(
     assert_same_empresa(auth, empresa_id)
 
     now = datetime.now(timezone.utc)
-    proveedor_kwargs = {
-        "nombreProveedor": payload.nombre.strip(),
-        "codigoProveedor": (payload.codigoProveedor.strip() if payload.codigoProveedor else None),
-        "activo": bool(payload.activo),
-        "createdAt": now,
-        "updatedAt": now,
-    }
-    if _has_column(db, "proveedor", "empresa_id"):
-        proveedor_kwargs["empresaID"] = int(empresa_id)
-
-    proveedor = Proveedor(**proveedor_kwargs)
-    db.add(proveedor)
+    empresa_scope = int(empresa_id) if _has_column(db, "proveedor", "empresa_id") else None
     try:
+        row = db.execute(
+            text(
+                """
+                INSERT INTO petalops.proveedor (
+                    empresa_id,
+                    nombre_proveedor,
+                    codigo_proveedor,
+                    activo,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :empresa_id,
+                    :nombre,
+                    :codigo_proveedor,
+                    :activo,
+                    :created_at,
+                    :updated_at
+                )
+                RETURNING id_proveedor
+                """
+            ),
+            {
+                "empresa_id": empresa_scope,
+                "nombre": payload.nombre.strip(),
+                "codigo_proveedor": (payload.codigoProveedor.strip() if payload.codigoProveedor else None),
+                "activo": 1 if bool(payload.activo) else 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        ).first()
         db.commit()
-        db.refresh(proveedor)
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear proveedor (codigo duplicado o datos invalidos)")
+
+    proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == int(row[0])).first()
+    if not proveedor:
+        raise HTTPException(status_code=500, detail="Proveedor creado pero no se pudo recargar")
 
     return ProveedorItem(
         idProveedor=int(proveedor.idProveedor),
@@ -253,35 +311,43 @@ def crear_item_inventario(
         raise HTTPException(status_code=400, detail="stockActual no puede ser negativo")
 
     if payload.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(
-            Proveedor.idProveedor == int(payload.proveedorID),
-            Proveedor.empresaID == int(payload.empresaID),
-        ).first()
+        proveedor = _get_proveedor_for_empresa(db, int(payload.empresaID), int(payload.proveedorID))
         if not proveedor:
             raise HTTPException(status_code=400, detail="Proveedor no valido para la empresa")
 
+    if auth.sucursalID is None:
+        raise HTTPException(status_code=400, detail="El usuario autenticado no tiene sucursal asignada")
+
     now = datetime.now(timezone.utc)
-    item = Inventario(
+    insumo = Insumo(
         empresaID=int(payload.empresaID),
-        codigo=payload.codigo.strip(),
-        nombre=payload.nombre.strip(),
-        categoria=payload.categoria.strip(),
-        subcategoria=(payload.subcategoria.strip() if payload.subcategoria else None),
-        color=(payload.color.strip() if payload.color else None),
-        descripcion=(payload.descripcion.strip() if payload.descripcion else None),
+        nombreInsumo=payload.nombre.strip(),
+        codigoBarra=payload.codigo.strip(),
+        unidadMedida=payload.categoria.strip(),
         proveedorID=(int(payload.proveedorID) if payload.proveedorID is not None else None),
-        codigoProveedor=(payload.codigoProveedor.strip() if payload.codigoProveedor else None),
+        activo=bool(payload.activo),
+        createdAt=now,
+        updatedAt=now,
+    )
+    db.add(insumo)
+
+    try:
+        db.flush()
+
+        item = Inventario(
+        empresaID=int(payload.empresaID),
+        sucursalID=int(auth.sucursalID),
+        insumoID=int(insumo.idInsumo),
         stockActual=payload.stockActual,
+        stockReservado=Decimal("0"),
         stockMinimo=payload.stockMinimo,
         valorUnitario=payload.valorUnitario,
         activo=bool(payload.activo),
         fechaUltimaActualizacion=now,
         createdAt=now,
         updatedAt=now,
-    )
-
-    db.add(item)
-    try:
+        )
+        db.add(item)
         db.flush()
 
         if Decimal(payload.stockActual) > 0:
@@ -303,12 +369,7 @@ def crear_item_inventario(
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear item de inventario (codigo duplicado o datos invalidos)")
 
-    proveedor_nombre = None
-    if item.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
-        proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
-
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
 
 
 @router.put("/{inventario_id}", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -323,23 +384,21 @@ def actualizar_item_inventario(
         raise HTTPException(status_code=404, detail="Item no encontrado")
 
     assert_same_empresa(auth, int(item.empresaID))
+    insumo = db.query(Insumo).filter(Insumo.idInsumo == int(item.insumoID), Insumo.empresaID == int(item.empresaID)).first()
+    if not insumo:
+        raise HTTPException(status_code=404, detail="Insumo asociado no encontrado")
 
     if payload.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(
-            Proveedor.idProveedor == int(payload.proveedorID),
-            Proveedor.empresaID == int(item.empresaID),
-        ).first()
+        proveedor = _get_proveedor_for_empresa(db, int(item.empresaID), int(payload.proveedorID))
         if not proveedor:
             raise HTTPException(status_code=400, detail="Proveedor no valido para la empresa")
 
     now = datetime.now(timezone.utc)
-    item.nombre = payload.nombre.strip()
-    item.categoria = payload.categoria.strip()
-    item.subcategoria = (payload.subcategoria.strip() if payload.subcategoria else None)
-    item.color = (payload.color.strip() if payload.color else None)
-    item.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
-    item.proveedorID = (int(payload.proveedorID) if payload.proveedorID is not None else None)
-    item.codigoProveedor = (payload.codigoProveedor.strip() if payload.codigoProveedor else None)
+    insumo.nombreInsumo = payload.nombre.strip()
+    insumo.unidadMedida = payload.categoria.strip()
+    insumo.proveedorID = (int(payload.proveedorID) if payload.proveedorID is not None else None)
+    insumo.updatedAt = now
+    insumo.activo = bool(item.activo)
     item.stockMinimo = payload.stockMinimo
     item.valorUnitario = payload.valorUnitario
     item.fechaUltimaActualizacion = now
@@ -352,12 +411,7 @@ def actualizar_item_inventario(
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible actualizar item de inventario")
 
-    proveedor_nombre = None
-    if item.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
-        proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
-
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
 
 
 @router.put("/{inventario_id}/stock", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -423,12 +477,7 @@ def ajustar_stock_inventario(
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible ajustar stock")
 
-    proveedor_nombre = None
-    if item.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
-        proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
-
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
 
 
 @router.put("/{inventario_id}/activo", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
@@ -448,6 +497,10 @@ def actualizar_activo_inventario(
     item.activo = bool(payload.activo)
     item.fechaUltimaActualizacion = now
     item.updatedAt = now
+    insumo = db.query(Insumo).filter(Insumo.idInsumo == int(item.insumoID), Insumo.empresaID == int(item.empresaID)).first()
+    if insumo:
+        insumo.activo = bool(payload.activo)
+        insumo.updatedAt = now
 
     try:
         db.commit()
@@ -456,12 +509,7 @@ def actualizar_activo_inventario(
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible actualizar estado del item")
 
-    proveedor_nombre = None
-    if item.proveedorID is not None:
-        proveedor = db.query(Proveedor).filter(Proveedor.idProveedor == item.proveedorID).first()
-        proveedor_nombre = str(proveedor.nombreProveedor) if proveedor else None
-
-    return InventarioMutationResponse(status="ok", item=_to_item(item, proveedor_nombre=proveedor_nombre))
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
 
 
 @router.get("/movimientos", response_model=MovimientoInventarioListResponse)

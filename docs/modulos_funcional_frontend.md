@@ -75,7 +75,7 @@ Permitir acceso por usuario unico sin pedir empresa al usuario final.
 
 ### Flujo funcional domiciliario
 1. Ver entregas asignadas.
-2. Abrir Maps / llamar / WhatsApp.
+2. Abrir Maps / WhatsApp.
 3. Marcar `Entregado` con evidencia o `NoEntregado` con motivo.
 
 ### Resultado esperado
