@@ -236,6 +236,29 @@ def _parse_payment_methods(value: str | None) -> list[str]:
     return [part.strip() for part in raw.split("|") if str(part).strip()]
 
 
+def _table_exists(db: Session, table_name: str) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'petalops'
+              AND table_name = :table_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name},
+    ).first()
+    return bool(row)
+
+
+def _flora_phase2_ready(db: Session) -> bool:
+    return all(
+        _table_exists(db, table_name)
+        for table_name in ("metodo_pago_catalogo", "pago_metodo", "canal_venta", "pedido_canal_venta")
+    )
+
+
 def _safe_parse_json(raw: str | None) -> dict:
     text_value = str(raw or "").strip()
     if not text_value:
@@ -280,6 +303,46 @@ def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | No
 
 
 def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
+    if int(empresa_id) == FLORA_EMPRESA_ID and _flora_phase2_ready(db):
+        metodos_rows = db.execute(
+            text(
+                """
+                SELECT mpc.nombre
+                FROM petalops.pago_metodo pm
+                JOIN petalops.metodo_pago_catalogo mpc
+                  ON mpc.id_metodo_pago = pm.metodo_pago_id
+                WHERE pm.empresa_id = :empresa_id
+                  AND pm.pedido_id = :pedido_id
+                ORDER BY pm.orden ASC, mpc.orden ASC, mpc.nombre ASC
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+        ).all()
+        canal_row = db.execute(
+            text(
+                """
+                SELECT cv.nombre
+                FROM petalops.pedido_canal_venta pcv
+                JOIN petalops.canal_venta cv
+                  ON cv.id_canal_venta = pcv.canal_venta_id
+                WHERE pcv.empresa_id = :empresa_id
+                  AND pcv.pedido_id = :pedido_id
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+        ).first()
+
+        metodos_pago = [str(row[0]).strip() for row in metodos_rows if row and row[0] is not None]
+        if metodos_pago or canal_row:
+            metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+            return {
+                "metodoPago": metodo_pago,
+                "metodosPago": metodos_pago,
+                "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
+                "canalFlora": (str(canal_row[0]).strip() if canal_row and canal_row[0] is not None else None),
+            }
+
     row = db.execute(
         text(
             """
@@ -357,52 +420,183 @@ def _upsert_pago_flora(
                 "monto": monto,
             },
         )
+    else:
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.pago (
+                    empresa_id,
+                    pedido_id,
+                    proveedor,
+                    referencia,
+                    transaccion_id,
+                    moneda,
+                    monto,
+                    metodo_pago,
+                    checkouturl,
+                    raw_respuesta,
+                    estado_pago_id,
+                    fecha_pago,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :empresa_id,
+                    :pedido_id,
+                    'manual',
+                    NULL,
+                    NULL,
+                    'COP',
+                    :monto,
+                    :metodo_pago,
+                    NULL,
+                    :raw_respuesta,
+                    NULL,
+                    NOW(),
+                    NOW(),
+                    NOW()
+                )
+                RETURNING id_pago
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "pedido_id": int(pedido_id),
+                "monto": monto,
+                "metodo_pago": metodo_pago,
+                "raw_respuesta": raw_respuesta,
+            },
+        )
+
+    if not _flora_phase2_ready(db):
         return
+
+    pago_row = db.execute(
+        text(
+            """
+            SELECT id_pago
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).first()
+    if not pago_row:
+        return
+    pago_id = int(pago_row[0])
+
+    if metodos_pago:
+        metodo_catalog_rows = db.execute(
+            text(
+                """
+                SELECT id_metodo_pago, nombre
+                FROM petalops.metodo_pago_catalogo
+                WHERE empresa_id = :empresa_id
+                  AND nombre = ANY(:names)
+                """
+            ),
+            {"empresa_id": int(empresa_id), "names": metodos_pago},
+        ).mappings().all()
+        metodo_by_name = {str(row["nombre"]).strip(): int(row["id_metodo_pago"]) for row in metodo_catalog_rows}
+    else:
+        metodo_by_name = {}
 
     db.execute(
         text(
             """
-            INSERT INTO petalops.pago (
-                empresa_id,
-                pedido_id,
-                proveedor,
-                referencia,
-                transaccion_id,
-                moneda,
-                monto,
-                metodo_pago,
-                checkouturl,
-                raw_respuesta,
-                estado_pago_id,
-                fecha_pago,
-                created_at,
-                updated_at
-            ) VALUES (
-                :empresa_id,
-                :pedido_id,
-                'manual',
-                NULL,
-                NULL,
-                'COP',
-                :monto,
-                :metodo_pago,
-                NULL,
-                :raw_respuesta,
-                NULL,
-                NOW(),
-                NOW(),
-                NOW()
-            )
+            DELETE FROM petalops.pago_metodo
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = :pedido_id
             """
         ),
-        {
-            "empresa_id": int(empresa_id),
-            "pedido_id": int(pedido_id),
-            "monto": monto,
-            "metodo_pago": metodo_pago,
-            "raw_respuesta": raw_respuesta,
-        },
+        {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
     )
+
+    for index, metodo in enumerate(metodos_pago, start=1):
+        metodo_id = metodo_by_name.get(metodo)
+        if metodo_id is None:
+            continue
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.pago_metodo (
+                    empresa_id,
+                    pago_id,
+                    pedido_id,
+                    metodo_pago_id,
+                    orden,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :empresa_id,
+                    :pago_id,
+                    :pedido_id,
+                    :metodo_pago_id,
+                    :orden,
+                    NOW(),
+                    NOW()
+                )
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "pago_id": pago_id,
+                "pedido_id": int(pedido_id),
+                "metodo_pago_id": metodo_id,
+                "orden": index,
+            },
+        )
+
+    db.execute(
+        text(
+            """
+            DELETE FROM petalops.pedido_canal_venta
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = :pedido_id
+            """
+        ),
+        {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+    )
+
+    if canal_flora:
+        canal_row = db.execute(
+            text(
+                """
+                SELECT id_canal_venta
+                FROM petalops.canal_venta
+                WHERE empresa_id = :empresa_id
+                  AND nombre = :nombre
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": int(empresa_id), "nombre": canal_flora},
+        ).first()
+        if canal_row:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.pedido_canal_venta (
+                        empresa_id,
+                        pedido_id,
+                        canal_venta_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :empresa_id,
+                        :pedido_id,
+                        :canal_venta_id,
+                        NOW(),
+                        NOW()
+                    )
+                    """
+                ),
+                {
+                    "empresa_id": int(empresa_id),
+                    "pedido_id": int(pedido_id),
+                    "canal_venta_id": int(canal_row[0]),
+                },
+            )
 
 
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
