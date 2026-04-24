@@ -1,6 +1,7 @@
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -371,6 +372,64 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "module": "pedido",
             },
         )
+
+
+class ActualizarDetallePedidoRequest(BaseModel):
+    productoID: int | None = None
+    fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
+    horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
+
+
+@router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def actualizar_detalle_pedido(
+    pedido_id: int,
+    payload: ActualizarDetallePedidoRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+    if not pedido:
+        raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
+    assert_same_empresa(auth, int(pedido.empresaID))
+
+    # Actualizar producto en el primer detalle si se envió productoID
+    if payload.productoID is not None:
+        detalle = (
+            db.query(PedidoDetalle)
+            .filter(PedidoDetalle.pedidoID == pedido_id)
+            .first()
+        )
+        if detalle:
+            producto = (
+                db.query(Producto)
+                .filter(Producto.idProducto == payload.productoID, _activo_truthy(Producto.activo))
+                .first()
+            )
+            if not producto:
+                raise HTTPException(status_code=400, detail={"code": "PRODUCTO_NOT_FOUND", "message": "Producto no encontrado"})
+            detalle.productoID = payload.productoID
+            detalle.precioUnitario = producto.precioBase
+            detalle.subtotal = float(producto.precioBase or 0) * float(detalle.cantidad or 1)
+
+    # Actualizar fecha y hora de entrega en la entrega más reciente
+    if payload.fechaEntrega is not None or payload.horaEntrega is not None:
+        entrega = (
+            db.query(Entrega)
+            .filter(Entrega.pedidoID == pedido_id)
+            .order_by(Entrega.intentoNumero.desc())
+            .first()
+        )
+        if entrega:
+            if payload.fechaEntrega is not None:
+                try:
+                    entrega.fechaEntrega = datetime.fromisoformat(payload.fechaEntrega)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail={"code": "FECHA_INVALIDA", "message": "Formato de fecha inválido"})
+            if payload.horaEntrega is not None:
+                entrega.rangoHora = payload.horaEntrega
+
+    db.commit()
+    return {"status": "ok", "pedidoID": pedido_id}
 
 
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
