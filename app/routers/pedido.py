@@ -1,11 +1,12 @@
 import os
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import or_, cast, String, func
+from sqlalchemy import or_, cast, String, func, text
 from datetime import datetime, timezone
 from io import BytesIO
 import textwrap
@@ -140,6 +141,57 @@ def _dias_anticipacion_produccion() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
 
 
+def _scheduled_entrega_datetime(entrega: Entrega | None) -> datetime | None:
+    if not entrega:
+        return None
+    return entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+
+
+def _parse_iso_date(value: str) -> datetime:
+    raw = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "FECHA_INVALIDA", "message": "Formato de fecha inválido"},
+        ) from exc
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int, producto_id: int) -> Decimal:
+    row = db.execute(
+        text(
+            """
+            SELECT ps.precio
+            FROM petalops.producto_sucursal ps
+            JOIN petalops.producto p
+              ON p.id_producto = ps.producto_id
+            WHERE p.id_producto = :producto_id
+              AND p.empresa_id = :empresa_id
+              AND ps.sucursal_id = :sucursal_id
+              AND lower(CAST(p.activo AS VARCHAR)) IN ('true', 't', '1')
+              AND lower(CAST(ps.activo AS VARCHAR)) IN ('true', 't', '1')
+            LIMIT 1
+            """
+        ),
+        {
+            "producto_id": int(producto_id),
+            "empresa_id": int(empresa_id),
+            "sucursal_id": int(sucursal_id),
+        },
+    ).first()
+    if not row or row[0] is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRODUCTO_PRICE_NOT_FOUND", "message": "No se encontró precio activo para ese arreglo en la sucursal"},
+        )
+    return Decimal(str(row[0]))
+
+
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 @limiter.limit("100/minute")
 def listar_pedidos(
@@ -271,9 +323,8 @@ def listar_pedidos(
 def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     try:
         row = (
-            db.query(Pedido, Cliente, Entrega, EstadoPedido)
+            db.query(Pedido, Cliente, EstadoPedido)
             .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
-            .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .filter(Pedido.idPedido == pedido_id)
             .first()
@@ -290,8 +341,15 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 },
             )
 
-        pedido, cliente, entrega, estado_db = row
+        pedido, cliente, estado_db = row
         assert_same_empresa(auth, int(pedido.empresaID))
+
+        entrega = (
+            db.query(Entrega)
+            .filter(Entrega.pedidoID == pedido.idPedido)
+            .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+            .first()
+        )
 
         detalles = (
             db.query(PedidoDetalle, Producto)
@@ -310,6 +368,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
             )
             for detalle, producto in detalles
         ]
+
+        fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
 
         return PedidoDetalleResponse(
             pedidoID=int(pedido.idPedido),
@@ -335,7 +395,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "telefono": entrega.telefonoDestino if entrega else None,
                 "direccion": entrega.direccion if entrega else None,
                 "barrio": entrega.barrioNombre if entrega else None,
-                "fechaEntrega": entrega.fechaEntrega.isoformat() if entrega and entrega.fechaEntrega else None,
+                "fechaEntrega": fecha_entrega_programada.isoformat() if fecha_entrega_programada else None,
                 "horaEntrega": entrega.rangoHora if entrega else None,
                 "mensajeTarjeta": entrega.mensaje if entrega else None,
             },
@@ -378,6 +438,11 @@ class ActualizarDetallePedidoRequest(BaseModel):
     productoID: int | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
+    destinatarioNombre: str | None = None
+    telefonoDestino: str | None = None
+    direccion: str | None = None
+    barrioNombre: str | None = None
+    mensajeTarjeta: str | None = None
 
 
 @router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
@@ -392,6 +457,81 @@ def actualizar_detalle_pedido(
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
+
+        detalle = (
+            db.query(PedidoDetalle)
+            .filter(PedidoDetalle.pedidoID == pedido_id)
+            .order_by(PedidoDetalle.idPedidoDetalle.asc())
+            .first()
+        )
+
+        if payload.productoID is not None and detalle:
+            precio_unitario = _find_branch_product_price(
+                db,
+                empresa_id=int(pedido.empresaID),
+                sucursal_id=int(pedido.sucursalID),
+                producto_id=int(payload.productoID),
+            )
+            detalle.productoID = payload.productoID
+            detalle.precioUnitario = precio_unitario
+            cantidad = Decimal(str(detalle.cantidad or 1))
+            detalle.subtotal = precio_unitario * cantidad
+
+            detalles = (
+                db.query(PedidoDetalle)
+                .filter(PedidoDetalle.pedidoID == pedido_id)
+                .all()
+            )
+            total_bruto = Decimal("0")
+            total_iva = Decimal("0")
+            for item in detalles:
+                cantidad_item = Decimal(str(item.cantidad or 0))
+                subtotal_item = Decimal(str(item.subtotal or 0))
+                iva_item = Decimal(str(item.ivaUnitario or 0)) * cantidad_item
+                total_bruto += subtotal_item
+                total_iva += iva_item
+
+            pedido.totalBruto = total_bruto
+            pedido.totalIva = total_iva
+            pedido.totalNeto = total_bruto + total_iva
+
+        if any(
+            value is not None
+            for value in (
+                payload.fechaEntrega,
+                payload.horaEntrega,
+                payload.destinatarioNombre,
+                payload.telefonoDestino,
+                payload.direccion,
+                payload.barrioNombre,
+                payload.mensajeTarjeta,
+            )
+        ):
+            entrega = (
+                db.query(Entrega)
+                .filter(Entrega.pedidoID == pedido_id)
+                .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+                .first()
+            )
+            if entrega:
+                if payload.fechaEntrega is not None:
+                    entrega.fechaEntregaProgramada = _parse_iso_date(payload.fechaEntrega)
+                if payload.horaEntrega is not None:
+                    entrega.rangoHora = payload.horaEntrega or None
+                if payload.destinatarioNombre is not None:
+                    entrega.destinatario = str(payload.destinatarioNombre).strip() or None
+                if payload.telefonoDestino is not None:
+                    entrega.telefonoDestino = str(payload.telefonoDestino).strip() or None
+                if payload.direccion is not None:
+                    entrega.direccion = str(payload.direccion).strip() or None
+                if payload.barrioNombre is not None:
+                    entrega.barrioNombre = str(payload.barrioNombre).strip() or None
+                if payload.mensajeTarjeta is not None:
+                    entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
+
+        payload.productoID = None
+        payload.fechaEntrega = None
+        payload.horaEntrega = None
 
         # Actualizar producto en el primer detalle si se envió productoID.
         # Si el catálogo no expone un precio vigente en esta entidad, preservamos el snapshot actual.
