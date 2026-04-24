@@ -387,49 +387,80 @@ def actualizar_detalle_pedido(
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
-    if not pedido:
-        raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
-    assert_same_empresa(auth, int(pedido.empresaID))
+    try:
+        pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+        if not pedido:
+            raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
+        assert_same_empresa(auth, int(pedido.empresaID))
 
-    # Actualizar producto en el primer detalle si se envió productoID
-    if payload.productoID is not None:
-        detalle = (
-            db.query(PedidoDetalle)
-            .filter(PedidoDetalle.pedidoID == pedido_id)
-            .first()
-        )
-        if detalle:
-            producto = (
-                db.query(Producto)
-                .filter(Producto.idProducto == payload.productoID, _activo_truthy(Producto.activo))
+        # Actualizar producto en el primer detalle si se envió productoID.
+        # Si el catálogo no expone un precio vigente en esta entidad, preservamos el snapshot actual.
+        if payload.productoID is not None:
+            detalle = (
+                db.query(PedidoDetalle)
+                .filter(PedidoDetalle.pedidoID == pedido_id)
                 .first()
             )
-            if not producto:
-                raise HTTPException(status_code=400, detail={"code": "PRODUCTO_NOT_FOUND", "message": "Producto no encontrado"})
-            detalle.productoID = payload.productoID
-            detalle.precioUnitario = producto.precioBase
-            detalle.subtotal = float(producto.precioBase or 0) * float(detalle.cantidad or 1)
+            if detalle:
+                producto = (
+                    db.query(Producto)
+                    .filter(
+                        Producto.idProducto == payload.productoID,
+                        Producto.empresaID == pedido.empresaID,
+                        _activo_truthy(Producto.activo),
+                    )
+                    .first()
+                )
+                if not producto:
+                    raise HTTPException(status_code=400, detail={"code": "PRODUCTO_NOT_FOUND", "message": "Producto no encontrado"})
+                detalle.productoID = payload.productoID
+                precio_unitario = float(detalle.precioUnitario or 0)
+                detalle.subtotal = precio_unitario * float(detalle.cantidad or 1)
 
-    # Actualizar fecha y hora de entrega en la entrega más reciente
-    if payload.fechaEntrega is not None or payload.horaEntrega is not None:
-        entrega = (
-            db.query(Entrega)
-            .filter(Entrega.pedidoID == pedido_id)
-            .order_by(Entrega.intentoNumero.desc())
-            .first()
+        # Actualizar fecha y hora programada de entrega en el intento más reciente.
+        if payload.fechaEntrega is not None or payload.horaEntrega is not None:
+            entrega = (
+                db.query(Entrega)
+                .filter(Entrega.pedidoID == pedido_id)
+                .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+                .first()
+            )
+            if entrega:
+                if payload.fechaEntrega is not None:
+                    try:
+                        entrega.fechaEntregaProgramada = datetime.fromisoformat(payload.fechaEntrega)
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail={"code": "FECHA_INVALIDA", "message": "Formato de fecha inválido"})
+                if payload.horaEntrega is not None:
+                    entrega.rangoHora = payload.horaEntrega or None
+
+        db.commit()
+        return {"status": "ok", "pedidoID": pedido_id}
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        pedido_logger.error("Error SQL al actualizar detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_UPDATE_DB_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
         )
-        if entrega:
-            if payload.fechaEntrega is not None:
-                try:
-                    entrega.fechaEntrega = datetime.fromisoformat(payload.fechaEntrega)
-                except ValueError:
-                    raise HTTPException(status_code=400, detail={"code": "FECHA_INVALIDA", "message": "Formato de fecha inválido"})
-            if payload.horaEntrega is not None:
-                entrega.rangoHora = payload.horaEntrega
-
-    db.commit()
-    return {"status": "ok", "pedidoID": pedido_id}
+    except Exception:
+        db.rollback()
+        pedido_logger.error("Error inesperado al actualizar detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_UPDATE_INTERNAL_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
 
 
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
