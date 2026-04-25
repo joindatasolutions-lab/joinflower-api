@@ -1003,6 +1003,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "horaEntrega": entrega.rangoHora if entrega else None,
                 "firma": entrega.firma if entrega else None,
                 "mensajeTarjeta": entrega.mensaje if entrega else None,
+                "observacionGeneral": entrega.observacionGeneral if entrega else None,
             },
             financiero={
                 "subtotal": float(pedido.totalBruto or 0),

@@ -16,7 +16,7 @@ def _activo_truthy(column):
 
 @router.get("/barrios/search", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def search_barrios(
-    q: str = Query(...),
+    q: str = Query(default=""),
     empresa_id: int = Query(...),
     sucursal_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -24,24 +24,29 @@ def search_barrios(
 ):
     assert_same_empresa(auth, empresa_id)
     texto = q.strip()
-    if len(texto) < 2:
-        return []
+    modo_base = len(texto) < 2
 
-    cache_key = f"barrios:{empresa_id}:{sucursal_id}:{texto.lower()}"
+    cache_key = f"barrios:v2:{empresa_id}:{sucursal_id}:{texto.lower() or '__base__'}"
     cached = get_cache(cache_key)
     if cached is not None:
         return cached
 
-    barrios = (
+    query = (
         db.query(Barrio)
         .filter(
             _activo_truthy(Barrio.activo),
             Barrio.empresaID == empresa_id,
             Barrio.sucursalID == sucursal_id,
-            Barrio.nombreBarrio.ilike(f"%{texto}%"),
         )
+    )
+
+    if not modo_base:
+        query = query.filter(Barrio.nombreBarrio.ilike(f"%{texto}%"))
+
+    barrios = (
+        query
         .order_by(Barrio.nombreBarrio.asc())
-        .limit(10)
+        .limit(500 if modo_base else 25)
         .all()
     )
 
@@ -53,6 +58,14 @@ def search_barrios(
         }
         for barrio in barrios
     ]
+
+    if modo_base:
+        response.sort(
+            key=lambda item: (
+                0 if str(item.get("nombreBarrio", "")).strip().lower() == "recoger en tienda" else 1,
+                str(item.get("nombreBarrio", "")).lower(),
+            )
+        )
 
     # Neighborhood lookups are frequently repeated by destination autocomplete.
     set_cache(cache_key, response, ttl=3600)

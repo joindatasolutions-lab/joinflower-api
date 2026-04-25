@@ -187,23 +187,38 @@ def _log_historial(
     )
 
 
-def _build_producto_map(db: Session, produccion_ids: list[int]) -> dict[int, str]:
+def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int]) -> dict[int, dict[str, str | int | None]]:
     if not produccion_ids:
         return {}
 
     rows = (
-        db.query(Produccion.idProduccion, Producto.nombreProducto)
-        .join(PedidoDetalle, PedidoDetalle.pedidoID == Produccion.pedidoID)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(Produccion.idProduccion.in_(produccion_ids))
+        db.query(Produccion.idProduccion, Producto.idProducto, Producto.codigoProducto, Producto.nombreProducto)
+        .join(
+            PedidoDetalle,
+            (PedidoDetalle.pedidoID == Produccion.pedidoID)
+            & (PedidoDetalle.empresaID == Produccion.empresaID),
+        )
+        .join(
+            Producto,
+            (Producto.idProducto == PedidoDetalle.productoID)
+            & (Producto.empresaID == Produccion.empresaID),
+        )
+        .filter(
+            Produccion.idProduccion.in_(produccion_ids),
+            Produccion.empresaID == empresa_id,
+        )
         .all()
     )
 
-    out: dict[int, str] = {}
-    for produccion_id, nombre_producto in rows:
+    out: dict[int, dict[str, str | int | None]] = {}
+    for produccion_id, producto_id, codigo_producto, nombre_producto in rows:
         key = int(produccion_id)
         if key not in out:
-            out[key] = str(nombre_producto or "Producto")
+            out[key] = {
+                "productoID": int(producto_id) if producto_id is not None else None,
+                "codigoProducto": str(codigo_producto or "").strip() or None,
+                "nombreProducto": str(nombre_producto or "Producto"),
+            }
     return out
 
 
@@ -236,7 +251,7 @@ def _build_items(
 
     rows = q.order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.ordenProduccion.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
-    producto_map = _build_producto_map(db, ids)
+    producto_map = _build_producto_map(db, empresa_id, ids)
 
     now_utc = datetime.now(timezone.utc)
     items: list[ProduccionItem] = []
@@ -248,18 +263,28 @@ def _build_items(
             delta = fecha_entrega.replace(tzinfo=timezone.utc) - now_utc
             tiempo_restante_horas = int(delta.total_seconds() // 3600)
 
+        producto_info = producto_map.get(int(produccion.idProduccion), {})
+        nombre_arreglo = str(producto_info.get("nombreProducto") or "Producto")
+        codigo_producto = str(producto_info.get("codigoProducto") or "").strip() or None
+        producto_id = producto_info.get("productoID")
+        codigo_arreglo = codigo_producto or (str(producto_id) if producto_id is not None else None)
+
         items.append(
             ProduccionItem(
                 idProduccion=int(produccion.idProduccion),
                 pedidoID=int(pedido.idPedido),
                 numeroPedido=_numero_pedido_valor(pedido),
                 codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
-                producto=producto_map.get(int(produccion.idProduccion), "Producto"),
+                codigoArreglo=codigo_arreglo,
+                nombreArreglo=nombre_arreglo,
+                producto=nombre_arreglo,
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
                 horaEntrega=(entrega.rangoHora if entrega else None),
+                barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
                 floristaAsignado=(florista.nombre if florista else None),
                 estado=_estado_produccion_norm(produccion.estado, db=db),
+                observaciones=(str(produccion.observacionesInternas).strip() if produccion.observacionesInternas else None),
                 fechaAsignacion=produccion.fechaAsignacion,
                 tiempoRestanteHoras=tiempo_restante_horas,
                 tiempoEstimadoMin=(int(produccion.tiempoEstimadoMin) if produccion.tiempoEstimadoMin is not None else None),

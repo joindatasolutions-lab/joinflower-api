@@ -4,15 +4,15 @@ from app.database import Base
 
 
 class Barrio(Base):
-    __tablename__ = "Barrio"
+    __tablename__ = "barrio"
     __table_args__ = {"schema": "petalops"}
 
-    idBarrio = Column(BigInteger, primary_key=True, index=True)
-    empresaID = Column(BigInteger, ForeignKey("petalops.Empresa.idEmpresa"), nullable=False)
-    sucursalID = Column(BigInteger, ForeignKey("petalops.Sucursal.idSucursal"))
-    zonaID = Column(BigInteger, nullable=False)
-    nombreBarrio = Column(String(150), nullable=False)
-    costoDomicilio = Column(Numeric(12, 2), nullable=False)
-    activo = Column(Boolean, nullable=False)
-    createdAt = Column(DateTime)
-    updatedAt = Column(DateTime)
+    idBarrio = Column("id_barrio", BigInteger, primary_key=True, index=True)
+    empresaID = Column("empresa_id", BigInteger, ForeignKey("petalops.empresa.id_empresa"), nullable=False)
+    sucursalID = Column("sucursal_id", BigInteger, ForeignKey("petalops.sucursal.id_sucursal"))
+    zonaID = Column("zona_id", BigInteger, nullable=False)
+    nombreBarrio = Column("nombre_barrio", String(150), nullable=False)
+    costoDomicilio = Column("costo_domicilio", Numeric(12, 2), nullable=False)
+    activo = Column("activo", Boolean, nullable=False)
+    createdAt = Column("created_at", DateTime)
+    updatedAt = Column("updated_at", DateTime)

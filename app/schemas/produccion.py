@@ -51,12 +51,16 @@ class ProduccionItem(BaseModel):
     pedidoID: int
     numeroPedido: int
     codigoPedido: Optional[str] = None
+    codigoArreglo: Optional[str] = None
+    nombreArreglo: Optional[str] = None
     producto: str
     cliente: str
     fechaEntrega: Optional[datetime] = None
     horaEntrega: Optional[str] = None
+    barrio: Optional[str] = None
     floristaAsignado: Optional[str] = None
     estado: str
+    observaciones: Optional[str] = None
     fechaAsignacion: Optional[datetime] = None
     tiempoRestanteHoras: Optional[int] = None
     tiempoEstimadoMin: Optional[int] = None
