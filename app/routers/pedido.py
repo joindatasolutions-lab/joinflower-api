@@ -241,6 +241,87 @@ def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int
     return Decimal(str(row[0]))
 
 
+def _normalize_ident_type(value: str | None) -> str | None:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return None
+    if raw in {"CC", "CEDULA", "CÉDULA"}:
+        return "CC"
+    if raw == "NIT":
+        return "NIT"
+    return raw
+
+
+def _tax_rate_for_producto(producto: Producto | None) -> Decimal:
+    if not producto:
+        return Decimal("0.00")
+    raw_rate = producto.porcentajeIva
+    # Fallback operativo: varios productos legacy no tienen porcentaje_iva cargado
+    # y para correcciones manuales a NIT se aplica la tarifa general.
+    if raw_rate is None:
+        return Decimal("19.00")
+    rate = Decimal(str(raw_rate))
+    if rate <= 0:
+        return Decimal("19.00")
+    return rate
+
+
+def _iva_unitario_for_producto(precio_unitario: Decimal, producto: Producto | None) -> Decimal:
+    if precio_unitario <= 0:
+        return Decimal("0.00")
+
+    rate = _tax_rate_for_producto(producto)
+    if rate <= 0:
+        return Decimal("0.00")
+
+    if bool(getattr(producto, "ivaIncluido", False)):
+        divisor = Decimal("1.00") + (rate / Decimal("100"))
+        return (precio_unitario - (precio_unitario / divisor)).quantize(Decimal("0.01"))
+
+    return ((precio_unitario * rate) / Decimal("100")).quantize(Decimal("0.01"))
+
+
+def _recalculate_pedido_financials(db: Session, *, pedido: Pedido, aplica_iva: bool) -> None:
+    detalles = (
+        db.query(PedidoDetalle)
+        .filter(
+            PedidoDetalle.pedidoID == int(pedido.idPedido),
+            PedidoDetalle.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+
+    producto_ids = [int(detalle.productoID) for detalle in detalles if detalle.productoID is not None]
+    productos = (
+        db.query(Producto)
+        .filter(
+            Producto.idProducto.in_(producto_ids) if producto_ids else text("1=0"),
+            Producto.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    producto_map = {int(producto.idProducto): producto for producto in productos}
+
+    total_bruto = Decimal("0.00")
+    total_iva = Decimal("0.00")
+
+    for detalle in detalles:
+        cantidad = Decimal(str(detalle.cantidad or 0))
+        precio_unitario = Decimal(str(detalle.precioUnitario or 0))
+        detalle.subtotal = (precio_unitario * cantidad).quantize(Decimal("0.01"))
+        detalle.ivaUnitario = (
+            _iva_unitario_for_producto(precio_unitario, producto_map.get(int(detalle.productoID)))
+            if aplica_iva
+            else Decimal("0.00")
+        )
+        total_bruto += Decimal(str(detalle.subtotal or 0))
+        total_iva += Decimal(str(detalle.ivaUnitario or 0)) * cantidad
+
+    pedido.totalBruto = total_bruto.quantize(Decimal("0.01"))
+    pedido.totalIva = total_iva.quantize(Decimal("0.01"))
+    pedido.totalNeto = (pedido.totalBruto + pedido.totalIva).quantize(Decimal("0.01"))
+
+
 def _parse_payment_methods(value: str | None) -> list[str]:
     raw = str(value or "").strip()
     if not raw:
@@ -920,6 +1001,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "barrio": entrega.barrioNombre if entrega else None,
                 "fechaEntrega": fecha_entrega_programada.isoformat() if fecha_entrega_programada else None,
                 "horaEntrega": entrega.rangoHora if entrega else None,
+                "firma": entrega.firma if entrega else None,
                 "mensajeTarjeta": entrega.mensaje if entrega else None,
             },
             financiero={
@@ -964,10 +1046,13 @@ class ActualizarDetallePedidoRequest(BaseModel):
     productoID: int | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
+    clienteTipoIdent: str | None = None
+    clienteIdentificacion: str | None = None
     destinatarioNombre: str | None = None
     telefonoDestino: str | None = None
     direccion: str | None = None
     barrioNombre: str | None = None
+    firma: str | None = None
     mensajeTarjeta: str | None = None
     metodosPago: list[str] | None = None
     canalFlora: str | None = None
@@ -981,17 +1066,37 @@ def actualizar_detalle_pedido(
     auth=Depends(get_current_auth_context),
 ):
     try:
-        pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+        empresa_id = int(auth.empresaID)
+        pedido = (
+            db.query(Pedido)
+            .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .first()
+        )
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
 
+        cliente = (
+            db.query(Cliente)
+            .filter(
+                Cliente.idCliente == int(pedido.clienteID),
+                Cliente.empresaID == int(pedido.empresaID),
+            )
+            .first()
+        )
+        if not cliente:
+            raise HTTPException(status_code=404, detail={"code": "CLIENTE_NOT_FOUND", "message": "Cliente no encontrado"})
+
         detalle = (
             db.query(PedidoDetalle)
-            .filter(PedidoDetalle.pedidoID == pedido_id)
+            .filter(
+                PedidoDetalle.pedidoID == pedido_id,
+                PedidoDetalle.empresaID == int(pedido.empresaID),
+            )
             .order_by(PedidoDetalle.idPedidoDetalle.asc())
             .first()
         )
+        needs_totals_recalc = False
 
         if payload.productoID is not None and detalle:
             precio_unitario = _find_branch_product_price(
@@ -1002,26 +1107,13 @@ def actualizar_detalle_pedido(
             )
             detalle.productoID = payload.productoID
             detalle.precioUnitario = precio_unitario
-            cantidad = Decimal(str(detalle.cantidad or 1))
-            detalle.subtotal = precio_unitario * cantidad
+            needs_totals_recalc = True
 
-            detalles = (
-                db.query(PedidoDetalle)
-                .filter(PedidoDetalle.pedidoID == pedido_id)
-                .all()
-            )
-            total_bruto = Decimal("0")
-            total_iva = Decimal("0")
-            for item in detalles:
-                cantidad_item = Decimal(str(item.cantidad or 0))
-                subtotal_item = Decimal(str(item.subtotal or 0))
-                iva_item = Decimal(str(item.ivaUnitario or 0)) * cantidad_item
-                total_bruto += subtotal_item
-                total_iva += iva_item
-
-            pedido.totalBruto = total_bruto
-            pedido.totalIva = total_iva
-            pedido.totalNeto = total_bruto + total_iva
+        if payload.clienteTipoIdent is not None:
+            cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
+            needs_totals_recalc = True
+        if payload.clienteIdentificacion is not None:
+            cliente.identificacion = str(payload.clienteIdentificacion).strip() or None
 
         if any(
             value is not None
@@ -1032,12 +1124,16 @@ def actualizar_detalle_pedido(
                 payload.telefonoDestino,
                 payload.direccion,
                 payload.barrioNombre,
+                payload.firma,
                 payload.mensajeTarjeta,
             )
         ):
             entrega = (
                 db.query(Entrega)
-                .filter(Entrega.pedidoID == pedido_id)
+                .filter(
+                    Entrega.pedidoID == pedido_id,
+                    Entrega.empresaID == int(pedido.empresaID),
+                )
                 .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
                 .first()
             )
@@ -1054,8 +1150,17 @@ def actualizar_detalle_pedido(
                     entrega.direccion = str(payload.direccion).strip() or None
                 if payload.barrioNombre is not None:
                     entrega.barrioNombre = str(payload.barrioNombre).strip() or None
+                if payload.firma is not None:
+                    entrega.firma = str(payload.firma).strip() or None
                 if payload.mensajeTarjeta is not None:
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
+
+        if needs_totals_recalc:
+            _recalculate_pedido_financials(
+                db,
+                pedido=pedido,
+                aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
+            )
 
         if payload.metodosPago is not None or payload.canalFlora is not None:
             menu_config = _load_empresa_menu_config(db, empresa_id=int(pedido.empresaID))
