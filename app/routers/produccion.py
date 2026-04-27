@@ -192,7 +192,13 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
         return {}
 
     rows = (
-        db.query(Produccion.idProduccion, Producto.idProducto, Producto.codigoProducto, Producto.nombreProducto)
+        db.query(
+            Produccion.idProduccion,
+            Producto.idProducto,
+            Producto.codigoProducto,
+            Producto.nombreProducto,
+            PedidoDetalle.observacionesPersonalizados,
+        )
         .join(
             PedidoDetalle,
             (PedidoDetalle.pedidoID == Produccion.pedidoID)
@@ -211,13 +217,14 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
     )
 
     out: dict[int, dict[str, str | int | None]] = {}
-    for produccion_id, producto_id, codigo_producto, nombre_producto in rows:
+    for produccion_id, producto_id, codigo_producto, nombre_producto, observaciones_personalizados in rows:
         key = int(produccion_id)
         if key not in out:
             out[key] = {
                 "productoID": int(producto_id) if producto_id is not None else None,
                 "codigoProducto": str(codigo_producto or "").strip() or None,
                 "nombreProducto": str(nombre_producto or "Producto"),
+                "observacionesPersonalizados": str(observaciones_personalizados).strip() if observaciones_personalizados else None,
             }
     return out
 
@@ -266,6 +273,7 @@ def _build_items(
         producto_info = producto_map.get(int(produccion.idProduccion), {})
         nombre_arreglo = str(producto_info.get("nombreProducto") or "Producto")
         codigo_producto = str(producto_info.get("codigoProducto") or "").strip() or None
+        observacion_personalizada = str(producto_info.get("observacionesPersonalizados") or "").strip() or None
         producto_id = producto_info.get("productoID")
         codigo_arreglo = codigo_producto or (str(producto_id) if producto_id is not None else None)
 
@@ -282,7 +290,7 @@ def _build_items(
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
-                observacion=(str(entrega.observacionGeneral or "").strip() if entrega and entrega.observacionGeneral else None),
+                observacion=observacion_personalizada,
                 floristaAsignado=(florista.nombre if florista else None),
                 estado=_estado_produccion_norm(produccion.estado, db=db),
                 observaciones=(str(produccion.observacionesInternas).strip() if produccion.observacionesInternas else None),

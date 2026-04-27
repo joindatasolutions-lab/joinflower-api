@@ -18,7 +18,7 @@ class PedidoDetalle(Base):
     precioUnitario = Column("precio_unitario", Numeric(12,2))
     ivaUnitario = Column("iva_unitario", Numeric(12,2))
     subtotal = Column("subtotal", Numeric(12,2))
-    observaciones = Column("observaciones", Text, nullable=True)
+    observacionesPersonalizados = Column("observaciones_personalizados", Text, nullable=True)
     totalLinea = synonym("subtotal")
 
     pedido = relationship("Pedido", back_populates="detalles")
