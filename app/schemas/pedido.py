@@ -107,8 +107,10 @@ class PedidoListResponse(BaseModel):
 
 class PedidoDetalleProducto(BaseModel):
     productoID: int
+    codigoProducto: Optional[str] = None
     nombreProducto: str
     cantidad: float
+    observaciones: Optional[str] = None
     precioUnitario: float
     subtotal: float
 

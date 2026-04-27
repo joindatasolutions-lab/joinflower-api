@@ -963,8 +963,14 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         productos = [
             PedidoDetalleProducto(
                 productoID=int(producto.idProducto),
+                codigoProducto=(str(producto.codigoProducto).strip() if producto.codigoProducto else None),
                 nombreProducto=str(producto.nombreProducto or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
+                observaciones=(
+                    str(detalle.observaciones).strip()
+                    if detalle.observaciones
+                    else (str(producto.descripcion).strip() if producto and producto.descripcion else None)
+                ),
                 precioUnitario=float(detalle.precioUnitario or 0),
                 subtotal=float(detalle.subtotal or 0),
             )
@@ -1045,6 +1051,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 class ActualizarDetallePedidoRequest(BaseModel):
     productoID: int | None = None
+    productoObservaciones: str | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
     clienteTipoIdent: str | None = None
@@ -1055,6 +1062,7 @@ class ActualizarDetallePedidoRequest(BaseModel):
     barrioNombre: str | None = None
     firma: str | None = None
     mensajeTarjeta: str | None = None
+    observacionGeneral: str | None = None
     metodosPago: list[str] | None = None
     canalFlora: str | None = None
 
@@ -1106,9 +1114,24 @@ def actualizar_detalle_pedido(
                 sucursal_id=int(pedido.sucursalID),
                 producto_id=int(payload.productoID),
             )
+            producto = (
+                db.query(Producto)
+                .filter(
+                    Producto.idProducto == int(payload.productoID),
+                    Producto.empresaID == int(pedido.empresaID),
+                )
+                .first()
+            )
             detalle.productoID = payload.productoID
             detalle.precioUnitario = precio_unitario
+            detalle.observaciones = (
+                str(payload.productoObservaciones).strip()
+                if payload.productoObservaciones is not None
+                else (str(producto.descripcion).strip() if producto and producto.descripcion else None)
+            ) or None
             needs_totals_recalc = True
+        elif payload.productoObservaciones is not None and detalle:
+            detalle.observaciones = str(payload.productoObservaciones).strip() or None
 
         if payload.clienteTipoIdent is not None:
             cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
@@ -1127,6 +1150,7 @@ def actualizar_detalle_pedido(
                 payload.barrioNombre,
                 payload.firma,
                 payload.mensajeTarjeta,
+                payload.observacionGeneral,
             )
         ):
             entrega = (
@@ -1155,6 +1179,8 @@ def actualizar_detalle_pedido(
                     entrega.firma = str(payload.firma).strip() or None
                 if payload.mensajeTarjeta is not None:
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
+                if payload.observacionGeneral is not None:
+                    entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
 
         if needs_totals_recalc:
             _recalculate_pedido_financials(

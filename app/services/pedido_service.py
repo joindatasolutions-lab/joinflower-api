@@ -227,6 +227,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
                 precioUnitario=precio_unitario,
                 ivaUnitario=Decimal("0.00"),
                 subtotal=subtotal,
+                observaciones=(str(producto.descripcion).strip() if producto.descripcion else None),
             )
             db.add(detalle)
             total_bruto += subtotal

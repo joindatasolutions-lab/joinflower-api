@@ -282,6 +282,7 @@ def _build_items(
                 fechaEntrega=(entrega.fechaEntrega if entrega else None),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
+                observacion=(str(entrega.observacionGeneral or "").strip() if entrega and entrega.observacionGeneral else None),
                 floristaAsignado=(florista.nombre if florista else None),
                 estado=_estado_produccion_norm(produccion.estado, db=db),
                 observaciones=(str(produccion.observacionesInternas).strip() if produccion.observacionesInternas else None),

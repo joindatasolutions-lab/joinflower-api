@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, Numeric, ForeignKey
+from sqlalchemy import Column, BigInteger, Numeric, ForeignKey, Text
 from sqlalchemy.orm import relationship, synonym
 from app.database import Base
 
@@ -18,6 +18,7 @@ class PedidoDetalle(Base):
     precioUnitario = Column("precio_unitario", Numeric(12,2))
     ivaUnitario = Column("iva_unitario", Numeric(12,2))
     subtotal = Column("subtotal", Numeric(12,2))
+    observaciones = Column("observaciones", Text, nullable=True)
     totalLinea = synonym("subtotal")
 
     pedido = relationship("Pedido", back_populates="detalles")

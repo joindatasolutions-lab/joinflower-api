@@ -70,7 +70,9 @@ def obtener_catalogo(
                 f"""
                 SELECT
                     p.id_producto AS id_producto,
+                    p.codigo_producto AS codigo_producto,
                     p.nombre_producto AS nombre_producto,
+                    p.descripcion AS descripcion,
                     ps.precio AS precio,
                     ps.imagen_url AS imagen_url,
                     ps.es_destacado AS es_destacado,
@@ -94,7 +96,9 @@ def obtener_catalogo(
             response.append(
                 {
                     "idProducto": int(row["id_producto"]),
+                    "codigoProducto": row["codigo_producto"],
                     "nombreProducto": row["nombre_producto"],
+                    "descripcion": row["descripcion"],
                     "precio": float(row["precio"] or 0),
                     "imagenUrl": row["imagen_url"],
                     "esDestacado": bool(row["es_destacado"]) if row["es_destacado"] is not None else False,

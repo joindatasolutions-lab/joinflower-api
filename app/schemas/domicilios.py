@@ -33,6 +33,7 @@ class DomicilioAdminItem(BaseModel):
     telefonoDestino: str | None = None
     direccion: str | None = None
     barrio: str | None = None
+    observacion: str | None = None
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None
     domiciliarioID: int | None = None
@@ -60,6 +61,7 @@ class DomicilioCourierCard(BaseModel):
     barrio: str | None = None
     telefonoDestino: str | None = None
     mensaje: str | None = None
+    observacion: str | None = None
     estado: str
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None

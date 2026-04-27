@@ -58,6 +58,7 @@ class ProduccionItem(BaseModel):
     fechaEntrega: Optional[datetime] = None
     horaEntrega: Optional[str] = None
     barrio: Optional[str] = None
+    observacion: Optional[str] = None
     floristaAsignado: Optional[str] = None
     estado: str
     observaciones: Optional[str] = None
