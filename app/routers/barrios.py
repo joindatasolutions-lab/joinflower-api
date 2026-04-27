@@ -25,6 +25,12 @@ class BarrioCreateRequest(BaseModel):
     activo: bool = True
 
 
+class BarrioUpdateRequest(BaseModel):
+    sucursalID: int = Field(alias="sucursalID")
+    nombreBarrio: str = Field(min_length=2, max_length=150)
+    costoDomicilio: float = Field(ge=0)
+
+
 @router.get("/barrios", dependencies=[Depends(require_module_access("domicilios", "puedeVer"))])
 def list_barrios(
     sucursal_id: int = Query(..., alias="sucursalID"),
@@ -89,6 +95,56 @@ def create_barrio(
         updatedAt=datetime.now(timezone.utc),
     )
     db.add(barrio)
+    db.commit()
+    db.refresh(barrio)
+
+    return {
+        "status": "ok",
+        "idBarrio": int(barrio.idBarrio),
+        "zonaID": int(barrio.zonaID or 0),
+        "nombreBarrio": str(barrio.nombreBarrio or ""),
+        "costoDomicilio": float(barrio.costoDomicilio or 0),
+        "activo": bool(barrio.activo),
+    }
+
+
+@router.put("/barrios/{barrio_id}", dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))])
+def update_barrio(
+    barrio_id: int,
+    payload: BarrioUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    empresa_id = int(auth.empresaID)
+
+    barrio = (
+        db.query(Barrio)
+        .filter(
+            Barrio.idBarrio == barrio_id,
+            Barrio.empresaID == empresa_id,
+            Barrio.sucursalID == int(payload.sucursalID),
+        )
+        .first()
+    )
+    if not barrio:
+        raise HTTPException(status_code=404, detail="Barrio no encontrado")
+
+    existing = (
+        db.query(Barrio)
+        .filter(
+            Barrio.empresaID == empresa_id,
+            Barrio.sucursalID == int(payload.sucursalID),
+            func.lower(Barrio.nombreBarrio) == payload.nombreBarrio.strip().lower(),
+            Barrio.idBarrio != barrio_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail="Ya existe un barrio con ese nombre en la sucursal")
+
+    barrio.nombreBarrio = payload.nombreBarrio.strip()
+    barrio.costoDomicilio = payload.costoDomicilio
+    barrio.updatedAt = datetime.now(timezone.utc)
     db.commit()
     db.refresh(barrio)
 

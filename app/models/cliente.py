@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, BigInteger, String, Integer, DateTime, Date, ForeignKey
 from app.database import Base
 
 class Cliente(Base):
@@ -14,6 +14,8 @@ class Cliente(Base):
     nombreCompleto = Column("nombre_completo", String(150))
     telefono = Column("telefono", String(30))
     email = Column("email", String(150))
-    activo = Column("activo", Boolean)
+    fechaCumpleanos = Column("fecha_cumpleanos", Date)
+    fechaAniversario = Column("fecha_aniversario", Date)
+    activo = Column("activo", Integer)
     createdAt = Column("created_at", DateTime)
     updatedAt = Column("updated_at", DateTime)
