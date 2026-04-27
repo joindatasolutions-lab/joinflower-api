@@ -6,14 +6,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
-# Configuracion directa para pruebas locales (solo cuando se ejecuta como script).
-if __name__ == "__main__":
-    os.environ["DATABASE_HOST"] = "136.119.27.100"
-    os.environ["DATABASE_USER"] = "joindata"
-    os.environ["DATABASE_PASSWORD"] = "Emprender2026#"
-    os.environ["DATABASE_NAME"] = "joinflower-dev"
-    os.environ["DATABASE_PORT"] = "5432"
-
 load_dotenv()
 
 
@@ -73,6 +65,19 @@ engine = create_engine(
 if __name__ == "__main__":
     try:
         from sqlalchemy import text
+
+        required_settings = {
+            "DATABASE_HOST": DB_HOST,
+            "DATABASE_NAME": DB_NAME,
+            "DATABASE_USER": DB_USER,
+            "DATABASE_PASSWORD": DB_PASSWORD,
+        }
+        missing = [key for key, value in required_settings.items() if not value]
+        if missing and not INSTANCE_CONNECTION_NAME:
+            raise RuntimeError(
+                "Faltan variables de entorno para conectar a la base de datos: "
+                + ", ".join(missing)
+            )
 
         with engine.connect() as conn:
             result = conn.execute(text("SELECT version();"))
