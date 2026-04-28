@@ -420,6 +420,7 @@ def listar_floristas(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     solo_activos: bool = Query(True, alias="soloActivos"),
+    incluir_externos: bool = Query(False, alias="incluirExternos"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -429,18 +430,51 @@ def listar_floristas(
         .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
         .filter(Florista.empresaID == empresa_id, func.upper(Florista.cargo) == "FLORISTA")
     )
-    if sucursal_id is not None:
+    if sucursal_id is not None and not incluir_externos:
         q = q.filter(Florista.sucursalID == sucursal_id)
     if solo_activos:
         q = q.filter(_activo_truthy(Florista.activo))
 
     rows = q.order_by(Florista.nombre.asc()).all()
 
+    florista_ids = [int(row.idFlorista) for row in rows]
+    arreglos_hoy_por_florista: dict[int, int] = {}
+    if florista_ids:
+        estado_cancelado_id = produccion_service.estado_produccion_id(db, ESTADO_CANCELADO)
+        arreglos_rows = (
+            db.query(Produccion.floristaID, func.count(Produccion.idProduccion))
+            .filter(
+                Produccion.empresaID == empresa_id,
+                Produccion.floristaID.in_(florista_ids),
+                Produccion.fechaProgramadaProduccion == date.today(),
+                Produccion.estado != estado_cancelado_id,
+            )
+            .group_by(Produccion.floristaID)
+            .all()
+        )
+        arreglos_hoy_por_florista = {int(fid): int(total or 0) for fid, total in arreglos_rows if fid is not None}
+
+    internos: list[Florista] = []
+    externos: list[Florista] = []
+    if sucursal_id is not None and incluir_externos:
+        for row in rows:
+            if row.sucursalID is not None and int(row.sucursalID) == int(sucursal_id):
+                internos.append(row)
+            else:
+                externos.append(row)
+    else:
+        internos = list(rows)
+
+    ordered_rows = internos + externos
+
     return FloristaListResponse(
         items=[
             FloristaItem(
                 idFlorista=int(row.idFlorista),
                 nombre=str(row.nombre),
+                numeroFlorista=((index + 1) if index < len(internos) else None),
+                esExterno=bool(index >= len(internos)),
+                arreglosHoy=int(arreglos_hoy_por_florista.get(int(row.idFlorista), 0)),
                 capacidadDiaria=int(row.capacidadDiaria or 0),
                 trabajosSimultaneosPermitidos=int(row.trabajosSimultaneosPermitidos or 1),
                 estado=_estado_florista_norm(row.estado),
@@ -449,7 +483,7 @@ def listar_floristas(
                 activo=bool(row.activo),
                 especialidades=row.especialidades,
             )
-            for row in rows
+            for index, row in enumerate(ordered_rows)
         ]
     )
 

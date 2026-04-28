@@ -101,6 +101,9 @@ class ProduccionKanbanResponse(BaseModel):
 class FloristaItem(BaseModel):
     idFlorista: int
     nombre: str
+    numeroFlorista: Optional[int] = None
+    esExterno: bool = False
+    arreglosHoy: int = 0
     capacidadDiaria: int
     trabajosSimultaneosPermitidos: int = 1
     estado: str = "Activo"
