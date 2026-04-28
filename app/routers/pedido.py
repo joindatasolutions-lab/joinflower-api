@@ -105,7 +105,14 @@ def _numero_pedido_humano(pedido: Pedido) -> str:
     return f"PED-{int(pedido.idPedido):06d}"
 
 
-def _numero_pedido_valor(pedido: Pedido) -> int | None:
+def _estado_pedido_tiene_numeracion_visible(estado_nombre: str | None) -> bool:
+    estado = str(estado_nombre or "").strip().upper()
+    return estado not in {"", "CREADO", "PENDIENTE"}
+
+
+def _numero_pedido_valor(pedido: Pedido, estado_nombre: str | None = None) -> int | None:
+    if not _estado_pedido_tiene_numeracion_visible(estado_nombre):
+        return None
     if pedido.numeroPedido is not None and int(pedido.numeroPedido or 0) > 0:
         return int(pedido.numeroPedido)
     return None
@@ -232,6 +239,10 @@ def _cliente_identificacion_fallback(identificacion: str | None, telefono: str |
     if phone:
         return phone
     return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
+
+
+def _numero_pedido_temporal() -> int:
+    return -int(datetime.now(timezone.utc).timestamp() * 1000000)
 
 
 def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int, producto_id: int) -> Decimal:
@@ -831,8 +842,26 @@ def listar_pedidos(
         db.query(
             Pedido.idPedido,
             Pedido.fechaPedido,
-            text("CASE WHEN petalops.pedido.numero_pedido > 0 THEN 0 ELSE 1 END AS \"numeroOrdenFlag\""),
-            Pedido.numeroPedido.label("numeroPedidoOrden"),
+            text(
+                """
+                CASE
+                    WHEN petalops.pedido.numero_pedido > 0
+                     AND UPPER(COALESCE(petalops.estado_pedido.nombre_estado, '')) NOT IN ('CREADO', 'PENDIENTE')
+                    THEN 0
+                    ELSE 1
+                END AS "numeroOrdenFlag"
+                """
+            ),
+            text(
+                """
+                CASE
+                    WHEN petalops.pedido.numero_pedido > 0
+                     AND UPPER(COALESCE(petalops.estado_pedido.nombre_estado, '')) NOT IN ('CREADO', 'PENDIENTE')
+                    THEN petalops.pedido.numero_pedido
+                    ELSE NULL
+                END AS "numeroPedidoOrden"
+                """
+            ),
         )
         .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
@@ -928,6 +957,7 @@ def listar_pedidos(
     items: list[PedidoListItem] = []
     for pedido_id in pedido_ids:
         pedido, cliente, entrega, estado_db = rows_map[pedido_id]
+        estado_nombre = str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO")
         approval_gate = _approval_gate_summary(
             db,
             pedido_id=pedido_id,
@@ -937,8 +967,12 @@ def listar_pedidos(
         items.append(
             PedidoListItem(
                 pedidoID=pedido_id,
-                numeroPedido=_numero_pedido_valor(pedido),
-                codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+                numeroPedido=_numero_pedido_valor(pedido, estado_nombre),
+                codigoPedido=(
+                    str(pedido.codigoPedido)
+                    if pedido.codigoPedido and _estado_pedido_tiene_numeracion_visible(estado_nombre)
+                    else None
+                ),
                 empresaID=int(pedido.empresaID),
                 sucursalID=int(pedido.sucursalID),
                 fecha=pedido.fechaPedido,
@@ -954,7 +988,7 @@ def listar_pedidos(
                 canalFlora=approval_gate["pagoResumen"]["canalFlora"],
                 puedeAprobar=approval_gate["puedeAprobar"],
                 motivoBloqueoAprobacion=approval_gate["motivo"],
-                estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
+                estado=estado_nombre,
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
             )
@@ -996,6 +1030,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
             )
 
         pedido, cliente, estado_db = row
+        estado_nombre = str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO")
         assert_same_empresa(auth, int(pedido.empresaID))
 
         entrega = (
@@ -1037,12 +1072,16 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         return PedidoDetalleResponse(
             pedidoID=int(pedido.idPedido),
-            numeroPedido=_numero_pedido_valor(pedido),
-            codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+            numeroPedido=_numero_pedido_valor(pedido, estado_nombre),
+            codigoPedido=(
+                str(pedido.codigoPedido)
+                if pedido.codigoPedido and _estado_pedido_tiene_numeracion_visible(estado_nombre)
+                else None
+            ),
             fecha=pedido.fechaPedido,
             fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
             horaPedido=_hora_pedido_str(pedido.fechaPedido),
-            estado=str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO"),
+            estado=estado_nombre,
             empresaID=int(pedido.empresaID),
             sucursalID=int(pedido.sucursalID),
             motivoRechazo=pedido.motivoRechazo,
@@ -1566,7 +1605,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         pedido = Pedido(
             empresaID=data.empresaId,
             sucursalID=data.sucursalId,
-            numeroPedido=0,
+            numeroPedido=_numero_pedido_temporal(),
             codigoPedido=None,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
@@ -1579,6 +1618,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
 
         db.add(pedido)
         db.flush()
+        pedido.numeroPedido = -int(pedido.idPedido)
 
         # 5️⃣ Crear detalles
         for item in data.items:

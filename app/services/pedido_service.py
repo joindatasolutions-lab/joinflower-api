@@ -40,6 +40,10 @@ def _normalizar_activo_legacy(value: bool) -> int:
     return 1 if value else 0
 
 
+def _numero_pedido_temporal() -> int:
+    return -int(datetime.now(timezone.utc).timestamp() * 1000000)
+
+
 def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
     value = str(identificacion or "").strip()
     if value:
@@ -243,7 +247,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
         pedido = Pedido(
             empresaID=payload.empresaID,
             sucursalID=payload.sucursalID,
-            numeroPedido=0,
+            numeroPedido=_numero_pedido_temporal(),
             codigoPedido=None,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
@@ -255,6 +259,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
         )
         db.add(pedido)
         db.flush()
+        pedido.numeroPedido = -int(pedido.idPedido)
 
         total_bruto = Decimal("0.00")
         total_iva = Decimal("0.00")
