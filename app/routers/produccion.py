@@ -547,7 +547,7 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     sin_reemplazo = 0
     requiere_manual = 0
 
-    if nuevo_estado in {"Incapacidad", "Inactivo"}:
+    if nuevo_estado == "Incapacidad":
         resumen = produccion_service.reasignar_pendientes_por_indisponibilidad(
             db=db,
             florista=florista,
