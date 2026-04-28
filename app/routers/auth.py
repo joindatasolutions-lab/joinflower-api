@@ -392,6 +392,27 @@ def _load_user_modules(db: Session, user_id: int) -> list[str]:
     return sorted([modulo for modulo, activo in overrides.items() if bool(activo)])
 
 
+def _next_florista_internal_number(db: Session, empresa_id: int, sucursal_id: int | None) -> int:
+    row = db.execute(
+        text(
+            """
+            SELECT COALESCE(MAX(pf.numero_interno), 0)
+            FROM petalops.perfil_florista pf
+            JOIN petalops.empleado e
+              ON e.id_empleado = pf.empleado_id
+            WHERE e.empresa_id = :empresa_id
+              AND upper(COALESCE(e.cargo, '')) = 'FLORISTA'
+              AND (:sucursal_id IS NULL OR e.sucursal_id = :sucursal_id)
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "sucursal_id": (int(sucursal_id) if sucursal_id is not None else None),
+        },
+    ).first()
+    return int((row[0] if row and row[0] is not None else 0)) + 1
+
+
 def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, rol_nombre: str) -> None:
     role_name = normalize_role_name(rol_nombre)
     cargo = str(rol_nombre or "").strip() or "Operativo"
@@ -476,7 +497,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
         existing_profile = db.execute(
             text(
                 """
-                SELECT empleado_id
+                SELECT empleado_id, numero_interno
                 FROM petalops.perfil_florista
                 WHERE empleado_id = :empleado_id
                 LIMIT 1
@@ -485,21 +506,46 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
             {"empleado_id": int(empleado_id)},
         ).first()
         if not existing_profile:
+            numero_interno = _next_florista_internal_number(
+                db,
+                empresa_id=int(usuario.empresaID),
+                sucursal_id=(int(usuario.sucursalID) if usuario.sucursalID is not None else None),
+            )
             db.execute(
                 text(
                     """
                     INSERT INTO petalops.perfil_florista (
-                        empleado_id, capacidad_diaria, trab_simul_permi, especialidades, fecha_ini_incap, fecha_fin_incap
+                        empleado_id, numero_interno, capacidad_diaria, trab_simul_permi, especialidades, fecha_ini_incap, fecha_fin_incap
                     )
                     VALUES (
-                        :empleado_id, :capacidad_diaria, :trab_simul_permi, NULL, NULL, NULL
+                        :empleado_id, :numero_interno, :capacidad_diaria, :trab_simul_permi, NULL, NULL, NULL
                     )
                     """
                 ),
                 {
                     "empleado_id": int(empleado_id),
+                    "numero_interno": int(numero_interno),
                     "capacidad_diaria": 12,
                     "trab_simul_permi": 1,
+                },
+            )
+        elif existing_profile[1] is None:
+            numero_interno = _next_florista_internal_number(
+                db,
+                empresa_id=int(usuario.empresaID),
+                sucursal_id=(int(usuario.sucursalID) if usuario.sucursalID is not None else None),
+            )
+            db.execute(
+                text(
+                    """
+                    UPDATE petalops.perfil_florista
+                    SET numero_interno = :numero_interno
+                    WHERE empleado_id = :empleado_id
+                    """
+                ),
+                {
+                    "empleado_id": int(empleado_id),
+                    "numero_interno": int(numero_interno),
                 },
             )
 

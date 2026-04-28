@@ -472,7 +472,7 @@ def listar_floristas(
             FloristaItem(
                 idFlorista=int(row.idFlorista),
                 nombre=str(row.nombre),
-                numeroFlorista=((index + 1) if index < len(internos) else None),
+                numeroFlorista=(int(row.numeroInterno) if getattr(row, "numeroInterno", None) is not None else None),
                 esExterno=bool(index >= len(internos)),
                 arreglosHoy=int(arreglos_hoy_por_florista.get(int(row.idFlorista), 0)),
                 capacidadDiaria=int(row.capacidadDiaria or 0),

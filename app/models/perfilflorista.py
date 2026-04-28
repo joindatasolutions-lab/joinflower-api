@@ -8,6 +8,7 @@ class PerfilFlorista(Base):
     __table_args__ = {"schema": "petalops"}
 
     empleadoID = Column("empleado_id", BigInteger, primary_key=True, index=True)
+    numeroInterno = Column("numero_interno", BigInteger, nullable=True, index=True)
     capacidadDiaria = Column("capacidad_diaria", BigInteger, nullable=False)
     trabajosSimultaneosPermitidos = Column("trab_simul_permi", BigInteger, nullable=False)
     especialidades = Column("especialidades", Text, nullable=True)

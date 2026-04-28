@@ -28,6 +28,12 @@ class Florista(Base):
         .correlate_except(PerfilFlorista)
         .scalar_subquery()
     )
+    numeroInterno = column_property(
+        select(PerfilFlorista.numeroInterno)
+        .where(PerfilFlorista.empleadoID == idFlorista)
+        .correlate_except(PerfilFlorista)
+        .scalar_subquery()
+    )
     trabajosSimultaneosPermitidos = column_property(
         select(PerfilFlorista.trabajosSimultaneosPermitidos)
         .where(PerfilFlorista.empleadoID == idFlorista)
