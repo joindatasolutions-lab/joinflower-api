@@ -828,7 +828,11 @@ def listar_pedidos(
 
     assert_same_empresa(auth, empresa_id)
     base = (
-        db.query(Pedido.idPedido, Pedido.fechaPedido)
+        db.query(
+            Pedido.idPedido,
+            Pedido.fechaPedido,
+            Pedido.numeroPedido.label("numeroPedidoOrden"),
+        )
         .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
@@ -871,7 +875,7 @@ def listar_pedidos(
     ids_page = (
         base.distinct()
         .order_by(
-            text("CASE WHEN petalops.pedido.numero_pedido > 0 THEN 0 ELSE 1 END"),
+            text("CASE WHEN \"numeroPedidoOrden\" > 0 THEN 0 ELSE 1 END"),
             Pedido.numeroPedido.desc(),
             Pedido.idPedido.desc(),
         )
