@@ -831,6 +831,7 @@ def listar_pedidos(
         db.query(
             Pedido.idPedido,
             Pedido.fechaPedido,
+            text("CASE WHEN petalops.pedido.numero_pedido > 0 THEN 0 ELSE 1 END AS \"numeroOrdenFlag\""),
             Pedido.numeroPedido.label("numeroPedidoOrden"),
         )
         .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -875,8 +876,8 @@ def listar_pedidos(
     ids_page = (
         base.distinct()
         .order_by(
-            text("CASE WHEN \"numeroPedidoOrden\" > 0 THEN 0 ELSE 1 END"),
-            Pedido.numeroPedido.desc(),
+            text("\"numeroOrdenFlag\""),
+            text("\"numeroPedidoOrden\" DESC"),
             Pedido.idPedido.desc(),
         )
         .offset((page - 1) * page_size)
