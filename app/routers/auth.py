@@ -660,6 +660,12 @@ def impersonate_empresa(
         sucursal_id=(int(payload.sucursalID) if payload.sucursalID is not None else None),
         rol_id=(int(superadmin.rolID) if superadmin.rolID is not None else 0),
         plan_id=empresa_meta.get("planID"),
+        extra_claims={
+            "impersonated": True,
+            "impersonatedEmpresaID": empresa_id,
+            "impersonatedSucursalID": (int(payload.sucursalID) if payload.sucursalID is not None else None),
+            "impersonatedRolID": 0,
+        },
     )
     auth_context = get_current_auth_context(token=token, db=db)
     return LoginResponse(
@@ -855,9 +861,9 @@ def listar_usuarios(
     if q:
         term = f"%{str(q).strip()}%"
         query = query.filter(
-            Usuario.nombre.like(term)
-            | Usuario.login.like(term)
-            | Usuario.email.like(term)
+            Usuario.nombre.ilike(term)
+            | Usuario.login.ilike(term)
+            | Usuario.email.ilike(term)
         )
 
     rows = query.order_by(Usuario.empresaID.asc(), Usuario.sucursalID.asc(), Usuario.idusuario.desc()).all()

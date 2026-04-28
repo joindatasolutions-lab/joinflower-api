@@ -109,6 +109,53 @@ def _normalize_movimiento_tipo(value: str) -> str:
     return mapping[normalized]
 
 
+MOVIMIENTO_TIPO_CODIGO_A_ID = {
+    "entrada": 1,
+    "salida": 2,
+    "ajuste": 3,
+}
+
+MOVIMIENTO_TIPO_ID_A_LABEL = {
+    1: "Entrada",
+    2: "Salida",
+    3: "Ajuste",
+}
+
+
+def _resolve_movimiento_tipo_id(db: Session, value: str) -> int:
+    tipo = _normalize_movimiento_tipo(value)
+    codigo = tipo.lower()
+    row = db.execute(
+        text(
+            """
+            SELECT id_tipo_movimiento
+            FROM petalops.tipo_movimiento
+            WHERE lower(codigo) = :codigo
+               OR lower(nombre) = :codigo
+            LIMIT 1
+            """
+        ),
+        {"codigo": codigo},
+    ).first()
+    if row:
+        return int(row[0])
+    resolved = MOVIMIENTO_TIPO_CODIGO_A_ID.get(codigo)
+    if resolved is None:
+        raise HTTPException(status_code=400, detail="tipoMovimiento no configurado en catalogo")
+    return int(resolved)
+
+
+def _movimiento_tipo_label(value: int | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.strip() and not value.strip().isdigit():
+        return _normalize_movimiento_tipo(value)
+    try:
+        return MOVIMIENTO_TIPO_ID_A_LABEL.get(int(value), str(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _get_proveedor_for_empresa(db: Session, empresa_id: int, proveedor_id: int) -> Proveedor | None:
     query = db.query(Proveedor).filter(Proveedor.idProveedor == int(proveedor_id))
     if _has_column(db, "proveedor", "empresa_id"):
@@ -160,8 +207,8 @@ def listar_proveedores(
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
-            Proveedor.nombreProveedor.like(term)
-            | Proveedor.codigoProveedor.like(term)
+            Proveedor.nombreProveedor.ilike(term)
+            | Proveedor.codigoProveedor.ilike(term)
         )
 
     rows = query.order_by(Proveedor.nombreProveedor.asc()).all()
@@ -266,13 +313,13 @@ def listar_inventario(
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
-            func.cast(Inventario.idInventario, String).like(term)
-            | func.cast(Inventario.insumoID, String).like(term)
-            | Insumo.nombreInsumo.like(term)
-            | Insumo.codigoBarra.like(term)
-            | Insumo.unidadMedida.like(term)
-            | Proveedor.codigoProveedor.like(term)
-            | Proveedor.nombreProveedor.like(term)
+            func.cast(Inventario.idInventario, String).ilike(term)
+            | func.cast(Inventario.insumoID, String).ilike(term)
+            | Insumo.nombreInsumo.ilike(term)
+            | Insumo.codigoBarra.ilike(term)
+            | Insumo.unidadMedida.ilike(term)
+            | Proveedor.codigoProveedor.ilike(term)
+            | Proveedor.nombreProveedor.ilike(term)
         )
 
     rows = query.order_by(Insumo.unidadMedida.asc(), Insumo.nombreInsumo.asc()).all()
@@ -319,52 +366,132 @@ def crear_item_inventario(
         raise HTTPException(status_code=400, detail="El usuario autenticado no tiene sucursal asignada")
 
     now = datetime.now(timezone.utc)
-    insumo = Insumo(
-        empresaID=int(payload.empresaID),
-        nombreInsumo=payload.nombre.strip(),
-        codigoBarra=payload.codigo.strip(),
-        unidadMedida=payload.categoria.strip(),
-        proveedorID=(int(payload.proveedorID) if payload.proveedorID is not None else None),
-        activo=bool(payload.activo),
-        createdAt=now,
-        updatedAt=now,
-    )
-    db.add(insumo)
-
     try:
-        db.flush()
+        insumo_row = db.execute(
+            text(
+                """
+                INSERT INTO petalops.insumo (
+                    empresa_id,
+                    codigo_barra,
+                    nombre_insumo,
+                    unidad_medida,
+                    activo,
+                    created_at,
+                    updated_at,
+                    proveedor_id
+                ) VALUES (
+                    :empresa_id,
+                    :codigo_barra,
+                    :nombre_insumo,
+                    :unidad_medida,
+                    :activo,
+                    :created_at,
+                    :updated_at,
+                    :proveedor_id
+                )
+                RETURNING id_insumo
+                """
+            ),
+            {
+                "empresa_id": int(payload.empresaID),
+                "codigo_barra": payload.codigo.strip(),
+                "nombre_insumo": payload.nombre.strip(),
+                "unidad_medida": payload.categoria.strip(),
+                "activo": bool(payload.activo),
+                "created_at": now,
+                "updated_at": now,
+                "proveedor_id": (int(payload.proveedorID) if payload.proveedorID is not None else None),
+            },
+        ).first()
+        insumo_id = int(insumo_row[0])
 
-        item = Inventario(
-        empresaID=int(payload.empresaID),
-        sucursalID=int(auth.sucursalID),
-        insumoID=int(insumo.idInsumo),
-        stockActual=payload.stockActual,
-        stockReservado=Decimal("0"),
-        stockMinimo=payload.stockMinimo,
-        valorUnitario=payload.valorUnitario,
-        activo=bool(payload.activo),
-        fechaUltimaActualizacion=now,
-        createdAt=now,
-        updatedAt=now,
-        )
-        db.add(item)
-        db.flush()
+        item_row = db.execute(
+            text(
+                """
+                INSERT INTO petalops.inventario (
+                    empresa_id,
+                    sucursal_id,
+                    insumo_id,
+                    stock_actual,
+                    stock_reservado,
+                    stock_minimo,
+                    valor_unitario,
+                    activo,
+                    fechaultimaactualizacion,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :empresa_id,
+                    :sucursal_id,
+                    :insumo_id,
+                    :stock_actual,
+                    :stock_reservado,
+                    :stock_minimo,
+                    :valor_unitario,
+                    :activo,
+                    :fecha_actualizacion,
+                    :created_at,
+                    :updated_at
+                )
+                RETURNING id_inventario
+                """
+            ),
+            {
+                "empresa_id": int(payload.empresaID),
+                "sucursal_id": int(auth.sucursalID),
+                "insumo_id": insumo_id,
+                "stock_actual": payload.stockActual,
+                "stock_reservado": Decimal("0"),
+                "stock_minimo": payload.stockMinimo,
+                "valor_unitario": payload.valorUnitario,
+                "activo": bool(payload.activo),
+                "fecha_actualizacion": now,
+                "created_at": now,
+                "updated_at": now,
+            },
+        ).first()
+        inventario_id = int(item_row[0])
 
         if Decimal(payload.stockActual) > 0:
-            mov = MovimientoInventario(
-                empresaID=int(payload.empresaID),
-                inventarioID=int(item.idInventario),
-                tipoMovimiento="Entrada",
-                cantidad=Decimal(payload.stockActual),
-                fecha=now,
-                motivo="Carga inicial",
-                usuarioID=int(auth.userID),
-                createdAt=now,
+            tipo_movimiento_id = _resolve_movimiento_tipo_id(db, "Entrada")
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.movimiento_inventario (
+                        empresa_id,
+                        inventario_id,
+                        tipo_movimiento_id,
+                        cantidad,
+                        fecha,
+                        motivo,
+                        usuario_id,
+                        created_at
+                    ) VALUES (
+                        :empresa_id,
+                        :inventario_id,
+                        :tipo_movimiento_id,
+                        :cantidad,
+                        :fecha,
+                        :motivo,
+                        :usuario_id,
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    "empresa_id": int(payload.empresaID),
+                    "inventario_id": inventario_id,
+                    "tipo_movimiento_id": tipo_movimiento_id,
+                    "cantidad": Decimal(payload.stockActual),
+                    "fecha": now,
+                    "motivo": "Carga inicial",
+                    "usuario_id": int(auth.userID),
+                    "created_at": now,
+                },
             )
-            db.add(mov)
 
         db.commit()
-        db.refresh(item)
+        item = db.query(Inventario).filter(Inventario.idInventario == inventario_id).first()
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear item de inventario (codigo duplicado o datos invalidos)")
@@ -428,6 +555,7 @@ def ajustar_stock_inventario(
     assert_same_empresa(auth, int(item.empresaID))
 
     movimiento_tipo = _normalize_movimiento_tipo(payload.tipoMovimiento)
+    movimiento_tipo_id = _resolve_movimiento_tipo_id(db, movimiento_tipo)
     cantidad = Decimal(payload.cantidad or 0)
     now = datetime.now(timezone.utc)
 
@@ -461,7 +589,7 @@ def ajustar_stock_inventario(
     movimiento = MovimientoInventario(
         empresaID=int(item.empresaID),
         inventarioID=int(item.idInventario),
-        tipoMovimiento=movimiento_tipo,
+        tipoMovimiento=movimiento_tipo_id,
         cantidad=cantidad_mov,
         fecha=now,
         motivo=payload.motivo.strip(),
@@ -534,15 +662,15 @@ def listar_movimientos_inventario(
         query = query.filter(MovimientoInventario.inventarioID == inventario_id)
 
     if tipo:
-        tipo_norm = _normalize_movimiento_tipo(tipo)
-        query = query.filter(func.upper(MovimientoInventario.tipoMovimiento) == tipo_norm.upper())
+        tipo_id = _resolve_movimiento_tipo_id(db, tipo)
+        query = query.filter(MovimientoInventario.tipoMovimiento == tipo_id)
 
     if q:
         term = f"%{q.strip()}%"
         query = query.filter(
-            Insumo.nombreInsumo.like(term)
-            | Insumo.codigoBarra.like(term)
-            | MovimientoInventario.motivo.like(term)
+            Insumo.nombreInsumo.ilike(term)
+            | Insumo.codigoBarra.ilike(term)
+            | MovimientoInventario.motivo.ilike(term)
         )
 
     rows = query.order_by(MovimientoInventario.fecha.desc(), MovimientoInventario.idMovimiento.desc()).all()
@@ -553,7 +681,7 @@ def listar_movimientos_inventario(
             inventarioID=int(mov.inventarioID),
             codigo=(str(ins.codigoBarra) if ins and ins.codigoBarra else f"INS-{int(inv.insumoID)}"),
             nombre=(str(ins.nombreInsumo) if ins and ins.nombreInsumo else f"Insumo {int(inv.insumoID)}"),
-            tipoMovimiento=str(mov.tipoMovimiento or ""),
+            tipoMovimiento=_movimiento_tipo_label(mov.tipoMovimiento),
             cantidad=Decimal(mov.cantidad or 0),
             fecha=mov.fecha,
             motivo=(str(mov.motivo) if mov.motivo is not None else None),

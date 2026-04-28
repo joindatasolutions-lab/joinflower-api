@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.security import assert_same_empresa, get_current_auth_context, is_super_admin_context, require_module_access
 from app.database import get_db
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
@@ -17,7 +17,10 @@ def _obtener_mensaje_tarjeta(
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+    pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
+    if not is_super_admin_context(auth):
+        pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
+    pedido = pedido_query.first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
 

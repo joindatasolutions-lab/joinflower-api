@@ -157,7 +157,15 @@ def is_empresa_activa(estado_value) -> bool:
     return False
 
 
-def create_access_token(*, user_id: int, empresa_id: int, sucursal_id: int | None, rol_id: int, plan_id: int | None = None) -> str:
+def create_access_token(
+    *,
+    user_id: int,
+    empresa_id: int,
+    sucursal_id: int | None,
+    rol_id: int,
+    plan_id: int | None = None,
+    extra_claims: dict | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
 
@@ -170,6 +178,8 @@ def create_access_token(*, user_id: int, empresa_id: int, sucursal_id: int | Non
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -345,7 +355,10 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     if not is_superadmin_user and is_global_join_login(usuario.login):
         is_superadmin_user = True
 
-    if is_superadmin_user:
+    impersonated_empresa_id = _safe_int(payload.get("impersonatedEmpresaID"))
+    impersonated = bool(payload.get("impersonated")) and impersonated_empresa_id is not None
+
+    if is_superadmin_user and not impersonated:
         empresa_id = _safe_int(usuario.empresaID, 0)
         rol_id = _safe_int(usuario.rolID, 0)
         effective_plan_id = None
@@ -359,8 +372,82 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             "usuarios",
             "inventario",
             "reportes",
+            "clientes",
         }
         permisos: dict[str, dict[str, bool]] = {
+            modulo: {
+                "puedeVer": True,
+                "puedeCrear": True,
+                "puedeEditar": True,
+                "puedeEliminar": True,
+            }
+            for modulo in modulos_plan
+        }
+    elif is_superadmin_user and impersonated:
+        empresa_id = int(impersonated_empresa_id)
+        rol_id = _safe_int(payload.get("impersonatedRolID"), 0)
+
+        empresa_meta = load_empresa_auth_meta(db, empresa_id)
+        if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+
+        effective_plan_id = (
+            empresa_meta["planID"]
+            if empresa_meta["planID"] is not None
+            else _safe_int(plan_id)
+        )
+        rol_nombre = "empresa_admin_impersonado"
+
+        modulos_plan: set[str] = set()
+        if effective_plan_id is not None:
+            plan_table, plan_columns = _resolve_table_spec(
+                db,
+                ["plan_modulo", "planmodulo", "PlanModulo"],
+                {
+                    "plan_id": ["plan_id", "planid", "planID"],
+                    "modulo": ["modulo"],
+                    "activo": ["activo"],
+                },
+            )
+            if plan_table and plan_columns:
+                plan_modules_rows = db.execute(
+                    text(
+                        f"""
+                        SELECT {_quote_ident(plan_columns["modulo"])} AS modulo,
+                               {_quote_ident(plan_columns["activo"])} AS activo
+                        FROM petalops.{_quote_ident(plan_table)}
+                        WHERE {_quote_ident(plan_columns["plan_id"])} = :plan_id
+                        """
+                    ),
+                    {"plan_id": int(effective_plan_id)},
+                ).mappings().all()
+                modulos_plan = {
+                    normalize_module_name(row.get("modulo"))
+                    for row in plan_modules_rows
+                    if bool(row.get("activo"))
+                }
+
+        if not modulos_plan:
+            modulos_plan = {
+                "pedidos",
+                "produccion",
+                "domicilios",
+                "catalogo",
+                "usuarios",
+                "inventario",
+                "reportes",
+                "clientes",
+            }
+
+        overrides = load_empresa_module_overrides(db, empresa_id)
+        if overrides is not None:
+            for modulo, activo in overrides.items():
+                if bool(activo):
+                    modulos_plan.add(modulo)
+                else:
+                    modulos_plan.discard(modulo)
+
+        permisos = {
             modulo: {
                 "puedeVer": True,
                 "puedeCrear": True,
@@ -495,7 +582,7 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         nombre=str(usuario.nombre or ""),
         login=str(usuario.login or ""),
         email=str(usuario.email or ""),
-        esGlobalJoin=(is_global_join_login(usuario.login) or is_superadmin_user),
+        esGlobalJoin=(is_global_join_login(usuario.login) or is_superadmin_user) and not impersonated,
         ultimoLogin=usuario.ultimoLogin,
         permisos=permisos,
         modulosActivosPlan=modulos_plan,

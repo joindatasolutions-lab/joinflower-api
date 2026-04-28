@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, func
+from sqlalchemy import String, func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -79,6 +79,20 @@ def _require_production_admin(auth=Depends(get_current_auth_context)):
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
         raise HTTPException(status_code=403, detail="Solo administradores pueden ejecutar acciones de producción")
     return auth
+
+
+def _current_florista_for_user(db: Session, auth) -> Florista | None:
+    if getattr(auth, "userID", None) is None:
+        return None
+    return (
+        db.query(Florista)
+        .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+        .filter(
+            Florista.usuarioID == int(auth.userID),
+            Florista.empresaID == int(auth.empresaID),
+        )
+        .first()
+    )
 
 ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
@@ -256,7 +270,7 @@ def _build_items(
     elif not incluir_cancelado:
         q = q.filter(Produccion.estado != produccion_service.estado_produccion_id(db, ESTADO_CANCELADO))
 
-    rows = q.order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.ordenProduccion.asc(), Produccion.idProduccion.asc()).all()
+    rows = q.order_by(Pedido.numeroPedido.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
     producto_map = _build_producto_map(db, empresa_id, ids)
 
@@ -283,6 +297,7 @@ def _build_items(
                 pedidoID=int(pedido.idPedido),
                 numeroPedido=_numero_pedido_valor(pedido),
                 codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+                floristaID=(int(florista.idFlorista) if florista else None),
                 codigoArreglo=codigo_arreglo,
                 nombreArreglo=nombre_arreglo,
                 producto=nombre_arreglo,
@@ -303,10 +318,12 @@ def _build_items(
             )
         )
 
-    return sort_operativo(
+    return sorted(
         items,
-        due_at=lambda item: item.fechaEntrega,
-        priority=lambda item: item.prioridad,
+        key=lambda item: (
+            int(item.numeroPedido or 0),
+            int(item.idProduccion or 0),
+        ),
     )
 
 
@@ -437,7 +454,7 @@ def listar_floristas(
     )
 
 
-@router.put("/floristas/{florista_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
+@router.put("/floristas/{florista_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     florista = db.query(Florista).filter(Florista.idFlorista == florista_id).first()
     if not florista:
@@ -446,11 +463,33 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     assert_same_empresa(auth, int(florista.empresaID))
 
     nuevo_estado = _estado_florista_norm(payload.estado)
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        current_florista = _current_florista_for_user(db, auth)
+        if not current_florista or int(current_florista.idFlorista) != int(florista_id):
+            raise HTTPException(status_code=403, detail="Solo puedes actualizar tu propio estado de florista")
+        if nuevo_estado not in {"Activo", "Inactivo"}:
+            raise HTTPException(status_code=400, detail="Para floristas solo se permite Activo o Inactivo")
     if nuevo_estado not in {"Activo", "Inactivo", "Incapacidad"}:
         raise HTTPException(status_code=400, detail="Estado de florista inválido")
 
-    florista.activo = 1 if nuevo_estado == "Activo" else 0
-    florista.updatedAt = _utc_now_naive()
+    activo_flag = int(1 if nuevo_estado == "Activo" else 0)
+    now_utc = _utc_now_naive()
+    db.execute(
+        text(
+            """
+            UPDATE petalops.empleado
+            SET activo = :activo,
+                updated_at = :updated_at
+            WHERE id_empleado = :florista_id
+            """
+        ),
+        {
+            "activo": activo_flag,
+            "updated_at": now_utc,
+            "florista_id": int(florista.idFlorista),
+        },
+    )
+    db.expire(florista)
 
     perfil = db.query(PerfilFlorista).filter(PerfilFlorista.empleadoID == florista.idFlorista).first()
     if not perfil:
@@ -538,7 +577,7 @@ def listar_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    target_fecha = fecha or date.today()
+    target_fecha = fecha
     auto_resumen = AutoAsignacionResumen(
         ejecutada=False,
         evaluadas=0,
@@ -546,11 +585,11 @@ def listar_produccion(
         sinDisponibilidad=0,
     )
 
-    if auto_asignar_pendientes_hoy and target_fecha == date.today():
+    if auto_asignar_pendientes_hoy:
         stats = produccion_service.asignar_pendientes_por_fecha(
             db=db,
             empresa_id=empresa_id,
-            fecha_objetivo=target_fecha,
+            fecha_objetivo=date.today(),
             sucursal_id=sucursal_id,
             incluir_vencidas=False,
             usuario="produccion.listar",
@@ -803,12 +842,21 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     }
 
 
-@router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar")), Depends(_require_production_admin)])
+@router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     if not payload.motivo.strip():
         raise HTTPException(status_code=400, detail="motivo es obligatorio")
     if not payload.usuarioCambio.strip():
         raise HTTPException(status_code=400, detail="usuarioCambio es obligatorio")
+
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
+        if not produccion:
+            raise _err("PRODUCCION_NOT_FOUND", "Registro de producciÃ³n no encontrado", status_code=404)
+        assert_same_empresa(auth, int(produccion.empresaID))
+        current_florista = _current_florista_for_user(db, auth)
+        if not current_florista or int(produccion.floristaID or 0) != int(current_florista.idFlorista):
+            raise HTTPException(status_code=403, detail="Solo puedes reasignar producciones que hoy estÃ¡n asignadas a ti")
 
     wrapper = ProduccionAsignarRequest(
         floristaID=payload.floristaNuevoID,

@@ -51,6 +51,7 @@ class ProduccionItem(BaseModel):
     pedidoID: int
     numeroPedido: int
     codigoPedido: Optional[str] = None
+    floristaID: Optional[int] = None
     codigoArreglo: Optional[str] = None
     nombreArreglo: Optional[str] = None
     producto: str

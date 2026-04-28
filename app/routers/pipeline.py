@@ -173,9 +173,9 @@ def listar_pipeline_pedidos(
             term = f"%{numero_pedido.strip()}%"
             q = q.filter(
                 or_(
-                    cast(Pedido.numeroPedido, String).like(term),
-                    cast(Pedido.idPedido, String).like(term),
-                    func.coalesce(Pedido.codigoPedido, "").like(term),
+                    cast(Pedido.numeroPedido, String).ilike(term),
+                    cast(Pedido.idPedido, String).ilike(term),
+                    func.coalesce(Pedido.codigoPedido, "").ilike(term),
                 )
             )
 

@@ -18,6 +18,7 @@ from app.models.producto import Producto
 from app.models.cliente import Cliente
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
+from app.models.produccion import Produccion
 from app.models.transicionestadopedido import TransicionEstadoPedido
 from app.models.estadopedido import EstadoPedido
 from app.models.entrega import Entrega
@@ -33,10 +34,11 @@ from app.schemas.pedido import (
     RechazarPedidoRequest,
 )
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
+from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
-from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.security import assert_same_empresa, get_current_auth_context, is_super_admin_context, require_module_access
 from app.middlewares.rate_limit import limiter
 
 router = APIRouter()
@@ -186,6 +188,17 @@ def _ids_estado_pendiente(db: Session) -> set[int]:
     return {int(estado.idEstadoPedido) for estado in estados}
 
 
+def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
+    if estado_pedido_id is None:
+        return ""
+    estado = db.query(EstadoPedido).filter(EstadoPedido.idEstadoPedido == int(estado_pedido_id)).first()
+    return str((estado.nombreEstado if estado else "") or "").strip().upper()
+
+
+def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
+    return _estado_pedido_nombre(db, estado_pedido_id) not in {"ENTREGADO", "CANCELADO", "RECHAZADO"}
+
+
 def _dias_anticipacion_produccion() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
 
@@ -209,6 +222,16 @@ def _parse_iso_date(value: str) -> datetime:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
+
+
+def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
+    value = str(identificacion or "").strip()
+    if value:
+        return value
+    phone = str(telefono or "").strip()
+    if phone:
+        return phone
+    return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
 
 
 def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int, producto_id: int) -> Decimal:
@@ -831,14 +854,14 @@ def listar_pedidos(
             .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
             .filter(
                 or_(
-                    cast(Pedido.idPedido, String).like(term),
-                    cast(Pedido.numeroPedido, String).like(term),
-                    func.coalesce(Pedido.codigoPedido, "").like(term),
-                    Cliente.nombreCompleto.like(term),
-                    Cliente.telefono.like(term),
-                    Cliente.identificacion.like(term),
-                    Entrega.destinatario.like(term),
-                    Producto.nombreProducto.like(term),
+                    cast(Pedido.idPedido, String).ilike(term),
+                    cast(Pedido.numeroPedido, String).ilike(term),
+                    func.coalesce(Pedido.codigoPedido, "").ilike(term),
+                    Cliente.nombreCompleto.ilike(term),
+                    Cliente.telefono.ilike(term),
+                    Cliente.identificacion.ilike(term),
+                    Entrega.destinatario.ilike(term),
+                    Producto.nombreProducto.ilike(term),
                 )
             )
         )
@@ -940,13 +963,15 @@ def listar_pedidos(
 @router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     try:
-        row = (
+        row_query = (
             db.query(Pedido, Cliente, EstadoPedido)
             .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .filter(Pedido.idPedido == pedido_id)
-            .first()
         )
+        if not is_super_admin_context(auth):
+            row_query = row_query.filter(Pedido.empresaID == int(auth.empresaID))
+        row = row_query.first()
 
         if not row:
             pedido_logger.warning("Pedido no encontrado. pedido_id=%s", pedido_id)
@@ -1103,6 +1128,11 @@ def actualizar_detalle_pedido(
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
+        if not _estado_pedido_editable(db, pedido.estadoPedidoID):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PEDIDO_NOT_EDITABLE", "message": "No se pueden editar pedidos entregados o cancelados"},
+            )
 
         cliente = (
             db.query(Cliente)
@@ -1202,6 +1232,27 @@ def actualizar_detalle_pedido(
                 if payload.observacionGeneral is not None:
                     entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
 
+                if payload.fechaEntrega is not None:
+                    fecha_base = entrega.fechaEntregaProgramada or entrega.fechaEntrega
+                    fecha_programada = produccion_service.calcular_fecha_programada(
+                        fecha_entrega=fecha_base,
+                        dias_anticipacion=_dias_anticipacion_produccion(),
+                    )
+                    producciones = (
+                        db.query(Produccion)
+                        .filter(
+                            Produccion.pedidoID == pedido_id,
+                            Produccion.empresaID == int(pedido.empresaID),
+                        )
+                        .all()
+                    )
+                    estado_cancelado_id = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_CANCELADO)
+                    for produccion in producciones:
+                        if int(produccion.estado or 0) == int(estado_cancelado_id):
+                            continue
+                        produccion.fechaProgramadaProduccion = fecha_programada
+                        produccion.updatedAt = datetime.now(timezone.utc)
+
         if needs_totals_recalc:
             _recalculate_pedido_financials(
                 db,
@@ -1271,14 +1322,16 @@ def actualizar_detalle_pedido(
 
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    row = (
+    row_query = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
         .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
         .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.idPedido == pedido_id)
-        .first()
     )
+    if not is_super_admin_context(auth):
+        row_query = row_query.filter(Pedido.empresaID == int(auth.empresaID))
+    row = row_query.first()
 
     if not row:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
@@ -1343,10 +1396,17 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
 @router.put("/pedido/{pedido_id}/aprobar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+    pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
+    if not is_super_admin_context(auth):
+        pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
+    pedido = pedido_query.first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
+
+    pendientes = _ids_estado_pendiente(db)
+    if pendientes and int(pedido.estadoPedidoID) not in pendientes:
+        raise HTTPException(status_code=400, detail="Solo se pueden aprobar pedidos en estado Pendiente")
 
     approval_gate = _approval_gate_summary(
         db,
@@ -1355,10 +1415,6 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     )
     if not approval_gate["puedeAprobar"]:
         raise HTTPException(status_code=400, detail=approval_gate["motivo"])
-
-    pendientes = _ids_estado_pendiente(db)
-    if pendientes and int(pedido.estadoPedidoID) not in pendientes:
-        raise HTTPException(status_code=400, detail="Solo se pueden aprobar pedidos en estado Pendiente")
 
     estado_aprobado = _buscar_estado_por_nombre(db, "APROBADO", "PAGADO")
     if not estado_aprobado:
@@ -1392,7 +1448,10 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     if not motivo:
         raise HTTPException(status_code=400, detail="El motivo de rechazo es obligatorio")
 
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+    pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
+    if not is_super_admin_context(auth):
+        pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
+    pedido = pedido_query.first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
@@ -1449,15 +1508,18 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             raise HTTPException(status_code=400, detail="Producto inválido")
 
         # 2️⃣ Calcular totales
-        subtotal = 0
-        total_iva = 0
+        subtotal = Decimal("0.00")
+        total_iva = Decimal("0.00")
 
         for item in data.items:
             producto = next(p for p in productos_db if p.idProducto == item.productoId)
-
-            precio = float(producto.precioBase)
-            linea = precio * item.cantidad
-
+            precio = _find_branch_product_price(
+                db,
+                empresa_id=int(data.empresaId),
+                sucursal_id=int(data.sucursalId),
+                producto_id=int(producto.idProducto),
+            )
+            linea = precio * Decimal(str(item.cantidad))
             subtotal += linea
 
         total = subtotal  # luego agregamos IVA real
@@ -1465,10 +1527,14 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         # 3️⃣ Crear cliente (simplificado)
         cliente = Cliente(
             empresaID=data.empresaId,
+            tipoIdent="CC",
+            identificacion=_cliente_identificacion_fallback(None, data.cliente.telefono),
+            telefonoCompleto=data.cliente.telefono,
             nombreCompleto=data.cliente.nombres,
             telefono=data.cliente.telefono,
             email=data.cliente.email,
-            activo=True
+            activo=1,
+            createdAt=datetime.now(timezone.utc),
         )
 
         db.add(cliente)
@@ -1490,12 +1556,11 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             codigoPedido=codigo_pedido,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
-            fechaPedidoDate=fecha_pedido.date(),
-            horaPedido=fecha_pedido.time().replace(microsecond=0),
             estadoPedidoID=1,  # Pedido Registrado
-            totalBruto=subtotal,
-            totalIva=total_iva,
-            totalNeto=total
+            totalBruto=subtotal.quantize(Decimal("0.01")),
+            totalIva=total_iva.quantize(Decimal("0.01")),
+            totalNeto=total.quantize(Decimal("0.01")),
+            createdAt=datetime.now(timezone.utc),
         )
 
         db.add(pedido)
@@ -1504,15 +1569,24 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         # 5️⃣ Crear detalles
         for item in data.items:
             producto = next(p for p in productos_db if p.idProducto == item.productoId)
+            precio_unitario = _find_branch_product_price(
+                db,
+                empresa_id=int(data.empresaId),
+                sucursal_id=int(data.sucursalId),
+                producto_id=int(producto.idProducto),
+            )
+            cantidad = Decimal(str(item.cantidad))
 
             detalle = PedidoDetalle(
                 empresaID=data.empresaId,
                 sucursalID=data.sucursalId,
                 pedidoID=pedido.idPedido,
                 productoID=producto.idProducto,
-                cantidad=item.cantidad,
-                precioUnitario=producto.precioBase,
-                totalLinea=float(producto.precioBase) * item.cantidad
+                cantidad=cantidad,
+                precioUnitario=precio_unitario,
+                ivaUnitario=Decimal("0.00"),
+                totalLinea=(precio_unitario * cantidad).quantize(Decimal("0.01")),
+                observacionesPersonalizados=(str(producto.descripcion).strip() if producto.descripcion else None),
             )
 
             db.add(detalle)
@@ -1524,7 +1598,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             "idPedido": pedido.idPedido,
             "numeroPedido": int(pedido.numeroPedido),
             "codigoPedido": str(pedido.codigoPedido),
-            "total": total
+            "total": float(total.quantize(Decimal("0.01")))
         }
 
     except SQLAlchemyError as e:
@@ -1539,7 +1613,10 @@ def cambiar_estado(
     auth=Depends(get_current_auth_context),
 ):
     # 1️⃣ Buscar pedido
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id).first()
+    pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
+    if not is_super_admin_context(auth):
+        pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
+    pedido = pedido_query.first()
 
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
@@ -1548,10 +1625,22 @@ def cambiar_estado(
     estado_actual = pedido.estadoPedidoID
 
     # 2️⃣ Validar transición permitida
-    transicion = db.query(TransicionEstadoPedido).filter(
-        TransicionEstadoPedido.empresaID == pedido.empresaID,
-        TransicionEstadoPedido.estadoOrigenID == estado_actual,
-        TransicionEstadoPedido.estadoDestinoID == nuevo_estado_id
+    transicion = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM petalops.transicion_estado_pedido
+            WHERE empresa_id = :empresa_id
+              AND estado_origen_id = :estado_origen_id
+              AND estado_destino_id = :estado_destino_id
+            LIMIT 1
+            """
+        ),
+        {
+            "empresa_id": int(pedido.empresaID),
+            "estado_origen_id": int(estado_actual),
+            "estado_destino_id": int(nuevo_estado_id),
+        },
     ).first()
 
     if not transicion:
@@ -1562,15 +1651,29 @@ def cambiar_estado(
 
     # 3️⃣ Actualizar estado
     pedido.estadoPedidoID = nuevo_estado_id
+    pedido.updatedAt = datetime.now(timezone.utc)
 
     estado_destino = (
         db.query(EstadoPedido)
-        .filter(EstadoPedido.idEstadoPedido == nuevo_estado_id)
+        .filter(
+            EstadoPedido.idEstadoPedido == nuevo_estado_id,
+            _activo_truthy(EstadoPedido.activo),
+        )
         .first()
     )
 
+    if not estado_destino:
+        raise HTTPException(status_code=400, detail="Estado destino inválido o inactivo")
+
     produccion = None
-    if estado_destino and str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
+    if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
+        approval_gate = _approval_gate_summary(
+            db,
+            pedido_id=int(pedido.idPedido),
+            empresa_id=int(pedido.empresaID),
+        )
+        if not approval_gate["puedeAprobar"]:
+            raise HTTPException(status_code=400, detail=approval_gate["motivo"])
         produccion = asegurar_produccion_desde_pedido_aprobado(
             db=db,
             pedido=pedido,

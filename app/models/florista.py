@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, BigInteger, String, case, func, select
+from sqlalchemy import Column, DateTime, BigInteger, Integer, String, case, func, select
 from sqlalchemy.orm import column_property
 
 from app.models.perfilflorista import PerfilFlorista
@@ -14,9 +14,10 @@ class Florista(Base):
     idFlorista = Column("id_empleado", BigInteger, primary_key=True, index=True)
     empresaID = Column("empresa_id", BigInteger, nullable=False, index=True)
     sucursalID = Column("sucursal_id", BigInteger, nullable=True, index=True)
+    usuarioID = Column("usuario_id", BigInteger, nullable=True, index=True)
     nombre = Column("nombre_empleado", String(150), nullable=False)
     cargo = Column("cargo", String(100), nullable=False)
-    activo = Column("activo", BigInteger, nullable=False, default=1)
+    activo = Column("activo", Integer, nullable=False, default=1)
     createdAt = Column("created_at", DateTime)
     updatedAt = Column("updated_at", DateTime)
 

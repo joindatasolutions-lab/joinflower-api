@@ -16,7 +16,6 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.sucursal import Sucursal
-from app.models.sucursal_contador_pedido import SucursalContadorPedido
 from app.schemas.pedido import PedidoCheckoutRequest
 
 
@@ -35,6 +34,20 @@ def _normalizar_telefono_completo(indicativo: str | None, telefono: str | None) 
         prefijo = f"+{prefijo}"
 
     return f"{prefijo}{numero}"
+
+
+def _normalizar_activo_legacy(value: bool) -> int:
+    return 1 if value else 0
+
+
+def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
+    value = str(identificacion or "").strip()
+    if value:
+        return value
+    phone = str(telefono or "").strip()
+    if phone:
+        return phone
+    return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
 
 
 def _prefijo_desde_sucursal(sucursal: Sucursal) -> str:
@@ -71,9 +84,9 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
     db.execute(
         text(
             """
-            INSERT INTO SucursalContadorPedido (empresaID, sucursalID, ultimoPedido, updatedAt)
+            INSERT INTO petalops.sucursal_contador_pedido (empresa_id, sucursal_id, ultimo_pedido, updated_at)
             VALUES (:empresa_id, :sucursal_id, 0, :updated_at)
-            ON DUPLICATE KEY UPDATE updatedAt = updatedAt
+            ON CONFLICT (empresa_id, sucursal_id) DO NOTHING
             """
         ),
         {
@@ -83,22 +96,57 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
         },
     )
 
-    contador = (
-        db.query(SucursalContadorPedido)
-        .filter(
-            SucursalContadorPedido.empresaID == empresa_id,
-            SucursalContadorPedido.sucursalID == sucursal_id,
-        )
-        .with_for_update()
-        .one()
-    )
+    row = db.execute(
+        text(
+            """
+            UPDATE petalops.sucursal_contador_pedido
+            SET ultimo_pedido = ultimo_pedido + 1,
+                updated_at = :updated_at
+            WHERE empresa_id = :empresa_id
+              AND sucursal_id = :sucursal_id
+            RETURNING ultimo_pedido
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "sucursal_id": int(sucursal_id),
+            "updated_at": now_utc,
+        },
+    ).first()
 
-    contador.ultimoPedido = int(contador.ultimoPedido or 0) + 1
-    contador.updatedAt = now_utc
+    if not row or row[0] is None:
+        raise HTTPException(status_code=500, detail="No fue posible generar el consecutivo del pedido")
 
-    numero_pedido = int(contador.ultimoPedido)
-    codigo_pedido = f"{prefijo}-{numero_pedido}"
+    numero_pedido = int(row[0])
+    codigo_pedido = f"{prefijo}-{numero_pedido:05d}"
     return numero_pedido, codigo_pedido
+
+
+def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int, producto_id: int) -> Decimal:
+    row = db.execute(
+        text(
+            """
+            SELECT ps.precio
+            FROM petalops.producto_sucursal ps
+            JOIN petalops.producto p
+              ON p.id_producto = ps.producto_id
+            WHERE p.id_producto = :producto_id
+              AND p.empresa_id = :empresa_id
+              AND ps.sucursal_id = :sucursal_id
+              AND lower(CAST(p.activo AS VARCHAR)) IN ('true', 't', '1')
+              AND lower(CAST(ps.activo AS VARCHAR)) IN ('true', 't', '1')
+            LIMIT 1
+            """
+        ),
+        {
+            "producto_id": int(producto_id),
+            "empresa_id": int(empresa_id),
+            "sucursal_id": int(sucursal_id),
+        },
+    ).first()
+    if not row or row[0] is None:
+        raise HTTPException(status_code=400, detail="No se encontró precio activo para ese arreglo en la sucursal")
+    return Decimal(str(row[0]))
 
 
 def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
@@ -156,8 +204,11 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
         if not cliente:
             cliente = Cliente(
                 empresaID=payload.empresaID,
-                tipoIdent=payload.cliente.tipoIdent,
-                identificacion=payload.cliente.identificacion,
+                tipoIdent=(payload.cliente.tipoIdent or "CC"),
+                identificacion=_cliente_identificacion_fallback(
+                    payload.cliente.identificacion,
+                    payload.cliente.telefono,
+                ),
                 indicativo=payload.cliente.indicativo,
                 telefonoCompleto=_normalizar_telefono_completo(
                     payload.cliente.indicativo,
@@ -166,14 +217,18 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
                 nombreCompleto=payload.cliente.nombreCompleto,
                 telefono=payload.cliente.telefono,
                 email=payload.cliente.email,
-                activo=True,
+                activo=_normalizar_activo_legacy(True),
                 createdAt=datetime.now(timezone.utc),
             )
             db.add(cliente)
             db.flush()
         else:
-            cliente.tipoIdent = payload.cliente.tipoIdent or cliente.tipoIdent
-            cliente.identificacion = payload.cliente.identificacion or cliente.identificacion
+            cliente.tipoIdent = payload.cliente.tipoIdent or cliente.tipoIdent or "CC"
+            cliente.identificacion = (
+                payload.cliente.identificacion
+                or cliente.identificacion
+                or _cliente_identificacion_fallback(None, payload.cliente.telefono or cliente.telefono)
+            )
             cliente.indicativo = payload.cliente.indicativo or cliente.indicativo
             cliente.nombreCompleto = payload.cliente.nombreCompleto or cliente.nombreCompleto
             cliente.telefono = payload.cliente.telefono or cliente.telefono
@@ -198,8 +253,6 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             codigoPedido=codigo_pedido,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
-            fechaPedidoDate=fecha_pedido.date(),
-            horaPedido=fecha_pedido.time().replace(microsecond=0),
             estadoPedidoID=estado_creado.idEstadoPedido,
             totalBruto=Decimal("0.00"),
             totalIva=Decimal("0.00"),
@@ -214,7 +267,12 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
 
         for item in payload.productos:
             producto = productos_map[item.productoID]
-            precio_unitario = Decimal(producto.precioBase or 0)
+            precio_unitario = _find_branch_product_price(
+                db,
+                empresa_id=int(payload.empresaID),
+                sucursal_id=int(payload.sucursalID),
+                producto_id=int(producto.idProducto),
+            )
             cantidad = Decimal(item.cantidad)
             subtotal = precio_unitario * cantidad
 
@@ -241,7 +299,6 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             sucursalID=payload.sucursalID,
             pedidoID=pedido.idPedido,
             estadoEntregaID=1,
-            estado="Pendiente",
             tipoEntrega=payload.entrega.tipoEntrega,
             destinatario=payload.entrega.destinatario,
             telefonoDestino=payload.entrega.telefonoDestino,
