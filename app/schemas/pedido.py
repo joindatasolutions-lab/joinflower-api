@@ -68,15 +68,15 @@ class PedidoCheckoutRequest(BaseModel):
 
 class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
-    numeroPedido: int
-    codigoPedido: str
+    numeroPedido: Optional[int] = None
+    codigoPedido: Optional[str] = None
     total: float
     estado: str
 
 
 class PedidoListItem(BaseModel):
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: Optional[int] = None
     codigoPedido: Optional[str] = None
     empresaID: int
     sucursalID: int
@@ -117,7 +117,7 @@ class PedidoDetalleProducto(BaseModel):
 
 class PedidoDetalleResponse(BaseModel):
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: Optional[int] = None
     codigoPedido: Optional[str] = None
     fecha: Optional[datetime] = None
     fechaPedido: Optional[str] = None

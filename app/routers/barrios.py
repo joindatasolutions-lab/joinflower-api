@@ -27,6 +27,7 @@ class BarrioCreateRequest(BaseModel):
 
 class BarrioUpdateRequest(BaseModel):
     sucursalID: int = Field(alias="sucursalID")
+    zonaID: int = Field(alias="zonaID", ge=0)
     nombreBarrio: str = Field(min_length=2, max_length=150)
     costoDomicilio: float = Field(ge=0)
 
@@ -143,6 +144,7 @@ def update_barrio(
         raise HTTPException(status_code=400, detail="Ya existe un barrio con ese nombre en la sucursal")
 
     barrio.nombreBarrio = payload.nombreBarrio.strip()
+    barrio.zonaID = int(payload.zonaID)
     barrio.costoDomicilio = payload.costoDomicilio
     barrio.updatedAt = datetime.now(timezone.utc)
     db.commit()
@@ -155,6 +157,36 @@ def update_barrio(
         "nombreBarrio": str(barrio.nombreBarrio or ""),
         "costoDomicilio": float(barrio.costoDomicilio or 0),
         "activo": bool(barrio.activo),
+    }
+
+
+@router.delete("/barrios/{barrio_id}", dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))])
+def delete_barrio(
+    barrio_id: int,
+    sucursal_id: int = Query(..., alias="sucursalID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    empresa_id = int(auth.empresaID)
+
+    barrio = (
+        db.query(Barrio)
+        .filter(
+            Barrio.idBarrio == barrio_id,
+            Barrio.empresaID == empresa_id,
+            Barrio.sucursalID == int(sucursal_id),
+        )
+        .first()
+    )
+    if not barrio:
+        raise HTTPException(status_code=404, detail="Barrio no encontrado")
+
+    db.delete(barrio)
+    db.commit()
+
+    return {
+        "status": "ok",
+        "idBarrio": int(barrio_id),
     }
 
 

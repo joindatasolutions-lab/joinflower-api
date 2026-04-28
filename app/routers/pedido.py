@@ -100,15 +100,15 @@ def _activo_truthy(column):
 def _numero_pedido_humano(pedido: Pedido) -> str:
     if pedido.codigoPedido:
         return str(pedido.codigoPedido)
-    if pedido.numeroPedido is not None:
+    if pedido.numeroPedido is not None and int(pedido.numeroPedido or 0) > 0:
         return f"PED-{int(pedido.numeroPedido)}"
     return f"PED-{int(pedido.idPedido):06d}"
 
 
-def _numero_pedido_valor(pedido: Pedido) -> int:
-    if pedido.numeroPedido is not None:
+def _numero_pedido_valor(pedido: Pedido) -> int | None:
+    if pedido.numeroPedido is not None and int(pedido.numeroPedido or 0) > 0:
         return int(pedido.numeroPedido)
-    return int(pedido.idPedido)
+    return None
 
 
 def _fecha_pedido_str(value: datetime | None) -> str | None:
@@ -870,7 +870,11 @@ def listar_pedidos(
 
     ids_page = (
         base.distinct()
-        .order_by(Pedido.fechaPedido.desc(), Pedido.idPedido.desc())
+        .order_by(
+            text("CASE WHEN petalops.pedido.numero_pedido > 0 THEN 0 ELSE 1 END"),
+            Pedido.numeroPedido.desc(),
+            Pedido.idPedido.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -951,10 +955,12 @@ def listar_pedidos(
             )
         )
 
-    items = sort_operativo(
-        items,
-        due_at=lambda item: item.fechaEntrega,
-        priority=lambda _: None,
+    items.sort(
+        key=lambda item: (
+            0 if item.numeroPedido is not None and int(item.numeroPedido) > 0 else 1,
+            -(int(item.numeroPedido) if item.numeroPedido is not None else 0),
+            -(int(item.pedidoID) if item.pedidoID is not None else 0),
+        )
     )
 
     return PedidoListResponse(items=items, total=total, page=page, pageSize=page_size)
@@ -1420,6 +1426,15 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     if not estado_aprobado:
         raise HTTPException(status_code=400, detail="No existe estado de aprobación activo (APROBADO/PAGADO)")
 
+    if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
+        numero_pedido, codigo_pedido = generar_numeracion_pedido(
+            db=db,
+            empresa_id=int(pedido.empresaID),
+            sucursal_id=int(pedido.sucursalID),
+        )
+        pedido.numeroPedido = numero_pedido
+        pedido.codigoPedido = codigo_pedido
+
     pedido.estadoPedidoID = estado_aprobado.idEstadoPedido
     pedido.motivoRechazo = None
     pedido.updatedAt = datetime.now(timezone.utc)
@@ -1543,17 +1558,11 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         # 4️⃣ Crear pedido
         fecha_pedido = datetime.now(timezone.utc)
 
-        numero_pedido, codigo_pedido = generar_numeracion_pedido(
-            db=db,
-            empresa_id=int(data.empresaId),
-            sucursal_id=int(data.sucursalId),
-        )
-
         pedido = Pedido(
             empresaID=data.empresaId,
             sucursalID=data.sucursalId,
-            numeroPedido=numero_pedido,
-            codigoPedido=codigo_pedido,
+            numeroPedido=0,
+            codigoPedido=None,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
             estadoPedidoID=1,  # Pedido Registrado
@@ -1596,8 +1605,8 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         return {
             "status": "ok",
             "idPedido": pedido.idPedido,
-            "numeroPedido": int(pedido.numeroPedido),
-            "codigoPedido": str(pedido.codigoPedido),
+            "numeroPedido": (int(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else None),
+            "codigoPedido": (str(pedido.codigoPedido) if pedido.codigoPedido else None),
             "total": float(total.quantize(Decimal("0.01")))
         }
 
@@ -1667,6 +1676,14 @@ def cambiar_estado(
 
     produccion = None
     if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
+        if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
+            numero_pedido, codigo_pedido = generar_numeracion_pedido(
+                db=db,
+                empresa_id=int(pedido.empresaID),
+                sucursal_id=int(pedido.sucursalID),
+            )
+            pedido.numeroPedido = numero_pedido
+            pedido.codigoPedido = codigo_pedido
         approval_gate = _approval_gate_summary(
             db,
             pedido_id=int(pedido.idPedido),

@@ -240,17 +240,11 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
 
         fecha_pedido = datetime.now(timezone.utc)
 
-        numero_pedido, codigo_pedido = generar_numeracion_pedido(
-            db=db,
-            empresa_id=int(payload.empresaID),
-            sucursal_id=int(payload.sucursalID),
-        )
-
         pedido = Pedido(
             empresaID=payload.empresaID,
             sucursalID=payload.sucursalID,
-            numeroPedido=numero_pedido,
-            codigoPedido=codigo_pedido,
+            numeroPedido=0,
+            codigoPedido=None,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
             estadoPedidoID=estado_creado.idEstadoPedido,
@@ -320,8 +314,8 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
 
         return {
             "pedidoID": pedido.idPedido,
-            "numeroPedido": int(pedido.numeroPedido),
-            "codigoPedido": str(pedido.codigoPedido),
+            "numeroPedido": (int(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else None),
+            "codigoPedido": (str(pedido.codigoPedido) if pedido.codigoPedido else None),
             "total": float(pedido.totalNeto or 0),
             "estado": "CREADO",
         }
