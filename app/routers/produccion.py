@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, func, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
@@ -183,6 +182,10 @@ def _calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
     return produccion_service.calcular_tiempo_estimado_pedido(db, pedido_id)
 
 
+def _calcular_tiempo_estimado_detalle(detalle: PedidoDetalle) -> int:
+    return produccion_service.calcular_tiempo_estimado_detalle(detalle)
+
+
 def _log_historial(
     db: Session,
     produccion: Produccion,
@@ -208,6 +211,7 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
     rows = (
         db.query(
             Produccion.idProduccion,
+            PedidoDetalle.idPedidoDetalle,
             Producto.idProducto,
             Producto.codigoProducto,
             Producto.nombreProducto,
@@ -215,7 +219,7 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
         )
         .join(
             PedidoDetalle,
-            (PedidoDetalle.pedidoID == Produccion.pedidoID)
+            (PedidoDetalle.idPedidoDetalle == Produccion.pedidoDetalleID)
             & (PedidoDetalle.empresaID == Produccion.empresaID),
         )
         .join(
@@ -231,10 +235,11 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
     )
 
     out: dict[int, dict[str, str | int | None]] = {}
-    for produccion_id, producto_id, codigo_producto, nombre_producto, observaciones_personalizados in rows:
+    for produccion_id, pedido_detalle_id, producto_id, codigo_producto, nombre_producto, observaciones_personalizados in rows:
         key = int(produccion_id)
         if key not in out:
             out[key] = {
+                "pedidoDetalleID": int(pedido_detalle_id) if pedido_detalle_id is not None else None,
                 "productoID": int(producto_id) if producto_id is not None else None,
                 "codigoProducto": str(codigo_producto or "").strip() or None,
                 "nombreProducto": str(nombre_producto or "Producto"),
@@ -295,6 +300,11 @@ def _build_items(
             ProduccionItem(
                 idProduccion=int(produccion.idProduccion),
                 pedidoID=int(pedido.idPedido),
+                pedidoDetalleID=(
+                    int(produccion.pedidoDetalleID)
+                    if getattr(produccion, "pedidoDetalleID", None) is not None
+                    else producto_info.get("pedidoDetalleID")
+                ),
                 numeroPedido=_numero_pedido_valor(pedido),
                 codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
                 floristaID=(int(florista.idFlorista) if florista else None),
@@ -348,68 +358,19 @@ def generar_desde_pedidos(payload: ProduccionGenerarRequest, db: Session = Depen
     if not estado_ids:
         return {"created": 0, "message": "No hay estados APROBADO/PAGADO configurados"}
 
-    q = (
-        db.query(Pedido, Entrega)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
-        .filter(Pedido.empresaID == payload.empresaID, Pedido.estadoPedidoID.in_(estado_ids))
-    )
+    q = db.query(Pedido).filter(Pedido.empresaID == payload.empresaID, Pedido.estadoPedidoID.in_(estado_ids))
     if payload.sucursalID is not None:
         q = q.filter(Pedido.sucursalID == payload.sucursalID)
 
     created = 0
-    for pedido, entrega in q.all():
-        existe = (
-            db.query(Produccion.idProduccion)
-            .filter(
-                Produccion.pedidoID == pedido.idPedido,
-                Produccion.estado != produccion_service.estado_produccion_id(db, ESTADO_CANCELADO),
-            )
-            .first()
+    for pedido in q.all():
+        resumen = produccion_service.asegurar_produccion_desde_pedido_aprobado_por_detalle(
+            db=db,
+            pedido=pedido,
+            dias_anticipacion=dias_anticipacion,
+            usuario="produccion.generar_desde_pedidos",
         )
-        if existe:
-            continue
-
-        fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, dias_anticipacion)
-        tiempo_estimado = _calcular_tiempo_estimado_pedido(db, int(pedido.idPedido))
-
-        florista = None
-        if payload.autoAsignar and fecha_programada == date.today():
-            florista = _seleccionar_florista_auto(
-                db=db,
-                empresa_id=int(pedido.empresaID),
-                sucursal_id=int(pedido.sucursalID),
-                fecha_programada=fecha_programada,
-            )
-
-        siguiente_orden = int(
-            db.query(func.max(Produccion.ordenProduccion))
-            .filter(
-                Produccion.empresaID == pedido.empresaID,
-                Produccion.sucursalID == pedido.sucursalID,
-                Produccion.fechaProgramadaProduccion == fecha_programada,
-            )
-            .scalar()
-            or 0
-        ) + 1
-
-        now_utc = _utc_now_naive()
-        db.add(
-            Produccion(
-                empresaID=int(pedido.empresaID),
-                sucursalID=int(pedido.sucursalID),
-                pedidoID=int(pedido.idPedido),
-                floristaID=int(florista.idFlorista) if florista else None,
-                fechaProgramadaProduccion=fecha_programada,
-                fechaAsignacion=now_utc if florista else None,
-                estado=produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE),
-                prioridad="MEDIA",
-                tiempoEstimadoMin=tiempo_estimado,
-                ordenProduccion=siguiente_orden,
-                createdAt=now_utc,
-                updatedAt=now_utc,
-            )
-        )
-        created += 1
+        created += int(resumen.get("createdCount", 0))
 
     db.commit()
     return {"created": created}
@@ -1007,105 +968,138 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
         raise _err("PRODUCCION_PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
     assert_same_empresa(auth, int(pedido.empresaID))
 
-    produccion = (
+    producciones = (
         db.query(Produccion)
-        .filter(Produccion.pedidoID == pedido_id)
+        .filter(
+            Produccion.pedidoID == pedido_id,
+            Produccion.empresaID == int(pedido.empresaID),
+        )
         .order_by(Produccion.idProduccion.desc())
-        .first()
+        .all()
     )
-    if not produccion:
+    if not producciones:
         raise _err("PRODUCCION_NOT_FOUND", "No existe producción asociada al pedido", status_code=404)
 
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido_id).first()
-    tiempo_estimado = _calcular_tiempo_estimado_pedido(db, pedido_id)
-    fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, _dias_anticipacion_default())
-    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
+    detalle_rows = (
+        db.query(PedidoDetalle)
+        .filter(
+            PedidoDetalle.empresaID == int(pedido.empresaID),
+            PedidoDetalle.pedidoID == int(pedido.idPedido),
+        )
+        .order_by(PedidoDetalle.idPedidoDetalle.asc())
+        .all()
+    )
+    if not detalle_rows:
+        raise HTTPException(status_code=400, detail="El pedido no tiene detalles para recalcular producción")
 
-    if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
-        raise HTTPException(status_code=400, detail="No se puede recalcular producción: el domicilio ya está EnRuta")
+    detalle_by_id = {int(det.idPedidoDetalle): det for det in detalle_rows}
+    fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, _dias_anticipacion_default())
+    estados_actuales = {_estado_produccion_norm(prod.estado, db=db) for prod in producciones}
+
+    for produccion in producciones:
+        if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
+            raise HTTPException(status_code=400, detail="No se puede recalcular producción: el domicilio ya está EnRuta")
 
     now_utc = _utc_now_naive()
 
-    if estado_actual == ESTADO_PENDIENTE:
-        produccion.tiempoEstimadoMin = tiempo_estimado
-        produccion.fechaProgramadaProduccion = fecha_programada
+    if estados_actuales == {ESTADO_PENDIENTE}:
+        for produccion in producciones:
+            detalle = detalle_by_id.get(int(produccion.pedidoDetalleID or 0))
+            if detalle is None and len(detalle_rows) == 1:
+                detalle = detalle_rows[0]
+                produccion.pedidoDetalleID = int(detalle.idPedidoDetalle)
 
-        if produccion.floristaID:
-            florista = db.query(Florista).filter(Florista.idFlorista == produccion.floristaID).first()
-            if not florista:
-                produccion.floristaID = None
-            else:
-                try:
-                    _validate_florista_disponibilidad(
-                        db=db,
-                        florista=florista,
-                        fecha_programada=fecha_programada,
-                        empresa_id=int(produccion.empresaID),
-                        sucursal_id=int(produccion.sucursalID),
-                        ignore_produccion_id=int(produccion.idProduccion),
-                    )
-                except HTTPException:
-                    nuevo = _seleccionar_florista_auto(
-                        db,
-                        empresa_id=int(produccion.empresaID),
-                        sucursal_id=int(produccion.sucursalID),
-                        fecha_programada=fecha_programada,
-                        ignore_produccion_id=int(produccion.idProduccion),
-                    )
-                    anterior = int(produccion.floristaID)
-                    produccion.floristaID = int(nuevo.idFlorista) if nuevo else None
-                    if anterior != produccion.floristaID:
-                        _log_historial(
-                            db,
-                            produccion,
-                            florista_anterior_id=anterior,
-                            florista_nuevo_id=produccion.floristaID,
-                            motivo=(payload.motivo or "Reasignación por recálculo de pedido"),
-                            usuario=payload.usuarioCambio,
+            produccion.tiempoEstimadoMin = (
+                _calcular_tiempo_estimado_detalle(detalle) if detalle is not None else _calcular_tiempo_estimado_pedido(db, pedido_id)
+            )
+            produccion.fechaProgramadaProduccion = fecha_programada
+
+            if produccion.floristaID:
+                florista = db.query(Florista).filter(Florista.idFlorista == produccion.floristaID).first()
+                if not florista:
+                    produccion.floristaID = None
+                else:
+                    try:
+                        _validate_florista_disponibilidad(
+                            db=db,
+                            florista=florista,
+                            fecha_programada=fecha_programada,
+                            empresa_id=int(produccion.empresaID),
+                            sucursal_id=int(produccion.sucursalID),
+                            ignore_produccion_id=int(produccion.idProduccion),
                         )
+                    except HTTPException:
+                        nuevo = _seleccionar_florista_auto(
+                            db,
+                            empresa_id=int(produccion.empresaID),
+                            sucursal_id=int(produccion.sucursalID),
+                            fecha_programada=fecha_programada,
+                            ignore_produccion_id=int(produccion.idProduccion),
+                        )
+                        anterior = int(produccion.floristaID)
+                        produccion.floristaID = int(nuevo.idFlorista) if nuevo else None
+                        if anterior != produccion.floristaID:
+                            _log_historial(
+                                db,
+                                produccion,
+                                florista_anterior_id=anterior,
+                                florista_nuevo_id=produccion.floristaID,
+                                motivo=(payload.motivo or "Reasignación por recálculo de pedido"),
+                                usuario=payload.usuarioCambio,
+                            )
+
+            produccion.updatedAt = now_utc
 
         pedido.version = int(pedido.version or 1) + 1
-        produccion.updatedAt = now_utc
         db.commit()
-        return {"status": "ok", "modo": "recalculado_pendiente", "versionPedido": int(pedido.version)}
+        return {
+            "status": "ok",
+            "modo": "recalculado_pendiente",
+            "versionPedido": int(pedido.version),
+            "produccionesActualizadas": len(producciones),
+        }
 
-    if estado_actual == ESTADO_EN_PRODUCCION:
+    if ESTADO_EN_PRODUCCION in estados_actuales:
         if not payload.productoEstructuralCambiado and not payload.forceCancelarYCrearNueva:
             raise HTTPException(status_code=400, detail="En EnProduccion no se permite cambio estructural sin cancelar y recrear")
 
-        produccion.estado = produccion_service.estado_produccion_id(db, ESTADO_CANCELADO)
-        produccion.observacionesInternas = (produccion.observacionesInternas or "") + f"\nCancelado por cambio estructural del pedido v{int(pedido.version or 1)+1}."
-        produccion.updatedAt = now_utc
-
         pedido.version = int(pedido.version or 1) + 1
+        prioridad_referencia = str(producciones[0].prioridad or "MEDIA")
 
-        nueva = Produccion(
-            empresaID=int(pedido.empresaID),
-            sucursalID=int(pedido.sucursalID),
-            pedidoID=int(pedido.idPedido),
-            floristaID=None,
-            fechaProgramadaProduccion=fecha_programada,
-            fechaAsignacion=None,
-            fechaInicio=None,
-            fechaFinalizacion=None,
-            tiempoEstimadoMin=tiempo_estimado,
-            tiempoRealMin=None,
-            estado=produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE),
-            prioridad=produccion.prioridad or "MEDIA",
-            observacionesInternas=f"Nueva producción por cambio estructural pedido v{pedido.version}",
-            ordenProduccion=produccion.ordenProduccion,
-            createdAt=now_utc,
-            updatedAt=now_utc,
+        for produccion in producciones:
+            produccion.estado = produccion_service.estado_produccion_id(db, ESTADO_CANCELADO)
+            produccion.observacionesInternas = (
+                (produccion.observacionesInternas or "")
+                + f"\nCancelado por cambio estructural del pedido v{int(pedido.version)}."
+            )
+            produccion.updatedAt = now_utc
+
+        db.flush()
+
+        resumen = produccion_service.asegurar_produccion_desde_pedido_aprobado_por_detalle(
+            db=db,
+            pedido=pedido,
+            dias_anticipacion=_dias_anticipacion_default(),
+            usuario=payload.usuarioCambio,
         )
-        db.add(nueva)
 
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            raise HTTPException(status_code=400, detail="No fue posible crear nueva producción (revisa índice único por pedido en BD)")
+        for item in resumen.get("producciones", []):
+            if not item.get("created"):
+                continue
+            nueva = db.query(Produccion).filter(Produccion.idProduccion == int(item["produccionID"])).first()
+            if nueva:
+                nueva.prioridad = prioridad_referencia
+                nueva.observacionesInternas = f"Nueva producción por cambio estructural pedido v{pedido.version}"
+                nueva.updatedAt = now_utc
 
-        return {"status": "ok", "modo": "cancelada_y_recreada", "versionPedido": int(pedido.version), "nuevaProduccionID": int(nueva.idProduccion)}
+        db.commit()
+        return {
+            "status": "ok",
+            "modo": "cancelada_y_recreada",
+            "versionPedido": int(pedido.version),
+            "createdCount": int(resumen.get("createdCount", 0)),
+        }
 
     raise HTTPException(status_code=400, detail="Solo se puede recalcular en Pendiente o EnProduccion")
 

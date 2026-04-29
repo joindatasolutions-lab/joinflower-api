@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import String, cast, or_
+from sqlalchemy import String, cast, or_, func
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -42,6 +42,18 @@ def _normalizar_activo_legacy(value: bool) -> int:
 
 def _numero_pedido_temporal() -> int:
     return -int(datetime.now(timezone.utc).timestamp() * 1000000)
+
+
+def _buscar_estado_inicial_pedido(db: Session) -> EstadoPedido | None:
+    return (
+        db.query(EstadoPedido)
+        .filter(
+            func.upper(EstadoPedido.nombreEstado).in_(["CREADO", "PENDIENTE"]),
+            _activo_truthy(EstadoPedido.activo),
+        )
+        .order_by(EstadoPedido.idEstadoPedido.asc())
+        .first()
+    )
 
 
 def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
@@ -163,19 +175,12 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             raise HTTPException(status_code=400, detail="cantidad debe ser mayor que 0")
 
     try:
-        estado_creado = (
-            db.query(EstadoPedido)
-            .filter(
-                EstadoPedido.nombreEstado == "CREADO",
-                _activo_truthy(EstadoPedido.activo),
-            )
-            .first()
-        )
+        estado_creado = _buscar_estado_inicial_pedido(db)
 
         if not estado_creado:
             raise HTTPException(
                 status_code=400,
-                detail="No existe un estado inicial activo 'CREADO' en EstadoPedido",
+                detail="No existe un estado inicial activo 'CREADO' o 'PENDIENTE' en EstadoPedido",
             )
 
         producto_ids = list({item.productoID for item in payload.productos})

@@ -35,7 +35,7 @@ from app.schemas.pedido import (
 )
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
-from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado
+from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
 from app.core.security import assert_same_empresa, get_current_auth_context, is_super_admin_context, require_module_access
@@ -193,6 +193,15 @@ def _ids_estado_pendiente(db: Session) -> set[int]:
         .all()
     )
     return {int(estado.idEstadoPedido) for estado in estados}
+
+
+def _buscar_estado_inicial_pedido(db: Session) -> EstadoPedido | None:
+    return (
+        db.query(EstadoPedido)
+        .filter(func.upper(EstadoPedido.nombreEstado).in_(["CREADO", "PENDIENTE"]), _activo_truthy(EstadoPedido.activo))
+        .order_by(EstadoPedido.idEstadoPedido.asc())
+        .first()
+    )
 
 
 def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
@@ -847,8 +856,8 @@ def listar_pedidos(
                 CASE
                     WHEN petalops.pedido.numero_pedido > 0
                      AND UPPER(COALESCE(petalops.estado_pedido.nombre_estado, '')) NOT IN ('CREADO', 'PENDIENTE')
-                    THEN 0
-                    ELSE 1
+                    THEN 1
+                    ELSE 0
                 END AS "numeroOrdenFlag"
                 """
             ),
@@ -860,6 +869,16 @@ def listar_pedidos(
                     THEN petalops.pedido.numero_pedido
                     ELSE NULL
                 END AS "numeroPedidoOrden"
+                """
+            ),
+            text(
+                """
+                CASE
+                    WHEN petalops.pedido.numero_pedido > 0
+                     AND UPPER(COALESCE(petalops.estado_pedido.nombre_estado, '')) NOT IN ('CREADO', 'PENDIENTE')
+                    THEN petalops.pedido.numero_pedido
+                    ELSE petalops.pedido.id_pedido
+                END AS "ordenListado"
                 """
             ),
         )
@@ -906,7 +925,7 @@ def listar_pedidos(
         base.distinct()
         .order_by(
             text("\"numeroOrdenFlag\""),
-            text("\"numeroPedidoOrden\" DESC"),
+            text("\"ordenListado\" DESC"),
             Pedido.idPedido.desc(),
         )
         .offset((page - 1) * page_size)
@@ -996,8 +1015,12 @@ def listar_pedidos(
 
     items.sort(
         key=lambda item: (
-            0 if item.numeroPedido is not None and int(item.numeroPedido) > 0 else 1,
-            -(int(item.numeroPedido) if item.numeroPedido is not None else 0),
+            0 if item.numeroPedido is None or int(item.numeroPedido or 0) <= 0 else 1,
+            -(
+                int(item.pedidoID or 0)
+                if item.numeroPedido is None or int(item.numeroPedido or 0) <= 0
+                else int(item.numeroPedido)
+            ),
             -(int(item.pedidoID) if item.pedidoID is not None else 0),
         )
     )
@@ -1483,7 +1506,7 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     pedido.motivoRechazo = None
     pedido.updatedAt = datetime.now(timezone.utc)
 
-    produccion = asegurar_produccion_desde_pedido_aprobado(
+    produccion = asegurar_produccion_desde_pedido_aprobado_por_detalle(
         db=db,
         pedido=pedido,
         dias_anticipacion=_dias_anticipacion_produccion(),
@@ -1551,6 +1574,9 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
     assert_same_empresa(auth, int(data.empresaId))
 
     try:
+        estado_inicial = _buscar_estado_inicial_pedido(db)
+        if not estado_inicial:
+            raise HTTPException(status_code=400, detail="No existe un estado inicial activo 'CREADO' o 'PENDIENTE'")
 
         # 1️⃣ Validar productos
         productos_db = (
@@ -1609,7 +1635,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             codigoPedido=None,
             clienteID=cliente.idCliente,
             fechaPedido=fecha_pedido,
-            estadoPedidoID=1,  # Pedido Registrado
+            estadoPedidoID=int(estado_inicial.idEstadoPedido),
             totalBruto=subtotal.quantize(Decimal("0.01")),
             totalIva=total_iva.quantize(Decimal("0.01")),
             totalNeto=total.quantize(Decimal("0.01")),
@@ -1652,7 +1678,8 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             "idPedido": pedido.idPedido,
             "numeroPedido": (int(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else None),
             "codigoPedido": (str(pedido.codigoPedido) if pedido.codigoPedido else None),
-            "total": float(total.quantize(Decimal("0.01")))
+            "total": float(total.quantize(Decimal("0.01"))),
+            "estado": str(estado_inicial.nombreEstado or "CREADO"),
         }
 
     except SQLAlchemyError as e:
@@ -1736,7 +1763,7 @@ def cambiar_estado(
         )
         if not approval_gate["puedeAprobar"]:
             raise HTTPException(status_code=400, detail=approval_gate["motivo"])
-        produccion = asegurar_produccion_desde_pedido_aprobado(
+        produccion = asegurar_produccion_desde_pedido_aprobado_por_detalle(
             db=db,
             pedido=pedido,
             dias_anticipacion=_dias_anticipacion_produccion(),

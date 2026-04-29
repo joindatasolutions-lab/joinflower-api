@@ -10,6 +10,13 @@ class Produccion(Base):
     empresaID = Column("empresa_id", BigInteger, nullable=False, index=True)
     sucursalID = Column("sucursal_id", BigInteger, nullable=False, index=True)
     pedidoID = Column("pedido_id", BigInteger, ForeignKey("petalops.pedido.id_pedido"), nullable=False, index=True)
+    pedidoDetalleID = Column(
+        "pedido_detalle_id",
+        BigInteger,
+        ForeignKey("petalops.pedido_detalle.id_pedido_detalle"),
+        nullable=True,
+        index=True,
+    )
     floristaID = Column("empleado_id", BigInteger, nullable=True, index=True)
     fechaProgramadaProduccion = Column("fecha_programada_produccion", Date, nullable=False, index=True)
     fechaAsignacion = Column("fecha_asignacion", DateTime)

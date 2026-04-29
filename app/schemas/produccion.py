@@ -49,6 +49,7 @@ class ProduccionRecalcularPedidoRequest(BaseModel):
 class ProduccionItem(BaseModel):
     idProduccion: int
     pedidoID: int
+    pedidoDetalleID: Optional[int] = None
     numeroPedido: int
     codigoPedido: Optional[str] = None
     floristaID: Optional[int] = None

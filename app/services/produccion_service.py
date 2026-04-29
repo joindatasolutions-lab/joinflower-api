@@ -9,7 +9,6 @@ from app.models.florista import Florista
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.perfilflorista import PerfilFlorista
 from app.models.pedido import Pedido
-from app.models.producto import Producto
 from app.models.produccion import Produccion
 from app.models.produccionhistorial import ProduccionHistorial
 
@@ -279,12 +278,7 @@ def seleccionar_florista_auto(
 
 
 def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
-    rows = (
-        db.query(PedidoDetalle.cantidad)
-        .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(PedidoDetalle.pedidoID == pedido_id)
-        .all()
-    )
+    rows = db.query(PedidoDetalle.cantidad).filter(PedidoDetalle.pedidoID == pedido_id).all()
 
     if not rows:
         return 30
@@ -296,6 +290,12 @@ def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
         total += int(round(base * qty))
 
     return max(total, 1)
+
+
+def calcular_tiempo_estimado_detalle(detalle: PedidoDetalle) -> int:
+    qty = max(float(detalle.cantidad or 0), 0)
+    base = 30
+    return max(int(round(base * qty)), 1)
 
 
 def log_historial(
@@ -611,5 +611,154 @@ def sincronizar_incapacidades_y_reasignar(
         "reactivados": reactivados,
         "reasignadas": reasignadas,
         "sinReemplazo": sin_reemplazo,
+    }
+
+
+def asegurar_produccion_desde_pedido_aprobado_por_detalle(
+    db: Session,
+    pedido: Pedido,
+    dias_anticipacion: int,
+    usuario: str = "system",
+) -> dict[str, Any]:
+    estados = _resolve_estado_produccion_ids(db)
+    entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
+    fecha_programada = calcular_fecha_programada(
+        fecha_entrega=(entrega.fechaEntrega if entrega else None),
+        dias_anticipacion=dias_anticipacion,
+    )
+    detalles = (
+        db.query(PedidoDetalle)
+        .filter(
+            PedidoDetalle.empresaID == int(pedido.empresaID),
+            PedidoDetalle.pedidoID == int(pedido.idPedido),
+        )
+        .order_by(PedidoDetalle.idPedidoDetalle.asc())
+        .all()
+    )
+
+    if not detalles:
+        return {
+            "created": False,
+            "createdCount": 0,
+            "skippedCount": 0,
+            "fechaProgramadaProduccion": fecha_programada,
+            "autoAsignados": 0,
+            "producciones": [],
+            "mensaje": "El pedido no tiene detalles para generar produccion",
+        }
+
+    existing_by_detail_id = {
+        int(prod.pedidoDetalleID): prod
+        for prod in db.query(Produccion)
+        .filter(
+            Produccion.empresaID == int(pedido.empresaID),
+            Produccion.pedidoID == int(pedido.idPedido),
+            Produccion.pedidoDetalleID.is_not(None),
+            Produccion.estado != estados["cancelado"],
+        )
+        .all()
+        if prod.pedidoDetalleID is not None
+    }
+
+    siguiente_orden = int(
+        db.query(func.max(Produccion.ordenProduccion))
+        .filter(
+            Produccion.empresaID == pedido.empresaID,
+            Produccion.sucursalID == pedido.sucursalID,
+            Produccion.fechaProgramadaProduccion == fecha_programada,
+        )
+        .scalar()
+        or 0
+    )
+
+    auto_asignar_hoy = fecha_programada == date.today()
+    now_utc = datetime.now(timezone.utc)
+    created_items: list[dict[str, Any]] = []
+    skipped_count = 0
+    auto_asignados = 0
+
+    for detalle in detalles:
+        detalle_id = int(detalle.idPedidoDetalle)
+        existente = existing_by_detail_id.get(detalle_id)
+        if existente:
+            skipped_count += 1
+            created_items.append(
+                {
+                    "produccionID": int(existente.idProduccion),
+                    "pedidoDetalleID": detalle_id,
+                    "autoAsignado": bool(existente.floristaID),
+                    "floristaID": (int(existente.floristaID) if existente.floristaID else None),
+                    "created": False,
+                }
+            )
+            continue
+
+        siguiente_orden += 1
+        florista = None
+        if auto_asignar_hoy:
+            florista = seleccionar_florista_auto(
+                db=db,
+                empresa_id=int(pedido.empresaID),
+                sucursal_id=int(pedido.sucursalID),
+                fecha_programada=fecha_programada,
+            )
+
+        produccion = Produccion(
+            empresaID=int(pedido.empresaID),
+            sucursalID=int(pedido.sucursalID),
+            pedidoID=int(pedido.idPedido),
+            pedidoDetalleID=detalle_id,
+            floristaID=(int(florista.idFlorista) if florista else None),
+            fechaProgramadaProduccion=fecha_programada,
+            fechaAsignacion=(now_utc if florista else None),
+            estado=estados["pendiente"],
+            prioridad="MEDIA",
+            tiempoEstimadoMin=calcular_tiempo_estimado_detalle(detalle),
+            ordenProduccion=siguiente_orden,
+            createdAt=now_utc,
+            updatedAt=now_utc,
+        )
+        db.add(produccion)
+        db.flush()
+
+        if florista:
+            auto_asignados += 1
+            log_historial(
+                db=db,
+                produccion=produccion,
+                florista_anterior_id=None,
+                florista_nuevo_id=int(florista.idFlorista),
+                motivo="Asignacion automatica por aprobacion del pedido (produccion de hoy)",
+                usuario=usuario,
+            )
+
+        created_items.append(
+            {
+                "produccionID": int(produccion.idProduccion),
+                "pedidoDetalleID": detalle_id,
+                "autoAsignado": bool(florista),
+                "floristaID": (int(florista.idFlorista) if florista else None),
+                "created": True,
+            }
+        )
+
+    created_count = sum(1 for item in created_items if item["created"])
+    if created_count == 0:
+        mensaje = "Produccion ya existente para todos los detalles del pedido"
+    elif auto_asignados == created_count:
+        mensaje = "Producciones creadas y asignadas"
+    elif auto_asignados > 0:
+        mensaje = "Producciones creadas; algunas quedaron asignadas automaticamente"
+    else:
+        mensaje = "Producciones creadas pendientes de asignacion"
+
+    return {
+        "created": created_count > 0,
+        "createdCount": created_count,
+        "skippedCount": skipped_count,
+        "fechaProgramadaProduccion": fecha_programada,
+        "autoAsignados": auto_asignados,
+        "producciones": created_items,
+        "mensaje": mensaje,
     }
 
