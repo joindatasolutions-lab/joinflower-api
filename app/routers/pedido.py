@@ -15,6 +15,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from app.database import get_db
 from app.models.producto import Producto
+from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
@@ -362,7 +363,11 @@ def _recalculate_pedido_financials(db: Session, *, pedido: Pedido, aplica_iva: b
 
     pedido.totalBruto = total_bruto.quantize(Decimal("0.01"))
     pedido.totalIva = total_iva.quantize(Decimal("0.01"))
-    pedido.totalNeto = (pedido.totalBruto + pedido.totalIva).quantize(Decimal("0.01"))
+    pedido.totalNeto = (
+        pedido.totalBruto
+        + pedido.totalIva
+        + Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+    ).quantize(Decimal("0.01"))
 
 
 def _parse_payment_methods(value: str | None) -> list[str]:
@@ -471,6 +476,59 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     if descripcion and text.casefold() == descripcion.casefold():
         return None
     return text
+
+
+def _resolve_costo_domicilio(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    tipo_entrega: str | None,
+    barrio_id: int | None = None,
+    barrio_nombre: str | None = None,
+) -> Decimal:
+    tipo = str(tipo_entrega or "").strip().lower()
+    if tipo and tipo != "domicilio":
+        return Decimal("0.00")
+
+    if barrio_id is not None:
+        barrio = (
+            db.query(Barrio)
+            .filter(
+                Barrio.idBarrio == int(barrio_id),
+                Barrio.empresaID == int(empresa_id),
+                Barrio.sucursalID == int(sucursal_id),
+            )
+            .first()
+        )
+        if barrio and barrio.costoDomicilio is not None:
+            return Decimal(str(barrio.costoDomicilio)).quantize(Decimal("0.01"))
+
+    nombre = str(barrio_nombre or "").strip()
+    if nombre:
+        barrio = (
+            db.query(Barrio)
+            .filter(
+                Barrio.empresaID == int(empresa_id),
+                Barrio.sucursalID == int(sucursal_id),
+                func.lower(Barrio.nombreBarrio) == nombre.lower(),
+            )
+            .first()
+        )
+        if barrio and barrio.costoDomicilio is not None:
+            return Decimal(str(barrio.costoDomicilio)).quantize(Decimal("0.01"))
+
+    return Decimal("0.00")
+
+
+def _pedido_domicilio_valor(pedido: Pedido) -> Decimal:
+    costo = Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+    if costo > 0:
+        return costo.quantize(Decimal("0.01"))
+    total = Decimal(str(pedido.totalNeto or 0))
+    arreglos = Decimal(str(pedido.totalBruto or 0)) + Decimal(str(pedido.totalIva or 0))
+    diferencia = (total - arreglos).quantize(Decimal("0.01"))
+    return diferencia if diferencia > 0 else Decimal("0.00")
 
 
 def _tenant_order_rules(db: Session, empresa_id: int) -> dict:
@@ -1145,7 +1203,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
             financiero={
                 "subtotal": float(pedido.totalBruto or 0),
                 "iva": float(pedido.totalIva or 0),
-                "domicilio": 0.0,
+                "domicilio": float(_pedido_domicilio_valor(pedido)),
                 "total": float(pedido.totalNeto or 0),
                 "estadoPago": None,
                 "metodoPago": pago_resumen["metodoPago"],
@@ -1327,6 +1385,14 @@ def actualizar_detalle_pedido(
                     entrega.direccion = str(payload.direccion).strip() or None
                 if payload.barrioNombre is not None:
                     entrega.barrioNombre = str(payload.barrioNombre).strip() or None
+                    pedido.costoDomicilio = _resolve_costo_domicilio(
+                        db,
+                        empresa_id=int(pedido.empresaID),
+                        sucursal_id=int(pedido.sucursalID),
+                        tipo_entrega=getattr(entrega, "tipoEntrega", None),
+                        barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
+                        barrio_nombre=entrega.barrioNombre,
+                    )
                 if payload.latitudDestino is not None:
                     entrega.latitudDestino = payload.latitudDestino
                 if payload.longitudDestino is not None:
@@ -1337,6 +1403,12 @@ def actualizar_detalle_pedido(
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
                 if payload.observacionGeneral is not None:
                     entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
+                if payload.barrioNombre is not None:
+                    pedido.totalNeto = (
+                        Decimal(str(pedido.totalBruto or 0))
+                        + Decimal(str(pedido.totalIva or 0))
+                        + Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+                    ).quantize(Decimal("0.01"))
 
                 if payload.fechaEntrega is not None:
                     fecha_base = entrega.fechaEntregaProgramada or entrega.fechaEntrega
@@ -1671,7 +1743,25 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             estadoPedidoID=int(estado_inicial.idEstadoPedido),
             totalBruto=subtotal.quantize(Decimal("0.01")),
             totalIva=total_iva.quantize(Decimal("0.01")),
-            totalNeto=total.quantize(Decimal("0.01")),
+            costoDomicilio=_resolve_costo_domicilio(
+                db,
+                empresa_id=int(data.empresaId),
+                sucursal_id=int(data.sucursalId),
+                tipo_entrega=data.entrega.tipoEntrega,
+                barrio_id=data.entrega.barrioId,
+                barrio_nombre=None,
+            ),
+            totalNeto=(
+                total
+                + _resolve_costo_domicilio(
+                    db,
+                    empresa_id=int(data.empresaId),
+                    sucursal_id=int(data.sucursalId),
+                    tipo_entrega=data.entrega.tipoEntrega,
+                    barrio_id=data.entrega.barrioId,
+                    barrio_nombre=None,
+                )
+            ).quantize(Decimal("0.01")),
             createdAt=datetime.now(timezone.utc),
         )
 

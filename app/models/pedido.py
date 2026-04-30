@@ -22,6 +22,7 @@ class Pedido(Base):
 
     totalBruto = Column("total_bruto", Numeric(12,2))
     totalIva = Column("total_iva", Numeric(12,2))
+    costoDomicilio = Column("costo_domicilio", Numeric(12,2))
     totalNeto = Column("total_neto", Numeric(12,2))
 
     createdAt = Column("created_at", DateTime)

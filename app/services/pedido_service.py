@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.empleado import Empleado
 from app.models.empresa import Empresa
@@ -175,6 +176,49 @@ def _sanitize_producto_observacion(observacion: str | None, producto: Producto |
     return text
 
 
+def _resolve_costo_domicilio(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    tipo_entrega: str | None,
+    barrio_id: int | None = None,
+    barrio_nombre: str | None = None,
+) -> Decimal:
+    tipo = str(tipo_entrega or "").strip().lower()
+    if tipo and tipo != "domicilio":
+        return Decimal("0.00")
+
+    if barrio_id is not None:
+        barrio = (
+            db.query(Barrio)
+            .filter(
+                Barrio.idBarrio == int(barrio_id),
+                Barrio.empresaID == int(empresa_id),
+                Barrio.sucursalID == int(sucursal_id),
+            )
+            .first()
+        )
+        if barrio and barrio.costoDomicilio is not None:
+            return Decimal(str(barrio.costoDomicilio)).quantize(Decimal("0.01"))
+
+    nombre = str(barrio_nombre or "").strip()
+    if nombre:
+        barrio = (
+            db.query(Barrio)
+            .filter(
+                Barrio.empresaID == int(empresa_id),
+                Barrio.sucursalID == int(sucursal_id),
+                func.lower(Barrio.nombreBarrio) == nombre.lower(),
+            )
+            .first()
+        )
+        if barrio and barrio.costoDomicilio is not None:
+            return Decimal(str(barrio.costoDomicilio)).quantize(Decimal("0.01"))
+
+    return Decimal("0.00")
+
+
 def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
     """Registra un pedido completo en transacción y retorna pedidoID, total y estado."""
     if not payload.productos:
@@ -269,6 +313,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             estadoPedidoID=estado_creado.idEstadoPedido,
             totalBruto=Decimal("0.00"),
             totalIva=Decimal("0.00"),
+            costoDomicilio=Decimal("0.00"),
             totalNeto=Decimal("0.00"),
             createdAt=datetime.now(timezone.utc),
         )
@@ -304,9 +349,18 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             db.add(detalle)
             total_bruto += subtotal
 
+        costo_domicilio = _resolve_costo_domicilio(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            tipo_entrega=payload.entrega.tipoEntrega,
+            barrio_id=payload.entrega.barrioID,
+            barrio_nombre=payload.entrega.barrioNombre,
+        )
         pedido.totalBruto = total_bruto
         pedido.totalIva = total_iva
-        pedido.totalNeto = total_bruto + total_iva
+        pedido.costoDomicilio = costo_domicilio
+        pedido.totalNeto = total_bruto + total_iva + costo_domicilio
 
         entrega = Entrega(
             empresaID=payload.empresaID,
