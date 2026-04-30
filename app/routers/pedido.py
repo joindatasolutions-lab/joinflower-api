@@ -1121,6 +1121,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "telefono": entrega.telefonoDestino if entrega else None,
                 "direccion": entrega.direccion if entrega else None,
                 "barrio": entrega.barrioNombre if entrega else None,
+                "latitudDestino": (float(entrega.latitudDestino) if entrega and entrega.latitudDestino is not None else None),
+                "longitudDestino": (float(entrega.longitudDestino) if entrega and entrega.longitudDestino is not None else None),
                 "fechaEntrega": fecha_entrega_programada.isoformat() if fecha_entrega_programada else None,
                 "horaEntrega": entrega.rangoHora if entrega else None,
                 "firma": entrega.firma if entrega else None,
@@ -1176,6 +1178,8 @@ class ActualizarDetallePedidoRequest(BaseModel):
     telefonoDestino: str | None = None
     direccion: str | None = None
     barrioNombre: str | None = None
+    latitudDestino: float | None = None
+    longitudDestino: float | None = None
     firma: str | None = None
     mensajeTarjeta: str | None = None
     observacionGeneral: str | None = None
@@ -1271,6 +1275,8 @@ def actualizar_detalle_pedido(
                 payload.telefonoDestino,
                 payload.direccion,
                 payload.barrioNombre,
+                payload.latitudDestino,
+                payload.longitudDestino,
                 payload.firma,
                 payload.mensajeTarjeta,
                 payload.observacionGeneral,
@@ -1298,6 +1304,10 @@ def actualizar_detalle_pedido(
                     entrega.direccion = str(payload.direccion).strip() or None
                 if payload.barrioNombre is not None:
                     entrega.barrioNombre = str(payload.barrioNombre).strip() or None
+                if payload.latitudDestino is not None:
+                    entrega.latitudDestino = payload.latitudDestino
+                if payload.longitudDestino is not None:
+                    entrega.longitudDestino = payload.longitudDestino
                 if payload.firma is not None:
                     entrega.firma = str(payload.firma).strip() or None
                 if payload.mensajeTarjeta is not None:

@@ -315,6 +315,8 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             observacionGeneral=payload.entrega.observacionGeneral,
             fechaEntregaProgramada=payload.entrega.fechaEntrega,
             fechaEntrega=payload.entrega.fechaEntrega,
+            latitudDestino=payload.entrega.latitudDestino,
+            longitudDestino=payload.entrega.longitudDestino,
             intentoNumero=1,
             createdAt=datetime.now(timezone.utc),
         )

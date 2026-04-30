@@ -632,6 +632,8 @@ Intento de entrega de un pedido. Un pedido puede tener múltiples intentos (una 
 | firmadocumento | varchar(50) | SÍ | Documento de quien firmó |
 | firmaimagenurl | text | SÍ | URL de la imagen de la firma |
 | evidenciafotourl | text | SÍ | URL de foto como evidencia de entrega |
+| latituddestino | numeric(10,7) | SÍ | Coordenada snapshot del destino usada para cálculo de distancia |
+| longituddestino | numeric(10,7) | SÍ | Coordenada snapshot del destino usada para cálculo de distancia |
 | latitudentrega | numeric(10,7) | SÍ | GPS donde se realizó la entrega |
 | longitudentrega | numeric(10,7) | SÍ | |
 | motivonoentregado | text | SÍ | Razón si no se pudo entregar |
@@ -642,7 +644,7 @@ Intento de entrega de un pedido. Un pedido puede tener múltiples intentos (una 
 | updatedat | timestamp | SÍ | |
 
 **Regla:** Para el estado actual de entrega tomar la fila con mayor `intentonumero`.
-`barrionombre` es snapshot intencional — no actualizar.
+`barrionombre`, `latituddestino` y `longituddestino` son snapshots intencionales — no actualizar.
 
 ---
 

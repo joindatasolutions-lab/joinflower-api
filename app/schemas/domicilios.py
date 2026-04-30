@@ -42,6 +42,8 @@ class DomicilioAdminItem(BaseModel):
     intentoNumero: int
     tiempoRestanteHoras: int | None = None
     prioridad: str | None = None
+    latitudDestino: float | None = None
+    longitudDestino: float | None = None
     latitudEntrega: float | None = None
     longitudEntrega: float | None = None
 
@@ -56,6 +58,7 @@ class DomicilioCourierCard(BaseModel):
     pedidoID: int
     numeroPedido: int
     codigoPedido: str | None = None
+    cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
     barrio: str | None = None
@@ -65,6 +68,12 @@ class DomicilioCourierCard(BaseModel):
     estado: str
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None
+    prioridad: str | None = None
+    latitudDestino: float | None = None
+    longitudDestino: float | None = None
+    latitudEntrega: float | None = None
+    longitudEntrega: float | None = None
+    distanciaKm: float | None = None
 
 
 class DomicilioCourierListResponse(BaseModel):
@@ -78,6 +87,10 @@ class AsignarDomiciliarioRequest(BaseModel):
 
 
 class MarcarEnRutaRequest(BaseModel):
+    usuarioCambio: str = Field(min_length=2)
+
+
+class TomarEntregaRequest(BaseModel):
     usuarioCambio: str = Field(min_length=2)
 
 

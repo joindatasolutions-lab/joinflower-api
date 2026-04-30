@@ -5,7 +5,9 @@ from .cliente import Cliente
 from .barrio import Barrio
 from .categoria import Categoria
 from .entrega import Entrega
+from .estadoentrega import EstadoEntrega
 from .estadopedido import EstadoPedido
+from .transicionestadoentrega import TransicionEstadoEntrega
 from .transicionestadopedido import TransicionEstadoPedido
 from .florista import Florista
 from .produccion import Produccion

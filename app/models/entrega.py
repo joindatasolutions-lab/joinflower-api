@@ -28,6 +28,8 @@ class Entrega(Base):
     fechaSalida = Column("fechasalida", DateTime)
     fechaEntregaProgramada = Column("fechaentregaprogramada", DateTime)
     fechaEntrega = Column("fechaentrega", DateTime)
+    latitudDestino = Column("latituddestino", Numeric(10, 7), nullable=True)
+    longitudDestino = Column("longituddestino", Numeric(10, 7), nullable=True)
     latitudEntrega = Column("latitudentrega", Numeric(10, 7), nullable=True)
     longitudEntrega = Column("longitudentrega", Numeric(10, 7), nullable=True)
     firmaNombre = Column("firmanombre", String(180), nullable=True)

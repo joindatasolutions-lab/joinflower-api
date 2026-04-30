@@ -1,0 +1,3 @@
+ALTER TABLE petalops.entrega
+  ADD COLUMN IF NOT EXISTS latituddestino NUMERIC(10,7) NULL,
+  ADD COLUMN IF NOT EXISTS longituddestino NUMERIC(10,7) NULL;

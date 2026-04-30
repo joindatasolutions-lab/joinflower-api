@@ -18,6 +18,8 @@ class EntregaInput(BaseModel):
     tipoEntrega: str
     direccion: str
     barrioId: Optional[int] = None
+    latitudDestino: Optional[float] = None
+    longitudDestino: Optional[float] = None
     destinatarioNombre: str
     mensaje: Optional[str] = None
 
@@ -51,6 +53,8 @@ class CheckoutEntregaInput(BaseModel):
     direccion: str
     barrioID: Optional[int] = None
     barrioNombre: Optional[str] = None
+    latitudDestino: Optional[float] = None
+    longitudDestino: Optional[float] = None
     fechaEntrega: datetime
     rangoHora: Optional[str] = None
     mensaje: Optional[str] = None
