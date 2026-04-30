@@ -463,6 +463,16 @@ def _pedido_detalle_has_observaciones_personalizados(db: Session) -> bool:
     return bool(row)
 
 
+def _sanitize_producto_observacion(value: str | None, producto: Producto | None = None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    descripcion = str(getattr(producto, "descripcion", "") or "").strip()
+    if descripcion and text.casefold() == descripcion.casefold():
+        return None
+    return text
+
+
 def _tenant_order_rules(db: Session, empresa_id: int) -> dict:
     config = _load_empresa_menu_config(db, empresa_id=int(empresa_id))
     payment_field = config.get("pedido_metodos_pago")
@@ -1078,10 +1088,13 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 codigoProducto=(str(producto.codigoProducto).strip() if producto.codigoProducto else None),
                 nombreProducto=str(producto.nombreProducto or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
-                observaciones=(
-                    str(getattr(detalle, "observacionesPersonalizados", "")).strip()
-                    if has_observaciones_personalizados and getattr(detalle, "observacionesPersonalizados", None)
-                    else (str(producto.descripcion).strip() if producto and producto.descripcion else None)
+                observaciones=_sanitize_producto_observacion(
+                    (
+                        str(getattr(detalle, "observacionesPersonalizados", "")).strip()
+                        if has_observaciones_personalizados and getattr(detalle, "observacionesPersonalizados", None)
+                        else None
+                    ),
+                    producto=producto,
                 ),
                 precioUnitario=float(detalle.precioUnitario or 0),
                 subtotal=float(detalle.subtotal or 0),
@@ -1251,14 +1264,24 @@ def actualizar_detalle_pedido(
             detalle.productoID = payload.productoID
             detalle.precioUnitario = precio_unitario
             if has_observaciones_personalizados:
-                detalle.observacionesPersonalizados = (
-                    str(payload.productoObservaciones).strip()
-                    if payload.productoObservaciones is not None
-                    else (str(producto.descripcion).strip() if producto and producto.descripcion else None)
-                ) or None
+                detalle.observacionesPersonalizados = _sanitize_producto_observacion(
+                    payload.productoObservaciones,
+                    producto=producto,
+                )
             needs_totals_recalc = True
         elif payload.productoObservaciones is not None and detalle and has_observaciones_personalizados:
-            detalle.observacionesPersonalizados = str(payload.productoObservaciones).strip() or None
+            producto_actual = (
+                db.query(Producto)
+                .filter(
+                    Producto.idProducto == int(detalle.productoID),
+                    Producto.empresaID == int(pedido.empresaID),
+                )
+                .first()
+            )
+            detalle.observacionesPersonalizados = _sanitize_producto_observacion(
+                payload.productoObservaciones,
+                producto=producto_actual,
+            )
 
         if payload.clienteTipoIdent is not None:
             cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
@@ -1676,7 +1699,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                 precioUnitario=precio_unitario,
                 ivaUnitario=Decimal("0.00"),
                 totalLinea=(precio_unitario * cantidad).quantize(Decimal("0.01")),
-                observacionesPersonalizados=(str(producto.descripcion).strip() if producto.descripcion else None),
+                observacionesPersonalizados=None,
             )
 
             db.add(detalle)

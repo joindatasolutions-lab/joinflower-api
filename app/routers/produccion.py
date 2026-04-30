@@ -215,6 +215,7 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
             Producto.idProducto,
             Producto.codigoProducto,
             Producto.nombreProducto,
+            Producto.descripcion,
             PedidoDetalle.observacionesPersonalizados,
         )
         .join(
@@ -235,15 +236,19 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
     )
 
     out: dict[int, dict[str, str | int | None]] = {}
-    for produccion_id, pedido_detalle_id, producto_id, codigo_producto, nombre_producto, observaciones_personalizados in rows:
+    for produccion_id, pedido_detalle_id, producto_id, codigo_producto, nombre_producto, descripcion_producto, observaciones_personalizados in rows:
         key = int(produccion_id)
+        observacion_limpia = str(observaciones_personalizados).strip() if observaciones_personalizados else None
+        descripcion_limpia = str(descripcion_producto).strip() if descripcion_producto else None
+        if observacion_limpia and descripcion_limpia and observacion_limpia.casefold() == descripcion_limpia.casefold():
+            observacion_limpia = None
         if key not in out:
             out[key] = {
                 "pedidoDetalleID": int(pedido_detalle_id) if pedido_detalle_id is not None else None,
                 "productoID": int(producto_id) if producto_id is not None else None,
                 "codigoProducto": str(codigo_producto or "").strip() or None,
                 "nombreProducto": str(nombre_producto or "Producto"),
-                "observacionesPersonalizados": str(observaciones_personalizados).strip() if observaciones_personalizados else None,
+                "observacionesPersonalizados": observacion_limpia,
             }
     return out
 

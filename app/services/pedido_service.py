@@ -165,6 +165,16 @@ def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int
     return Decimal(str(row[0]))
 
 
+def _sanitize_producto_observacion(observacion: str | None, producto: Producto | None = None) -> str | None:
+    text = str(observacion or "").strip()
+    if not text:
+        return None
+    descripcion = str(getattr(producto, "descripcion", "") or "").strip()
+    if descripcion and text.casefold() == descripcion.casefold():
+        return None
+    return text
+
+
 def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
     """Registra un pedido completo en transacción y retorna pedidoID, total y estado."""
     if not payload.productos:
@@ -289,7 +299,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
                 precioUnitario=precio_unitario,
                 ivaUnitario=Decimal("0.00"),
                 subtotal=subtotal,
-                observacionesPersonalizados=(str(producto.descripcion).strip() if producto.descripcion else None),
+                observacionesPersonalizados=_sanitize_producto_observacion(None, producto),
             )
             db.add(detalle)
             total_bruto += subtotal
