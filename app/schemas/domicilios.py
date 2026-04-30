@@ -13,6 +13,7 @@ ESTADO_CANCELADO = "Cancelado"
 
 class DomiciliarioItem(BaseModel):
     idDomiciliario: int
+    usuarioID: int | None = None
     nombre: str
     telefono: str | None = None
     activo: bool

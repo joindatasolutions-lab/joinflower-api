@@ -769,14 +769,6 @@ def crear_usuario(
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
 
-        existing_email = (
-            db.query(Usuario)
-            .filter(Usuario.empresaID == target_empresa_id, Usuario.email == email)
-            .first()
-        )
-        if existing_email:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email ya existe en la empresa")
-
         rol = (
             db.query(Rol)
             .filter(Rol.idRol == payload.rolID, Rol.empresaID == target_empresa_id)
@@ -984,18 +976,6 @@ def actualizar_usuario(
         )
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
-
-        existing_email = (
-            db.query(Usuario)
-            .filter(
-                Usuario.empresaID == target_empresa_id,
-                Usuario.email == email,
-                Usuario.idusuario != int(usuario.idusuario),
-            )
-            .first()
-        )
-        if existing_email:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email ya existe en la empresa")
 
         rol = (
             db.query(Rol)

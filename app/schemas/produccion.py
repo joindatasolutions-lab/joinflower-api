@@ -101,6 +101,7 @@ class ProduccionKanbanResponse(BaseModel):
 
 class FloristaItem(BaseModel):
     idFlorista: int
+    usuarioID: Optional[int] = None
     nombre: str
     numeroFlorista: Optional[int] = None
     esExterno: bool = False

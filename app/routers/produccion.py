@@ -432,6 +432,7 @@ def listar_floristas(
         items=[
             FloristaItem(
                 idFlorista=int(row.idFlorista),
+                usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
                 nombre=str(row.nombre),
                 numeroFlorista=(int(row.numeroInterno) if getattr(row, "numeroInterno", None) is not None else None),
                 esExterno=bool(index >= len(internos)),

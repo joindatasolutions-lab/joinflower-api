@@ -335,6 +335,7 @@ def listar_domiciliarios(
         items=[
             DomiciliarioItem(
                 idDomiciliario=int(row.idDomiciliario),
+                usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
                 nombre=str(row.nombre or ""),
                 telefono=None,
                 activo=bool(row.activo),
