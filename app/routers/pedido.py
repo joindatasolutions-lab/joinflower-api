@@ -1344,6 +1344,24 @@ def actualizar_detalle_pedido(
         needs_totals_recalc = False
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
+            duplicate_detail = (
+                db.query(PedidoDetalle.idPedidoDetalle)
+                .filter(
+                    PedidoDetalle.empresaID == int(pedido.empresaID),
+                    PedidoDetalle.pedidoID == int(pedido.idPedido),
+                    PedidoDetalle.productoID == int(payload.productoID),
+                    PedidoDetalle.idPedidoDetalle != int(detalle.idPedidoDetalle),
+                )
+                .first()
+            )
+            if duplicate_detail:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEDIDO_PRODUCTO_DUPLICADO",
+                        "message": "Ese arreglo ya existe dentro del pedido. Elige otro arreglo diferente.",
+                    },
+                )
             precio_unitario = _find_branch_product_price(
                 db,
                 empresa_id=int(pedido.empresaID),
