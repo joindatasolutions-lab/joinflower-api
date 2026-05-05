@@ -1343,7 +1343,7 @@ def actualizar_detalle_pedido(
         )
         needs_totals_recalc = False
 
-        if payload.productoID is not None and detalle:
+        if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
             precio_unitario = _find_branch_product_price(
                 db,
                 empresa_id=int(pedido.empresaID),
