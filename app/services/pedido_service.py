@@ -219,6 +219,108 @@ def _resolve_costo_domicilio(
     return Decimal("0.00")
 
 
+def _merge_checkout_productos(productos: list) -> list:
+    merged: dict[int, dict] = {}
+    ordered_ids: list[int] = []
+    for item in productos:
+        producto_id = int(item.productoID)
+        if producto_id not in merged:
+            merged[producto_id] = {
+                "productoID": producto_id,
+                "cantidad": int(item.cantidad),
+            }
+            ordered_ids.append(producto_id)
+        else:
+            merged[producto_id]["cantidad"] += int(item.cantidad)
+    return [merged[producto_id] for producto_id in ordered_ids]
+
+
+def _crear_pedido_checkout_unitario(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    cliente_id: int,
+    estado_pedido_id: int,
+    fecha_pedido: datetime,
+    producto: Producto,
+    cantidad_entera: int,
+    costo_domicilio: Decimal,
+    entrega_payload,
+) -> Pedido:
+    pedido = Pedido(
+        empresaID=empresa_id,
+        sucursalID=sucursal_id,
+        numeroPedido=_numero_pedido_temporal(),
+        codigoPedido=None,
+        clienteID=cliente_id,
+        fechaPedido=fecha_pedido,
+        estadoPedidoID=estado_pedido_id,
+        totalBruto=Decimal("0.00"),
+        totalIva=Decimal("0.00"),
+        costoDomicilio=Decimal("0.00"),
+        totalNeto=Decimal("0.00"),
+        createdAt=datetime.now(timezone.utc),
+    )
+    db.add(pedido)
+    db.flush()
+    pedido.numeroPedido = -int(pedido.idPedido)
+
+    precio_unitario = _find_branch_product_price(
+        db,
+        empresa_id=int(empresa_id),
+        sucursal_id=int(sucursal_id),
+        producto_id=int(producto.idProducto),
+    )
+    cantidad = Decimal(cantidad_entera)
+    subtotal = (precio_unitario * cantidad).quantize(Decimal("0.01"))
+    total_iva = Decimal("0.00")
+    costo_domicilio = Decimal(str(costo_domicilio or 0)).quantize(Decimal("0.01"))
+
+    detalle = PedidoDetalle(
+        empresaID=empresa_id,
+        sucursalID=sucursal_id,
+        pedidoID=pedido.idPedido,
+        productoID=producto.idProducto,
+        cantidad=cantidad,
+        precioUnitario=precio_unitario,
+        ivaUnitario=Decimal("0.00"),
+        subtotal=subtotal,
+        observacionesPersonalizados=_sanitize_producto_observacion(None, producto),
+    )
+    db.add(detalle)
+
+    pedido.totalBruto = subtotal
+    pedido.totalIva = total_iva
+    pedido.costoDomicilio = costo_domicilio
+    pedido.totalNeto = subtotal + total_iva + costo_domicilio
+
+    entrega = Entrega(
+        empresaID=empresa_id,
+        sucursalID=sucursal_id,
+        pedidoID=pedido.idPedido,
+        estadoEntregaID=1,
+        tipoEntrega=entrega_payload.tipoEntrega,
+        destinatario=entrega_payload.destinatario,
+        telefonoDestino=entrega_payload.telefonoDestino,
+        direccion=entrega_payload.direccion,
+        barrioID=entrega_payload.barrioID,
+        barrioNombre=entrega_payload.barrioNombre,
+        rangoHora=entrega_payload.rangoHora,
+        mensaje=entrega_payload.mensaje,
+        firma=entrega_payload.firma,
+        observacionGeneral=entrega_payload.observacionGeneral,
+        fechaEntregaProgramada=entrega_payload.fechaEntrega,
+        fechaEntrega=entrega_payload.fechaEntrega,
+        latitudDestino=entrega_payload.latitudDestino,
+        longitudDestino=entrega_payload.longitudDestino,
+        intentoNumero=1,
+        createdAt=datetime.now(timezone.utc),
+    )
+    db.add(entrega)
+    return pedido
+
+
 def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
     """Registra un pedido completo en transacción y retorna pedidoID, total y estado."""
     if not payload.productos:
@@ -303,52 +405,6 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
 
         fecha_pedido = datetime.now(timezone.utc)
 
-        pedido = Pedido(
-            empresaID=payload.empresaID,
-            sucursalID=payload.sucursalID,
-            numeroPedido=_numero_pedido_temporal(),
-            codigoPedido=None,
-            clienteID=cliente.idCliente,
-            fechaPedido=fecha_pedido,
-            estadoPedidoID=estado_creado.idEstadoPedido,
-            totalBruto=Decimal("0.00"),
-            totalIva=Decimal("0.00"),
-            costoDomicilio=Decimal("0.00"),
-            totalNeto=Decimal("0.00"),
-            createdAt=datetime.now(timezone.utc),
-        )
-        db.add(pedido)
-        db.flush()
-        pedido.numeroPedido = -int(pedido.idPedido)
-
-        total_bruto = Decimal("0.00")
-        total_iva = Decimal("0.00")
-
-        for item in payload.productos:
-            producto = productos_map[item.productoID]
-            precio_unitario = _find_branch_product_price(
-                db,
-                empresa_id=int(payload.empresaID),
-                sucursal_id=int(payload.sucursalID),
-                producto_id=int(producto.idProducto),
-            )
-            cantidad = Decimal(item.cantidad)
-            subtotal = precio_unitario * cantidad
-
-            detalle = PedidoDetalle(
-                empresaID=payload.empresaID,
-                sucursalID=payload.sucursalID,
-                pedidoID=pedido.idPedido,
-                productoID=producto.idProducto,
-                cantidad=cantidad,
-                precioUnitario=precio_unitario,
-                ivaUnitario=Decimal("0.00"),
-                subtotal=subtotal,
-                observacionesPersonalizados=_sanitize_producto_observacion(None, producto),
-            )
-            db.add(detalle)
-            total_bruto += subtotal
-
         costo_domicilio = _resolve_costo_domicilio(
             db,
             empresa_id=int(payload.empresaID),
@@ -357,42 +413,52 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             barrio_id=payload.entrega.barrioID,
             barrio_nombre=payload.entrega.barrioNombre,
         )
-        pedido.totalBruto = total_bruto
-        pedido.totalIva = total_iva
-        pedido.costoDomicilio = costo_domicilio
-        pedido.totalNeto = total_bruto + total_iva + costo_domicilio
+        productos_normalizados = _merge_checkout_productos(payload.productos)
+        pedidos_creados: list[Pedido] = []
 
-        entrega = Entrega(
-            empresaID=payload.empresaID,
-            sucursalID=payload.sucursalID,
-            pedidoID=pedido.idPedido,
-            estadoEntregaID=1,
-            tipoEntrega=payload.entrega.tipoEntrega,
-            destinatario=payload.entrega.destinatario,
-            telefonoDestino=payload.entrega.telefonoDestino,
-            direccion=payload.entrega.direccion,
-            barrioID=payload.entrega.barrioID,
-            barrioNombre=payload.entrega.barrioNombre,
-            rangoHora=payload.entrega.rangoHora,
-            mensaje=payload.entrega.mensaje,
-            firma=payload.entrega.firma,
-            observacionGeneral=payload.entrega.observacionGeneral,
-            fechaEntregaProgramada=payload.entrega.fechaEntrega,
-            fechaEntrega=payload.entrega.fechaEntrega,
-            latitudDestino=payload.entrega.latitudDestino,
-            longitudDestino=payload.entrega.longitudDestino,
-            intentoNumero=1,
-            createdAt=datetime.now(timezone.utc),
+        primer_producto = productos_map[int(productos_normalizados[0]["productoID"])]
+        primer_pedido = _crear_pedido_checkout_unitario(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            cliente_id=int(cliente.idCliente),
+            estado_pedido_id=int(estado_creado.idEstadoPedido),
+            fecha_pedido=fecha_pedido,
+            producto=primer_producto,
+            cantidad_entera=int(productos_normalizados[0]["cantidad"]),
+            costo_domicilio=costo_domicilio,
+            entrega_payload=payload.entrega,
         )
-        db.add(entrega)
+        pedidos_creados.append(primer_pedido)
+
+        for producto_item in productos_normalizados[1:]:
+            producto = productos_map[int(producto_item["productoID"])]
+            pedido_extra = _crear_pedido_checkout_unitario(
+                db,
+                empresa_id=int(payload.empresaID),
+                sucursal_id=int(payload.sucursalID),
+                cliente_id=int(cliente.idCliente),
+                estado_pedido_id=int(estado_creado.idEstadoPedido),
+                fecha_pedido=fecha_pedido,
+                producto=producto,
+                cantidad_entera=int(producto_item["cantidad"]),
+                costo_domicilio=Decimal("0.00"),
+                entrega_payload=payload.entrega,
+            )
+            pedidos_creados.append(pedido_extra)
 
         db.commit()
 
+        total_general = sum(Decimal(str(item.totalNeto or 0)) for item in pedidos_creados)
+        pedido_principal = pedidos_creados[0]
+
         return {
-            "pedidoID": pedido.idPedido,
-            "numeroPedido": (int(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else None),
-            "codigoPedido": (str(pedido.codigoPedido) if pedido.codigoPedido else None),
-            "total": float(pedido.totalNeto or 0),
+            "pedidoID": pedido_principal.idPedido,
+            "numeroPedido": (int(pedido_principal.numeroPedido) if int(pedido_principal.numeroPedido or 0) > 0 else None),
+            "codigoPedido": (str(pedido_principal.codigoPedido) if pedido_principal.codigoPedido else None),
+            "pedidoIDs": [int(item.idPedido) for item in pedidos_creados],
+            "cantidadPedidos": len(pedidos_creados),
+            "total": float(total_general or 0),
             "estado": "CREADO",
         }
 

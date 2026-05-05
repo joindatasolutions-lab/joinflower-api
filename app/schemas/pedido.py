@@ -74,6 +74,8 @@ class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
     numeroPedido: Optional[int] = None
     codigoPedido: Optional[str] = None
+    pedidoIDs: Optional[List[int]] = None
+    cantidadPedidos: Optional[int] = None
     total: float
     estado: str
 
