@@ -186,6 +186,10 @@ def _calcular_tiempo_estimado_detalle(detalle: PedidoDetalle) -> int:
     return produccion_service.calcular_tiempo_estimado_detalle(detalle)
 
 
+def _entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
+    return produccion_service.entrega_fecha_programada(entrega)
+
+
 def _log_historial(
     db: Session,
     produccion: Produccion,
@@ -288,7 +292,7 @@ def _build_items(
     items: list[ProduccionItem] = []
 
     for produccion, pedido, cliente, entrega, florista in rows:
-        fecha_entrega = entrega.fechaEntrega if entrega else None
+        fecha_entrega = _entrega_fecha_programada(entrega)
         tiempo_restante_horas = None
         if fecha_entrega:
             delta = fecha_entrega.replace(tzinfo=timezone.utc) - now_utc
@@ -317,7 +321,7 @@ def _build_items(
                 nombreArreglo=nombre_arreglo,
                 producto=nombre_arreglo,
                 cliente=str(cliente.nombreCompleto or "Cliente"),
-                fechaEntrega=(entrega.fechaEntrega if entrega else None),
+                fechaEntrega=fecha_entrega,
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
                 observacion=observacion_personalizada,
@@ -1000,7 +1004,7 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
         raise HTTPException(status_code=400, detail="El pedido no tiene detalles para recalcular producción")
 
     detalle_by_id = {int(det.idPedidoDetalle): det for det in detalle_rows}
-    fecha_programada = _calcular_fecha_programada(entrega.fechaEntrega if entrega else None, _dias_anticipacion_default())
+    fecha_programada = _calcular_fecha_programada(_entrega_fecha_programada(entrega), _dias_anticipacion_default())
     estados_actuales = {_estado_produccion_norm(prod.estado, db=db) for prod in producciones}
 
     for produccion in producciones:

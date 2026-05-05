@@ -30,6 +30,16 @@ def _as_date(value: date | datetime | None) -> date | None:
     return value
 
 
+def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
+    if not entrega:
+        return None
+    return (
+        getattr(entrega, "reprogramadaPara", None)
+        or getattr(entrega, "fechaEntregaProgramada", None)
+        or getattr(entrega, "fechaEntrega", None)
+    )
+
+
 def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
     rows = db.execute(
         text(
@@ -329,7 +339,7 @@ def asegurar_produccion_desde_pedido_aprobado(
     estados = _resolve_estado_produccion_ids(db)
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
     fecha_programada = calcular_fecha_programada(
-        fecha_entrega=(entrega.fechaEntrega if entrega else None),
+        fecha_entrega=entrega_fecha_programada(entrega),
         dias_anticipacion=dias_anticipacion,
     )
     tiempo_estimado = calcular_tiempo_estimado_pedido(db, int(pedido.idPedido))
@@ -623,7 +633,7 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
     estados = _resolve_estado_produccion_ids(db)
     entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
     fecha_programada = calcular_fecha_programada(
-        fecha_entrega=(entrega.fechaEntrega if entrega else None),
+        fecha_entrega=entrega_fecha_programada(entrega),
         dias_anticipacion=dias_anticipacion,
     )
     detalles = (
