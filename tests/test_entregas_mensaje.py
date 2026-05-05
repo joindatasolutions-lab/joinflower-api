@@ -1,29 +1,24 @@
 import os
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import func
 
 from app.database import SessionLocal
-from app.main import app
 from app.models.estadopedido import EstadoPedido
 from app.models.pedido import Pedido
+from tests.conftest import FLORA_EMPRESA_ID, ensure_flora_test_users, impersonated_headers, integration_client, integration_enabled
 
 
 pytestmark = pytest.mark.integration
 
 
 def test_get_entrega_mensaje_for_approved_order():
-    if os.getenv("RUN_INTEGRATION_TESTS", "0") != "1":
+    if not integration_enabled():
         pytest.skip("Integration test skipped. Set RUN_INTEGRATION_TESTS=1 to execute.")
 
-    client = TestClient(app)
-
-    login = client.post("/auth/login", json={"login": "joinadmin", "password": "Admin123*"})
-    assert login.status_code == 200, login.text
-
-    token = login.json()["accessToken"]
-    headers = {"Authorization": f"Bearer {token}"}
+    ensure_flora_test_users()
+    client = integration_client()
+    headers, _user = impersonated_headers(client, empresa_id=FLORA_EMPRESA_ID)
 
     pedido_id = None
     session = SessionLocal()
@@ -31,7 +26,10 @@ def test_get_entrega_mensaje_for_approved_order():
         row = (
             session.query(Pedido.idPedido)
             .join(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-            .filter(func.upper(EstadoPedido.nombreEstado) == "APROBADO")
+            .filter(
+                Pedido.empresaID == FLORA_EMPRESA_ID,
+                func.upper(EstadoPedido.nombreEstado) == "APROBADO",
+            )
             .order_by(Pedido.idPedido.desc())
             .first()
         )
@@ -55,16 +53,12 @@ def test_get_entrega_mensaje_for_approved_order():
 
 
 def test_get_entrega_mensaje_returns_400_for_non_approved_order():
-    if os.getenv("RUN_INTEGRATION_TESTS", "0") != "1":
+    if not integration_enabled():
         pytest.skip("Integration test skipped. Set RUN_INTEGRATION_TESTS=1 to execute.")
 
-    client = TestClient(app)
-
-    login = client.post("/auth/login", json={"login": "joinadmin", "password": "Admin123*"})
-    assert login.status_code == 200, login.text
-
-    token = login.json()["accessToken"]
-    headers = {"Authorization": f"Bearer {token}"}
+    ensure_flora_test_users()
+    client = integration_client()
+    headers, _user = impersonated_headers(client, empresa_id=FLORA_EMPRESA_ID)
 
     pedido_id = None
     session = SessionLocal()
@@ -72,7 +66,10 @@ def test_get_entrega_mensaje_returns_400_for_non_approved_order():
         row = (
             session.query(Pedido.idPedido)
             .join(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-            .filter(func.upper(EstadoPedido.nombreEstado) != "APROBADO")
+            .filter(
+                Pedido.empresaID == FLORA_EMPRESA_ID,
+                func.upper(EstadoPedido.nombreEstado) != "APROBADO",
+            )
             .order_by(Pedido.idPedido.desc())
             .first()
         )
@@ -88,5 +85,6 @@ def test_get_entrega_mensaje_returns_400_for_non_approved_order():
     assert resp.status_code == 400, resp.text
 
     body = resp.json()
-    assert "detail" in body
-    assert "APROBADO" in str(body["detail"]).upper()
+    assert body.get("success") is False
+    assert "error" in body
+    assert "APROBADO" in str(body["error"].get("message")).upper()

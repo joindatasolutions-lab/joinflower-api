@@ -107,7 +107,7 @@ def is_global_join_login(login: str | None) -> bool:
 
 
 ROLE_SUPER_ADMIN = {"super_admin", "join_superadmin"}
-ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin"}
+ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin", "empresa_admin_impersonado"}
 
 
 def is_super_admin_context(auth: AuthContext) -> bool:

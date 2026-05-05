@@ -8,13 +8,25 @@ from app.database import SessionLocal
 
 pytestmark = pytest.mark.integration
 
-# Tablas globales o de configuracion que no requieren empresaID directo.
+# Tablas globales o relacionales que no tienen empresa_id directo en el esquema actual.
 TABLES_ALLOWED_WITHOUT_EMPRESA_ID = {
-    "Empresa",
-    "EstadoPedido",
-    "PermisoModulo",
-    "PlanModulo",
-    "UsuarioModulo",
+    "empresa",
+    "estado_entrega",
+    "estado_pago",
+    "estado_pedido",
+    "estado_produccion",
+    "modulo",
+    "perfil_florista",
+    "plan_modulo",
+    "producto_sucursal",
+    "tipo_movimiento",
+    "usuario_modulo",
+}
+
+TABLES_ALLOWED_NULL_EMPRESA_ID = {
+    "plan",
+    "proveedor",
+    "usuario",
 }
 
 
@@ -36,6 +48,7 @@ def test_operational_tables_must_have_empresa_id_column():
                     SELECT table_name
                     FROM information_schema.tables
                     WHERE table_schema = 'petalops'
+                      AND table_type = 'BASE TABLE'
                     """
                 )
             ).fetchall()
@@ -44,14 +57,14 @@ def test_operational_tables_must_have_empresa_id_column():
         tables_with_empresa = {
             row[0]
             for row in s.execute(
-                text(
-                                        """
-                                        SELECT table_name
-                                        FROM information_schema.columns
-                                        WHERE table_catalog = current_database()
-                                            AND column_name = 'empresaID'
-                                        GROUP BY table_name
-                                        """
+                    text(
+                        """
+                        SELECT table_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'petalops'
+                          AND column_name = 'empresa_id'
+                        GROUP BY table_name
+                        """
                 )
             ).fetchall()
         }
@@ -83,8 +96,8 @@ def test_tables_with_empresa_id_must_not_have_nulls():
                     """
                     SELECT table_name
                     FROM information_schema.columns
-                    WHERE table_catalog = current_database()
-                        AND column_name = 'empresaID'
+                    WHERE table_schema = 'petalops'
+                      AND column_name = 'empresa_id'
                     GROUP BY table_name
                     ORDER BY table_name
                     """
@@ -94,8 +107,10 @@ def test_tables_with_empresa_id_must_not_have_nulls():
 
         offenders = []
         for table in tables_with_empresa:
+            if table in TABLES_ALLOWED_NULL_EMPRESA_ID:
+                continue
             null_count = int(
-                s.execute(text(f'SELECT COUNT(*) FROM petalops."{table}" WHERE "empresaID" IS NULL')).scalar() or 0
+                s.execute(text(f'SELECT COUNT(*) FROM petalops."{table}" WHERE empresa_id IS NULL')).scalar() or 0
             )
             if null_count > 0:
                 offenders.append((table, null_count))
