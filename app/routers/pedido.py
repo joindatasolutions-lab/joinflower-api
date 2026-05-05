@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import or_, cast, String, func, text
 from datetime import datetime, timezone
 from io import BytesIO
@@ -212,8 +212,46 @@ def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
     return str((estado.nombreEstado if estado else "") or "").strip().upper()
 
 
+def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | None, destino_id: int | None) -> bool:
+    if origen_id is None or destino_id is None:
+        return False
+
+    origen_id = int(origen_id)
+    destino_id = int(destino_id)
+    if origen_id == destino_id:
+        return True
+
+    transitions = db.execute(
+        text(
+            """
+            SELECT estado_origen_id, estado_destino_id
+            FROM petalops.transicion_estado_pedido
+            WHERE empresa_id = :empresa_id
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).fetchall()
+    if transitions:
+        return any(int(row[0]) == origen_id and int(row[1]) == destino_id for row in transitions)
+
+    origen = _estado_pedido_nombre(db, origen_id)
+    destino = _estado_pedido_nombre(db, destino_id)
+    fallback = {
+        "CREADO": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
+        "PENDIENTE": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
+        "APROBADO": {"CANCELADO", "PAGADO"},
+        "PAGADO": {"CANCELADO"},
+    }
+    return destino in fallback.get(origen, set())
+
+
 def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
     return _estado_pedido_nombre(db, estado_pedido_id) not in {"ENTREGADO", "CANCELADO", "RECHAZADO"}
+
+
+def _is_lock_not_available_error(exc: OperationalError) -> bool:
+    original = getattr(exc, "orig", None)
+    return getattr(original, "pgcode", None) == "55P03"
 
 
 def _dias_anticipacion_produccion() -> int:
@@ -1067,7 +1105,7 @@ def listar_pedidos(
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
                 destinatario=str((entrega.destinatario if entrega else None) or ""),
-                fechaEntrega=(entrega.fechaEntrega if entrega else None),
+                fechaEntrega=_scheduled_entrega_datetime(entrega),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
@@ -1240,6 +1278,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 class ActualizarDetallePedidoRequest(BaseModel):
     productoID: int | None = None
+    cantidad: float | None = None
     productoObservaciones: str | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
@@ -1340,6 +1379,16 @@ def actualizar_detalle_pedido(
                 payload.productoObservaciones,
                 producto=producto_actual,
             )
+
+        if payload.cantidad is not None and detalle:
+            cantidad = Decimal(str(payload.cantidad))
+            if cantidad <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "PEDIDO_CANTIDAD_INVALIDA", "message": "La cantidad debe ser mayor que cero"},
+                )
+            detalle.cantidad = cantidad
+            needs_totals_recalc = True
 
         if payload.clienteTipoIdent is not None:
             cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
@@ -1453,6 +1502,11 @@ def actualizar_detalle_pedido(
 
             canal_flora = str(payload.canalFlora or "").strip() or None
             allowed_channels = set(channel_field["opciones"]) if channel_field else set()
+            if channel_field and not canal_flora:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "FLORA_CHANNEL_REQUIRED", "message": "Celular Flora es obligatorio"},
+                )
             if canal_flora and allowed_channels and canal_flora not in allowed_channels:
                 raise HTTPException(
                     status_code=400,
@@ -1542,7 +1596,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     contenido_lineas = [
         f"Pedido N°: {_numero_pedido_humano(pedido)}",
         f"Fecha Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
-        f"Fecha Entrega: {_fecha_hora_humano(entrega.fechaEntrega if entrega else None)}",
+        f"Fecha Entrega: {_fecha_hora_humano(_scheduled_entrega_datetime(entrega))}",
         f"Cliente: {str(cliente.nombreCompleto or '-')}",
         f"CC/Nit: {str(cliente.identificacion or '-')}",
         f"Teléfono: {str(cliente.telefonoCompleto or cliente.telefono or '-')}",
@@ -1577,13 +1631,25 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
     if not is_super_admin_context(auth):
         pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
-    pedido = pedido_query.first()
+    try:
+        pedido = pedido_query.with_for_update(nowait=True).first()
+    except OperationalError as exc:
+        db.rollback()
+        if _is_lock_not_available_error(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Otro usuario está aprobando este pedido en este momento. Intenta nuevamente en unos segundos.",
+            ) from exc
+        raise
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
 
     pendientes = _ids_estado_pendiente(db)
     if pendientes and int(pedido.estadoPedidoID) not in pendientes:
+        estado_actual = _estado_pedido_nombre(db, pedido.estadoPedidoID)
+        if estado_actual in {"APROBADO", "PAGADO"}:
+            raise HTTPException(status_code=409, detail="Este pedido ya fue aprobado por otro usuario.")
         raise HTTPException(status_code=400, detail="Solo se pueden aprobar pedidos en estado Pendiente")
 
     approval_gate = _approval_gate_summary(
@@ -1597,6 +1663,14 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     estado_aprobado = _buscar_estado_por_nombre(db, "APROBADO", "PAGADO")
     if not estado_aprobado:
         raise HTTPException(status_code=400, detail="No existe estado de aprobación activo (APROBADO/PAGADO)")
+
+    if not _transicion_pedido_permitida(
+        db=db,
+        empresa_id=int(pedido.empresaID),
+        origen_id=int(pedido.estadoPedidoID),
+        destino_id=int(estado_aprobado.idEstadoPedido),
+    ):
+        raise HTTPException(status_code=400, detail="Transición de estado no permitida")
 
     if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
         numero_pedido, codigo_pedido = generar_numeracion_pedido(
@@ -1638,7 +1712,16 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
     if not is_super_admin_context(auth):
         pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
-    pedido = pedido_query.first()
+    try:
+        pedido = pedido_query.with_for_update(nowait=True).first()
+    except OperationalError as exc:
+        db.rollback()
+        if _is_lock_not_available_error(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Otro usuario está actualizando este pedido en este momento. Intenta nuevamente en unos segundos.",
+            ) from exc
+        raise
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
@@ -1820,34 +1903,35 @@ def cambiar_estado(
     pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
     if not is_super_admin_context(auth):
         pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
-    pedido = pedido_query.first()
+    try:
+        pedido = pedido_query.with_for_update(nowait=True).first()
+    except OperationalError as exc:
+        db.rollback()
+        if _is_lock_not_available_error(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Otro usuario está actualizando este pedido en este momento. Intenta nuevamente en unos segundos.",
+            ) from exc
+        raise
 
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
 
     estado_actual = pedido.estadoPedidoID
+    estado_actual_nombre = _estado_pedido_nombre(db, estado_actual)
+    estado_destino_nombre = _estado_pedido_nombre(db, nuevo_estado_id)
+
+    if estado_actual_nombre in {"APROBADO", "PAGADO"} and estado_destino_nombre in {"APROBADO", "PAGADO"}:
+        raise HTTPException(status_code=409, detail="Este pedido ya fue aprobado por otro usuario.")
 
     # 2️⃣ Validar transición permitida
-    transicion = db.execute(
-        text(
-            """
-            SELECT 1
-            FROM petalops.transicion_estado_pedido
-            WHERE empresa_id = :empresa_id
-              AND estado_origen_id = :estado_origen_id
-              AND estado_destino_id = :estado_destino_id
-            LIMIT 1
-            """
-        ),
-        {
-            "empresa_id": int(pedido.empresaID),
-            "estado_origen_id": int(estado_actual),
-            "estado_destino_id": int(nuevo_estado_id),
-        },
-    ).first()
-
-    if not transicion:
+    if not _transicion_pedido_permitida(
+        db=db,
+        empresa_id=int(pedido.empresaID),
+        origen_id=int(estado_actual),
+        destino_id=int(nuevo_estado_id),
+    ):
         raise HTTPException(
             status_code=400,
             detail="Transición de estado no permitida"
