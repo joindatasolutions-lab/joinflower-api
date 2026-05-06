@@ -14,6 +14,7 @@ from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
+from app.models.florista import Florista
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
@@ -115,8 +116,8 @@ def listar_pipeline_pedidos(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     fecha: date | None = Query(None),
-    domiciliario_id: int | None = Query(None, alias="domiciliarioID"),
-    florista_id: int | None = Query(None, alias="floristaID"),
+    domiciliario_id: str | None = Query(None, alias="domiciliarioID"),
+    florista_id: str | None = Query(None, alias="floristaID"),
     numero_pedido: str | None = Query(None, alias="numeroPedido"),
     solo_hoy: bool = Query(False, alias="soloHoy"),
     solo_atrasados: bool = Query(False, alias="soloAtrasados"),
@@ -149,6 +150,7 @@ def listar_pipeline_pedidos(
 
         EntregaLast = aliased(Entrega)
         ProduccionLast = aliased(Produccion)
+        FloristaLast = aliased(Florista)
 
         q = (
             db.query(Pedido, Cliente, EstadoPedido, EntregaLast, ProduccionLast, Domiciliario)
@@ -158,16 +160,43 @@ def listar_pipeline_pedidos(
             .outerjoin(EntregaLast, EntregaLast.idEntrega == entrega_last_sq.c.entrega_id)
             .outerjoin(prod_last_sq, prod_last_sq.c.pedido_id == Pedido.idPedido)
             .outerjoin(ProduccionLast, ProduccionLast.idProduccion == prod_last_sq.c.produccion_id)
-            .outerjoin(Domiciliario, Domiciliario.idDomiciliario == EntregaLast.domiciliarioID)
+            .outerjoin(
+                Domiciliario,
+                (Domiciliario.idDomiciliario == EntregaLast.domiciliarioID)
+                & (Domiciliario.empresaID == Pedido.empresaID),
+            )
+            .outerjoin(
+                FloristaLast,
+                (FloristaLast.idFlorista == ProduccionLast.floristaID)
+                & (FloristaLast.empresaID == Pedido.empresaID),
+            )
             .filter(Pedido.empresaID == empresa_id)
         )
 
         if sucursal_id is not None:
             q = q.filter(Pedido.sucursalID == sucursal_id)
-        if domiciliario_id is not None:
-            q = q.filter(EntregaLast.domiciliarioID == domiciliario_id)
-        if florista_id is not None:
-            q = q.filter(ProduccionLast.floristaID == florista_id)
+        domiciliario_term = str(domiciliario_id or "").strip()
+        if domiciliario_term:
+            if domiciliario_term.isdigit():
+                q = q.filter(
+                    or_(
+                        EntregaLast.domiciliarioID == int(domiciliario_term),
+                        Domiciliario.nombre.ilike(f"%{domiciliario_term}%"),
+                    )
+                )
+            else:
+                q = q.filter(Domiciliario.nombre.ilike(f"%{domiciliario_term}%"))
+        florista_term = str(florista_id or "").strip()
+        if florista_term:
+            if florista_term.isdigit():
+                q = q.filter(
+                    or_(
+                        ProduccionLast.floristaID == int(florista_term),
+                        FloristaLast.nombre.ilike(f"%{florista_term}%"),
+                    )
+                )
+            else:
+                q = q.filter(FloristaLast.nombre.ilike(f"%{florista_term}%"))
 
         if numero_pedido:
             term = f"%{numero_pedido.strip()}%"

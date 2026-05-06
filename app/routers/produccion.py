@@ -302,6 +302,8 @@ def _build_items(
         nombre_arreglo = str(producto_info.get("nombreProducto") or "Producto")
         codigo_producto = str(producto_info.get("codigoProducto") or "").strip() or None
         observacion_personalizada = str(producto_info.get("observacionesPersonalizados") or "").strip() or None
+        observacion_entrega = str(entrega.observacionGeneral or "").strip() if entrega else ""
+        observacion_entrega = observacion_entrega or None
         producto_id = producto_info.get("productoID")
         codigo_arreglo = codigo_producto or (str(producto_id) if producto_id is not None else None)
 
@@ -325,6 +327,8 @@ def _build_items(
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
                 observacion=observacion_personalizada,
+                notasProduccion=observacion_personalizada,
+                observacionesPersonalizados=observacion_entrega,
                 floristaAsignado=(florista.nombre if florista else None),
                 estado=_estado_produccion_norm(produccion.estado, db=db),
                 observaciones=(str(produccion.observacionesInternas).strip() if produccion.observacionesInternas else None),

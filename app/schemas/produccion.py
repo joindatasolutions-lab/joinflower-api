@@ -61,6 +61,8 @@ class ProduccionItem(BaseModel):
     horaEntrega: Optional[str] = None
     barrio: Optional[str] = None
     observacion: Optional[str] = None
+    notasProduccion: Optional[str] = None
+    observacionesPersonalizados: Optional[str] = None
     floristaAsignado: Optional[str] = None
     estado: str
     observaciones: Optional[str] = None
