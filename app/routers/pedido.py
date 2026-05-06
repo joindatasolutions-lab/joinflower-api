@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 from decimal import Decimal
 
@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models.producto import Producto
 from app.models.barrio import Barrio
 from app.models.cliente import Cliente
+from app.models.empresa import Empresa
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.produccion import Produccion
@@ -514,6 +515,20 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     if descripcion and text.casefold() == descripcion.casefold():
         return None
     return text
+
+
+def _is_custom_producto(producto: Producto | None) -> bool:
+    if not producto:
+        return False
+    raw = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            getattr(producto, "codigoProducto", None),
+            getattr(producto, "nombreProducto", None),
+            getattr(producto, "descripcion", None),
+        )
+    )
+    return "personalizado" in raw or "personalizada" in raw
 
 
 def _resolve_costo_domicilio(
@@ -1278,6 +1293,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 class ActualizarDetallePedidoRequest(BaseModel):
     productoID: int | None = None
+    productoPrecio: float | None = None
     cantidad: float | None = None
     productoObservaciones: str | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
@@ -1342,6 +1358,7 @@ def actualizar_detalle_pedido(
             .first()
         )
         needs_totals_recalc = False
+        producto_detalle_actual: Producto | None = None
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
             duplicate_detail = (
@@ -1378,6 +1395,7 @@ def actualizar_detalle_pedido(
             )
             detalle.productoID = payload.productoID
             detalle.precioUnitario = precio_unitario
+            producto_detalle_actual = producto
             if has_observaciones_personalizados:
                 detalle.observacionesPersonalizados = _sanitize_producto_observacion(
                     payload.productoObservaciones,
@@ -1397,6 +1415,40 @@ def actualizar_detalle_pedido(
                 payload.productoObservaciones,
                 producto=producto_actual,
             )
+
+        if payload.productoPrecio is not None and detalle:
+            producto_para_precio = producto_detalle_actual
+            if producto_para_precio is None:
+                producto_para_precio = (
+                    db.query(Producto)
+                    .filter(
+                        Producto.idProducto == int(detalle.productoID),
+                        Producto.empresaID == int(pedido.empresaID),
+                    )
+                    .first()
+                )
+
+            if not _is_custom_producto(producto_para_precio):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEDIDO_PRECIO_SOLO_PERSONALIZADO",
+                        "message": "El precio solo se puede cambiar cuando el arreglo es personalizado.",
+                    },
+                )
+
+            nuevo_precio = Decimal(str(payload.productoPrecio)).quantize(Decimal("0.01"))
+            if nuevo_precio <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEDIDO_PRECIO_INVALIDO",
+                        "message": "Debes indicar un precio válido para el arreglo personalizado.",
+                    },
+                )
+
+            detalle.precioUnitario = nuevo_precio
+            needs_totals_recalc = True
 
         if payload.cantidad is not None and detalle:
             cantidad = Decimal(str(payload.cantidad))
@@ -1573,9 +1625,8 @@ def actualizar_detalle_pedido(
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row_query = (
-        db.query(Pedido, Cliente, Entrega, EstadoPedido)
+        db.query(Pedido, Cliente, EstadoPedido)
         .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.idPedido == pedido_id)
     )
@@ -1586,11 +1637,34 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     if not row:
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
 
-    pedido, cliente, entrega, estado_db = row
+    pedido, cliente, estado_db = row
     assert_same_empresa(auth, int(pedido.empresaID))
     estado_nombre = str((estado_db.nombreEstado if estado_db else "") or "")
     if not _estado_permite_factura(estado_nombre):
-        raise HTTPException(status_code=400, detail="La factura solo está disponible para pedidos APROBADO/PAGADO")
+        raise HTTPException(status_code=400, detail="La factura solo est? disponible para pedidos APROBADO/PAGADO")
+
+    entrega = (
+        db.query(Entrega)
+        .filter(
+            Entrega.pedidoID == int(pedido.idPedido),
+            Entrega.empresaID == int(pedido.empresaID),
+        )
+        .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+        .first()
+    )
+    empresa = db.query(Empresa).filter(Empresa.idEmpresa == int(pedido.empresaID)).first()
+    barrio = None
+    if entrega and getattr(entrega, "barrioID", None) is not None:
+        barrio = (
+            db.query(Barrio)
+            .filter(
+                Barrio.idBarrio == int(entrega.barrioID),
+                Barrio.empresaID == int(pedido.empresaID),
+                Barrio.sucursalID == int(pedido.sucursalID),
+            )
+            .first()
+        )
+    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
 
     detalles = (
         db.query(PedidoDetalle, Producto)
@@ -1599,42 +1673,63 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         .all()
     )
 
-    lineas_productos = [
-        f"{int(round(float(detalle.cantidad or 0)))}× {str(producto.nombreProducto or 'Producto')}"
-        for detalle, producto in detalles
-    ]
+    lineas_productos = []
+    observaciones_producto = []
+    for detalle, producto in detalles:
+        descripcion = str((producto.nombreProducto if producto else None) or "Producto").strip()
+        cantidad = int(round(float(detalle.cantidad or 0)))
+        lineas_productos.append(f"- {descripcion} | Cantidad: {cantidad}")
+        observacion_detalle = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
+        if observacion_detalle:
+            observaciones_producto.append(observacion_detalle)
     productos_texto = "\n".join(lineas_productos) if lineas_productos else "Sin productos"
 
-    observaciones = (
-        (entrega.observacionGeneral if entrega else None)
-        or (entrega.mensaje if entrega else None)
-        or "Sin observaciones"
-    )
+    observaciones = " | ".join(observaciones_producto) or str((entrega.observacionGeneral if entrega else None) or "Sin observaciones")
+    empresa_nombre = str(
+        (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "FLORA - TIENDA DE FLORES")
+    ).strip()
+    forma_pago = str(pago_resumen.get("metodoPago") or "No especificada").strip() or "No especificada"
+    metodos_pago = [str(item or "").strip().lower() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
+    if any("cuenta por cobrar" in item for item in metodos_pago):
+        tipo_pago = "Cuentas Por Cobrar"
+    elif any("transferencia" in item for item in metodos_pago):
+        tipo_pago = "Transferencia"
+    elif forma_pago != "No especificada":
+        tipo_pago = forma_pago
+    else:
+        tipo_pago = "No especificada"
+
+    fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
+    fecha_entrega_label = fecha_entrega_programada.strftime("%Y-%m-%d") if fecha_entrega_programada else "No especificada"
+    zona_label = f"Zona {int(barrio.zonaID)}" if barrio and getattr(barrio, "zonaID", None) is not None else "Sin zona"
+    operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
+    mensaje_final = str((entrega.mensaje if entrega else None) or "Gracias por su compra").strip() or "Gracias por su compra"
+    numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
 
     contenido_lineas = [
-        f"Pedido N°: {_numero_pedido_humano(pedido)}",
+        f"Empresa: {empresa_nombre}",
+        f"Pedido N?: {numero_legible}",
         f"Fecha Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
-        f"Fecha Entrega: {_fecha_hora_humano(_scheduled_entrega_datetime(entrega))}",
-        f"Cliente: {str(cliente.nombreCompleto or '-')}",
-        f"CC/Nit: {str(cliente.identificacion or '-')}",
-        f"Teléfono: {str(cliente.telefonoCompleto or cliente.telefono or '-')}",
-        "Forma de pago: No especificada",
-        "(Transferencia 3671)",
-        f"Destinatario: {str((entrega.destinatario if entrega else None) or cliente.nombreCompleto or '-')}",
-        f"Teléfono destino: {str((entrega.telefonoDestino if entrega else None) or cliente.telefonoCompleto or cliente.telefono or '-')}",
+        f"Fecha Entrega: {fecha_entrega_label}",
+        f"Cliente: {str((cliente.nombreCompleto if cliente else None) or '-')}",
+        f"Documento: {str((cliente.identificacion if cliente else None) or '-')}",
+        f"Tel?fono: {str((cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
+        f"Forma de pago: {forma_pago}",
+        f"Tipo: {tipo_pago}",
+        f"Destinatario: {str((entrega.destinatario if entrega else None) or (cliente.nombreCompleto if cliente else None) or '-')}",
+        f"Tel?fono destino: {str((entrega.telefonoDestino if entrega else None) or (cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
         f"Barrio: {str((entrega.barrioNombre if entrega else None) or 'Recoger en Tienda')}",
-        "Zona: Sin zona",
-        "Dirección:",
-        str((entrega.direccion if entrega else None) or "Recoger en Tienda"),
+        f"Zona: {zona_label}",
+        f"Direcci?n: {str((entrega.direccion if entrega else None) or 'Recoger en Tienda')}",
         "Producto(s):",
         productos_texto,
-        "Obs:",
+        "Observaciones:",
         str(observaciones),
         f"Subtotal: {_money_cop(pedido.totalBruto)}",
-        "Domicilio: $0",
+        f"Domicilio: {_money_cop(getattr(pedido, 'costoDomicilio', 0) or 0)}",
         f"Total: {_money_cop(pedido.totalNeto)}",
-        "Celular Flora: Samsung",
-        "Gracias por su compra 💐",
+        f"Operador: {operador_nombre}",
+        f"Mensaje: {mensaje_final}",
     ]
 
     pdf_bytes = _render_factura_pdf(contenido_lineas)
