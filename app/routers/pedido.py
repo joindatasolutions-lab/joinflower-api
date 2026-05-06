@@ -1688,6 +1688,9 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     empresa_nombre = str(
         (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "FLORA - TIENDA DE FLORES")
     ).strip()
+    empresa_partes = [part.strip() for part in empresa_nombre.split(" - ", 1) if part.strip()]
+    empresa_titulo = empresa_partes[0] if empresa_partes else empresa_nombre
+    empresa_subtitulo = empresa_partes[1] if len(empresa_partes) > 1 else "Tienda de Flores"
     forma_pago = str(pago_resumen.get("metodoPago") or "No especificada").strip() or "No especificada"
     metodos_pago = [str(item or "").strip().lower() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
     if any("cuenta por cobrar" in item for item in metodos_pago):
@@ -1705,31 +1708,45 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
     mensaje_final = str((entrega.mensaje if entrega else None) or "Gracias por su compra").strip() or "Gracias por su compra"
     numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
+    celular_flora = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
 
     contenido_lineas = [
-        f"Empresa: {empresa_nombre}",
-        f"Pedido N?: {numero_legible}",
-        f"Fecha Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
-        f"Fecha Entrega: {fecha_entrega_label}",
-        f"Cliente: {str((cliente.nombreCompleto if cliente else None) or '-')}",
-        f"Documento: {str((cliente.identificacion if cliente else None) or '-')}",
-        f"Tel?fono: {str((cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
-        f"Forma de pago: {forma_pago}",
-        f"Tipo: {tipo_pago}",
+        empresa_titulo.upper(),
+        empresa_subtitulo,
+        "----------------------------------------",
+        f"Pedido: #{numero_legible}",
+        f"Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
+        f"Entrega: {fecha_entrega_label}",
+        "----------------------------------------",
+        "CLIENTE",
+        f"Nombre: {str((cliente.nombreCompleto if cliente else None) or '-')}",
+        f"CC/NIT: {str((cliente.identificacion if cliente else None) or '-')}",
+        f"Telefono: {str((cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
+        f"Pago: {forma_pago}",
+        f"Tipo pago: {tipo_pago}",
+        "----------------------------------------",
+        "ENTREGA",
         f"Destinatario: {str((entrega.destinatario if entrega else None) or (cliente.nombreCompleto if cliente else None) or '-')}",
-        f"Tel?fono destino: {str((entrega.telefonoDestino if entrega else None) or (cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
+        f"Telefono: {str((entrega.telefonoDestino if entrega else None) or (cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
         f"Barrio: {str((entrega.barrioNombre if entrega else None) or 'Recoger en Tienda')}",
         f"Zona: {zona_label}",
-        f"Direcci?n: {str((entrega.direccion if entrega else None) or 'Recoger en Tienda')}",
-        "Producto(s):",
+        "Direccion:",
+        str((entrega.direccion if entrega else None) or "Recoger en Tienda"),
+        "----------------------------------------",
+        "PRODUCTOS",
         productos_texto,
-        "Observaciones:",
+        "----------------------------------------",
+        "OBSERVACIONES",
         str(observaciones),
+        "----------------------------------------",
         f"Subtotal: {_money_cop(pedido.totalBruto)}",
         f"Domicilio: {_money_cop(getattr(pedido, 'costoDomicilio', 0) or 0)}",
         f"Total: {_money_cop(pedido.totalNeto)}",
+        "----------------------------------------",
         f"Operador: {operador_nombre}",
-        f"Mensaje: {mensaje_final}",
+        f"Celular Flora: {celular_flora}",
+        "",
+        mensaje_final,
     ]
 
     pdf_bytes = _render_factura_pdf(contenido_lineas)
