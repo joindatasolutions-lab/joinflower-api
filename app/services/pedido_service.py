@@ -219,20 +219,19 @@ def _resolve_costo_domicilio(
     return Decimal("0.00")
 
 
-def _merge_checkout_productos(productos: list) -> list:
-    merged: dict[int, dict] = {}
-    ordered_ids: list[int] = []
+def _expand_checkout_productos(productos: list) -> list[dict]:
+    expanded: list[dict] = []
     for item in productos:
         producto_id = int(item.productoID)
-        if producto_id not in merged:
-            merged[producto_id] = {
-                "productoID": producto_id,
-                "cantidad": int(item.cantidad),
-            }
-            ordered_ids.append(producto_id)
-        else:
-            merged[producto_id]["cantidad"] += int(item.cantidad)
-    return [merged[producto_id] for producto_id in ordered_ids]
+        cantidad = max(int(item.cantidad), 0)
+        for _ in range(cantidad):
+            expanded.append(
+                {
+                    "productoID": producto_id,
+                    "cantidad": 1,
+                }
+            )
+    return expanded
 
 
 def _crear_pedido_checkout_unitario(
@@ -413,7 +412,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             barrio_id=payload.entrega.barrioID,
             barrio_nombre=payload.entrega.barrioNombre,
         )
-        productos_normalizados = _merge_checkout_productos(payload.productos)
+        productos_normalizados = _expand_checkout_productos(payload.productos)
         pedidos_creados: list[Pedido] = []
 
         primer_producto = productos_map[int(productos_normalizados[0]["productoID"])]

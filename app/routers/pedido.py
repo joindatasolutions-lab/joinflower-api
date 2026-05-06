@@ -1207,8 +1207,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                     ),
                     producto=producto,
                 ),
-                precioUnitario=float(detalle.precioUnitario or 0),
-                subtotal=float(detalle.subtotal or 0),
+                precioUnitario=float(Decimal(str(detalle.precioUnitario or 0)).quantize(Decimal("1"))),
+                subtotal=float(Decimal(str(detalle.subtotal or 0)).quantize(Decimal("1"))),
             )
             for detalle, producto in detalles
         ]
