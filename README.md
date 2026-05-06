@@ -47,7 +47,13 @@ DATABASE_NAME=joinflower
 DATABASE_USER=tu_usuario
 DATABASE_PASSWORD=tu_password
 JWT_SECRET_KEY=cambia-esta-clave
+DB_POOL_SIZE=3
+DB_MAX_OVERFLOW=2
+DB_POOL_TIMEOUT=30
+DB_POOL_RECYCLE=1800
 ```
+
+Para Cloud Run/Cloud SQL conviene mantener un pool pequeno por instancia y escalar por concurrencia del servicio, no por conexiones abiertas a PostgreSQL.
 
 ## 4) Instalacion y ejecucion
 

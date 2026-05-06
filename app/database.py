@@ -21,6 +21,10 @@ INSTANCE_CONNECTION_NAME = (
     or os.getenv("DB_INSTANCE_CONNECTION_NAME")
 )
 DB_SOCKET_DIR = os.getenv("DB_SOCKET_DIR", "/cloudsql")
+DB_POOL_SIZE = max(1, int(os.getenv("DB_POOL_SIZE", "3")))
+DB_MAX_OVERFLOW = max(0, int(os.getenv("DB_MAX_OVERFLOW", "2")))
+DB_POOL_TIMEOUT = max(5, int(os.getenv("DB_POOL_TIMEOUT", "30")))
+DB_POOL_RECYCLE = max(60, int(os.getenv("DB_POOL_RECYCLE", "1800")))
 
 
 def _build_database_url() -> str:
@@ -53,10 +57,10 @@ DATABASE_URL = _build_database_url()
 engine = create_engine(
     DATABASE_URL,
     connect_args={"options": "-csearch_path=petalops"},
-    pool_size=10,
-    max_overflow=20,
-    pool_timeout=30,
-    pool_recycle=1800,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_timeout=DB_POOL_TIMEOUT,
+    pool_recycle=DB_POOL_RECYCLE,
     pool_pre_ping=True,
     echo=False,
 )
