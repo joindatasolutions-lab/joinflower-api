@@ -74,16 +74,30 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
 
 
 STRUCTURAL_ROLES = {"super_admin", "join_superadmin", "empresa_admin", "admin"}
-DEFAULT_MODULES = {"pedidos", "produccion", "domicilios", "catalogo", "usuarios", "inventario","reportes"}
+DEFAULT_MODULES = {
+    "pipeline",
+    "pedidos",
+    "produccion",
+    "domicilios",
+    "inventario",
+    "contabilidad",
+    "clientes",
+    "usuarios",
+    "catalogo",
+    "reportes",
+}
 
 DEFAULT_ROLE_MODULE_POLICY = {
     "Admin": {
+        "pipeline": (1, 1, 1, 1),
         "pedidos": (1, 1, 1, 1),
         "produccion": (1, 1, 1, 1),
         "domicilios": (1, 1, 1, 1),
         "catalogo": (1, 1, 1, 1),
         "usuarios": (1, 1, 1, 1),
         "inventario": (1, 1, 1, 1),
+        "contabilidad": (1, 1, 1, 1),
+        "clientes": (1, 1, 1, 1),
     },
     "Florista": {
         "produccion": (1, 1, 1, 0),
@@ -92,6 +106,8 @@ DEFAULT_ROLE_MODULE_POLICY = {
     "Pedidos": {
         "pedidos": (1, 1, 1, 0),
         "catalogo": (1, 0, 0, 0),
+        "contabilidad": (1, 0, 0, 0),
+        "clientes": (1, 0, 0, 0),
     },
     "Domiciliario": {
         "domicilios": (1, 1, 1, 0),
@@ -104,6 +120,7 @@ DEFAULT_ROLE_MODULE_POLICY = {
         "pedidos": (1, 1, 0, 0),
         "produccion": (1, 1, 0, 0),
         "inventario": (1, 0, 0, 0),
+        "pipeline": (1, 0, 0, 0),
     },
 }
 
@@ -311,7 +328,7 @@ def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaMod
         except SQLAlchemyError:
             active_rows = []
 
-    if not has_plan_rows and not overrides:
+    if not has_plan_rows:
         active_from_plan = set(DEFAULT_MODULES)
 
     items = []
@@ -413,6 +430,35 @@ def _next_florista_internal_number(db: Session, empresa_id: int, sucursal_id: in
     return int((row[0] if row and row[0] is not None else 0)) + 1
 
 
+def _employee_sync_email_value(db: Session, usuario: Usuario, empleado_id: int | None = None) -> str:
+    requested_email = str(usuario.email or "").strip().lower()
+    if requested_email:
+        duplicate = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND lower(COALESCE(email, '')) = :email
+                  AND (:empleado_id IS NULL OR id_empleado <> :empleado_id)
+                LIMIT 1
+                """
+            ),
+            {
+                "empresa_id": int(usuario.empresaID),
+                "email": requested_email,
+                "empleado_id": (int(empleado_id) if empleado_id is not None else None),
+            },
+        ).first()
+        if not duplicate:
+            return requested_email
+
+    login_base = str(usuario.login or "").strip().lower().replace(" ", "")
+    if not login_base:
+        login_base = f"user{int(usuario.idusuario)}"
+    return f"{login_base}+emp{int(usuario.empresaID)}@empleado.local"
+
+
 def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, rol_nombre: str) -> None:
     role_name = normalize_role_name(rol_nombre)
     cargo = str(rol_nombre or "").strip() or "Operativo"
@@ -433,6 +479,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
 
     empleado_id: int | None = int(empleado["id_empleado"]) if empleado else None
     activo_flag = 1 if str(usuario.estado or "").strip().lower() == "activo" else 0
+    employee_email = _employee_sync_email_value(db, usuario, empleado_id)
 
     if empleado_id is None:
         empleado_id = int(
@@ -457,7 +504,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     "cargo": cargo,
                     "activo": activo_flag,
                     "usuario_login": str(usuario.login or "").strip(),
-                    "email": str(usuario.email or "").strip(),
+                    "email": employee_email,
                     "password_hash": str(usuario.passwordHash or "").strip(),
                     "usuario_id": int(usuario.idusuario),
                 },
@@ -488,7 +535,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                 "cargo": cargo,
                 "activo": activo_flag,
                 "usuario_login": str(usuario.login or "").strip(),
-                "email": str(usuario.email or "").strip(),
+                "email": employee_email,
                 "password_hash": str(usuario.passwordHash or "").strip(),
             },
         )
@@ -759,6 +806,8 @@ def crear_usuario(
         if not is_super_admin_context(auth) and target_empresa_id != int(auth.empresaID):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes crear usuarios para otra empresa")
 
+        _ensure_default_operational_roles(db, target_empresa_id)
+
         login = payload.login.strip().lower()
         email = payload.email.strip().lower()
         estado = (payload.estado or "Activo").strip().title()
@@ -960,6 +1009,7 @@ def actualizar_usuario(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para actualizar usuarios")
 
         usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
+        _ensure_default_operational_roles(db, int(usuario.empresaID))
 
         login = payload.login.strip().lower()
         email = payload.email.strip().lower()
@@ -1357,6 +1407,7 @@ def listar_modulos_empresa(
         if not is_super_admin_context(auth):
             empresa_id = int(auth.empresaID)
         normalized_empresa_id = _resolve_empresa_id_for_module_admin(db, empresa_id)
+        _ensure_default_operational_roles(db, normalized_empresa_id)
 
         cache_key = f"empresa_config:{normalized_empresa_id}"
         cached = get_cache(cache_key)

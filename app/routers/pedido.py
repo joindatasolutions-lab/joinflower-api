@@ -1437,7 +1437,7 @@ def actualizar_detalle_pedido(
                     },
                 )
 
-            nuevo_precio = Decimal(str(payload.productoPrecio)).quantize(Decimal("0.01"))
+            nuevo_precio = Decimal(str(payload.productoPrecio)).quantize(Decimal("1"))
             if nuevo_precio <= 0:
                 raise HTTPException(
                     status_code=400,
