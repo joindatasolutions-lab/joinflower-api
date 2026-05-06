@@ -2006,6 +2006,8 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
         )
         pedido.numeroPedido = numero_pedido
         pedido.codigoPedido = codigo_pedido
+    if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
+        raise HTTPException(status_code=500, detail="No fue posible asignar el número del pedido al aprobar.")
 
     pedido.estadoPedidoID = estado_aprobado.idEstadoPedido
     pedido.motivoRechazo = None
@@ -2301,6 +2303,8 @@ def cambiar_estado(
             )
             pedido.numeroPedido = numero_pedido
             pedido.codigoPedido = codigo_pedido
+        if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
+            raise HTTPException(status_code=500, detail="No fue posible asignar el número del pedido al aprobar.")
         approval_gate = _approval_gate_summary(
             db,
             pedido_id=int(pedido.idPedido),
