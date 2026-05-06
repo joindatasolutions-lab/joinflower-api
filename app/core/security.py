@@ -365,12 +365,15 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         rol_nombre = "super_admin"
         # Superadmin no depende de plan para acceder a módulos.
         modulos_plan: set[str] = {
+            "pipeline",
             "pedidos",
             "produccion",
             "domicilios",
             "catalogo",
             "usuarios",
             "inventario",
+            "contabilidad",
+            "trazabilidad",
             "reportes",
             "clientes",
         }
@@ -429,12 +432,15 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
 
         if not modulos_plan:
             modulos_plan = {
+                "pipeline",
                 "pedidos",
                 "produccion",
                 "domicilios",
                 "catalogo",
                 "usuarios",
                 "inventario",
+                "contabilidad",
+                "trazabilidad",
                 "reportes",
                 "clientes",
             }

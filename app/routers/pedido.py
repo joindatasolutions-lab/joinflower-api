@@ -8,7 +8,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import or_, cast, String, func, text
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 import textwrap
 from reportlab.lib.pagesizes import A4
@@ -257,6 +257,88 @@ def _is_lock_not_available_error(exc: OperationalError) -> bool:
 
 def _dias_anticipacion_produccion() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
+
+
+def _ensure_pedido_auditoria_table(db: Session):
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS petalops.pedido_auditoria (
+              id_audit BIGSERIAL PRIMARY KEY,
+              empresa_id BIGINT NOT NULL,
+              sucursal_id BIGINT NOT NULL,
+              pedido_id BIGINT NOT NULL,
+              actor_user_id BIGINT,
+              actor_login VARCHAR(120) NOT NULL,
+              accion VARCHAR(60) NOT NULL,
+              estado_origen_id BIGINT,
+              estado_destino_id BIGINT,
+              detalle_json TEXT,
+              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+    )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_auditoria_empresa_fecha ON petalops.pedido_auditoria (empresa_id, created_at DESC);"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_auditoria_pedido ON petalops.pedido_auditoria (empresa_id, pedido_id);"))
+
+
+def _audit_pedido_action(
+    db: Session,
+    actor,
+    pedido: Pedido,
+    accion: str,
+    estado_origen_id: int | None,
+    estado_destino_id: int | None,
+    extra: dict | None = None,
+):
+    _ensure_pedido_auditoria_table(db)
+    payload = json.dumps(extra or {}, ensure_ascii=True)
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.pedido_auditoria (
+                empresa_id,
+                sucursal_id,
+                pedido_id,
+                actor_user_id,
+                actor_login,
+                accion,
+                estado_origen_id,
+                estado_destino_id,
+                detalle_json,
+                created_at
+            )
+            VALUES (
+                :empresa_id,
+                :sucursal_id,
+                :pedido_id,
+                :actor_user_id,
+                :actor_login,
+                :accion,
+                :estado_origen_id,
+                :estado_destino_id,
+                :detalle_json,
+                CURRENT_TIMESTAMP
+            )
+            """
+        ),
+        {
+            "empresa_id": int(pedido.empresaID),
+            "sucursal_id": int(pedido.sucursalID),
+            "pedido_id": int(pedido.idPedido),
+            "actor_user_id": (int(getattr(actor, "userID", 0)) if getattr(actor, "userID", None) is not None else None),
+            "actor_login": str(
+                getattr(actor, "login", None)
+                or getattr(actor, "nombre", None)
+                or "system"
+            ).strip() or "system",
+            "accion": str(accion or "").strip() or "ACCION_PEDIDO",
+            "estado_origen_id": (int(estado_origen_id) if estado_origen_id is not None else None),
+            "estado_destino_id": (int(estado_destino_id) if estado_destino_id is not None else None),
+            "detalle_json": payload,
+        },
+    )
 
 
 def _scheduled_entrega_datetime(entrega: Entrega | None) -> datetime | None:
@@ -1756,6 +1838,118 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
+@router.get("/pedidos/trazabilidad/aprobaciones", dependencies=[Depends(require_module_access("trazabilidad", "puedeVer"))])
+def trazabilidad_aprobaciones_pedidos(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha_desde: date = Query(..., alias="fechaDesde"),
+    fecha_hasta: date = Query(..., alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+    _ensure_pedido_auditoria_table(db)
+
+    params = {
+        "empresa_id": int(empresa_id),
+        "fecha_desde": datetime.combine(fecha_desde, datetime.min.time()),
+        "fecha_hasta": datetime.combine(fecha_hasta, datetime.max.time()),
+    }
+    sucursal_filter = ""
+    if sucursal_id is not None:
+        params["sucursal_id"] = int(sucursal_id)
+        sucursal_filter = " AND pa.sucursal_id = :sucursal_id "
+
+    rows = db.execute(
+        text(
+            f"""
+            SELECT
+              pa.actor_user_id,
+              pa.actor_login,
+              pa.pedido_id,
+              pa.sucursal_id,
+              pa.accion,
+              pa.created_at,
+              p.numero_pedido,
+              p.codigo_pedido,
+              p.total_neto,
+              c.nombre_completo AS cliente
+            FROM petalops.pedido_auditoria pa
+            LEFT JOIN petalops.pedido p
+              ON p.empresa_id = pa.empresa_id
+             AND p.id_pedido = pa.pedido_id
+            LEFT JOIN petalops.cliente c
+              ON c.empresa_id = pa.empresa_id
+             AND c.id_cliente = p.cliente_id
+            WHERE pa.empresa_id = :empresa_id
+              AND pa.accion IN ('APROBAR_PEDIDO', 'APROBAR_PEDIDO_PIPELINE')
+              AND pa.created_at >= :fecha_desde
+              AND pa.created_at <= :fecha_hasta
+              {sucursal_filter}
+            ORDER BY pa.created_at DESC
+            """
+        ),
+        params,
+    ).mappings().all()
+
+    resumen: dict[str, dict] = {}
+    detalle = []
+    for row in rows:
+        actor_login = str(row.get("actor_login") or "system").strip() or "system"
+        bucket = resumen.setdefault(
+            actor_login,
+            {
+                "usuarioID": (int(row["actor_user_id"]) if row.get("actor_user_id") is not None else None),
+                "usuario": actor_login,
+                "pedidos": set(),
+                "valorTotal": Decimal("0"),
+                "ultimoMovimiento": None,
+            },
+        )
+        pedido_id = int(row.get("pedido_id") or 0)
+        if pedido_id:
+            bucket["pedidos"].add(pedido_id)
+        bucket["valorTotal"] += Decimal(str(row.get("total_neto") or 0))
+        created_at = row.get("created_at")
+        if bucket["ultimoMovimiento"] is None or (created_at and created_at > bucket["ultimoMovimiento"]):
+            bucket["ultimoMovimiento"] = created_at
+
+        detalle.append(
+            {
+                "usuarioID": bucket["usuarioID"],
+                "usuario": actor_login,
+                "pedidoID": pedido_id,
+                "sucursalID": (int(row["sucursal_id"]) if row.get("sucursal_id") is not None else None),
+                "numeroPedido": (int(row["numero_pedido"]) if row.get("numero_pedido") is not None else None),
+                "codigoPedido": (str(row.get("codigo_pedido") or "").strip() or None),
+                "cliente": str(row.get("cliente") or "-"),
+                "accion": str(row.get("accion") or ""),
+                "fechaAccion": created_at,
+                "totalPedido": float(Decimal(str(row.get("total_neto") or 0)).quantize(Decimal("0.01"))),
+            }
+        )
+
+    resumen_items = sorted(
+        [
+            {
+                "usuarioID": data["usuarioID"],
+                "usuario": data["usuario"],
+                "pedidosAprobados": len(data["pedidos"]),
+                "valorTotal": float(data["valorTotal"].quantize(Decimal("0.01"))),
+                "ultimoMovimiento": data["ultimoMovimiento"],
+            }
+            for data in resumen.values()
+        ],
+        key=lambda item: (-int(item["pedidosAprobados"]), item["usuario"]),
+    )
+
+    return {
+        "resumen": resumen_items,
+        "detalle": detalle,
+        "total": len(detalle),
+    }
+
+
 @router.put("/pedido/{pedido_id}/aprobar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
@@ -1802,6 +1996,8 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     ):
         raise HTTPException(status_code=400, detail="Transición de estado no permitida")
 
+    estado_origen_id = int(pedido.estadoPedidoID)
+
     if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
         numero_pedido, codigo_pedido = generar_numeracion_pedido(
             db=db,
@@ -1820,6 +2016,18 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
         pedido=pedido,
         dias_anticipacion=_dias_anticipacion_produccion(),
         usuario="pedido.aprobar",
+    )
+    _audit_pedido_action(
+        db=db,
+        actor=auth,
+        pedido=pedido,
+        accion="APROBAR_PEDIDO",
+        estado_origen_id=estado_origen_id,
+        estado_destino_id=int(estado_aprobado.idEstadoPedido),
+        extra={
+            "numeroPedido": int(pedido.numeroPedido or 0),
+            "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+        },
     )
 
     db.commit()
@@ -2105,6 +2313,18 @@ def cambiar_estado(
             pedido=pedido,
             dias_anticipacion=_dias_anticipacion_produccion(),
             usuario="pedido.cambiar_estado",
+        )
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="APROBAR_PEDIDO_PIPELINE",
+            estado_origen_id=int(estado_actual),
+            estado_destino_id=int(nuevo_estado_id),
+            extra={
+                "numeroPedido": int(pedido.numeroPedido or 0),
+                "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+            },
         )
 
     db.commit()
