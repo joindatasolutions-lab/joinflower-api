@@ -12,6 +12,7 @@ from app.core.security import (
     JWT_EXPIRE_MINUTES,
     _quote_ident,
     _resolve_table_spec,
+    apply_role_module_limits,
     auth_schema_error,
     create_access_token,
     get_current_auth_context,
@@ -107,9 +108,8 @@ DEFAULT_ROLE_MODULE_POLICY = {
     },
     "Pedidos": {
         "pedidos": (1, 1, 1, 0),
-        "catalogo": (1, 0, 0, 0),
-        "contabilidad": (1, 0, 0, 0),
-        "clientes": (1, 0, 0, 0),
+        "produccion": (1, 0, 0, 0),
+        "domicilios": (1, 1, 1, 0),
     },
     "Domiciliario": {
         "domicilios": (1, 1, 1, 0),
@@ -404,11 +404,13 @@ def _get_target_user_for_admin(db: Session, auth, user_id: int) -> tuple[Usuario
     return usuario, target_role
 
 
-def _load_user_modules(db: Session, user_id: int) -> list[str]:
+def _load_user_modules(db: Session, user_id: int, role_name: str | None = None) -> list[str]:
     overrides = load_usuario_module_overrides(db, int(user_id))
     if not overrides:
         return []
-    return sorted([modulo for modulo, activo in overrides.items() if bool(activo)])
+    modules = {modulo for modulo, activo in overrides.items() if bool(activo)}
+    limited_modules, _ = apply_role_module_limits(role_name, modules, {})
+    return sorted(limited_modules)
 
 
 def _next_florista_internal_number(db: Session, empresa_id: int, sucursal_id: int | None) -> int:
@@ -994,7 +996,7 @@ def obtener_usuario(
         rolID=int(usuario.rolID),
         rol=rol_nombre,
         estado=str(usuario.estado or ""),
-        modulosAcceso=_load_user_modules(db, int(usuario.idusuario)),
+        modulosAcceso=_load_user_modules(db, int(usuario.idusuario), rol_nombre),
         ultimoLogin=usuario.ultimoLogin,
     )
 

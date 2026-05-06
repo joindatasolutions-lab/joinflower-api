@@ -108,6 +108,9 @@ def is_global_join_login(login: str | None) -> bool:
 
 ROLE_SUPER_ADMIN = {"super_admin", "join_superadmin"}
 ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin", "empresa_admin_impersonado"}
+ROLE_MODULE_LIMITS = {
+    "pedidos": {"pedidos", "produccion", "domicilios"},
+}
 
 
 def is_super_admin_context(auth: AuthContext) -> bool:
@@ -118,6 +121,31 @@ def is_empresa_admin_context(auth: AuthContext) -> bool:
     if is_super_admin_context(auth):
         return True
     return normalize_role_name(auth.rol) in ROLE_EMPRESA_ADMIN
+
+
+def apply_role_module_limits(
+    role_name: str | None,
+    modulos_activos: set[str],
+    permisos: dict[str, dict[str, bool]],
+) -> tuple[set[str], dict[str, dict[str, bool]]]:
+    normalized_role = normalize_role_name(role_name)
+    allowed_modules = ROLE_MODULE_LIMITS.get(normalized_role)
+    if not allowed_modules:
+        return modulos_activos, permisos
+
+    limited_modules = {modulo for modulo in modulos_activos if modulo in allowed_modules}
+    limited_permissions: dict[str, dict[str, bool]] = {}
+    for modulo, data in permisos.items():
+        if modulo in allowed_modules:
+            limited_permissions[modulo] = data
+            continue
+        limited_permissions[modulo] = {
+            "puedeVer": False,
+            "puedeCrear": False,
+            "puedeEditar": False,
+            "puedeEliminar": False,
+        }
+    return limited_modules, limited_permissions
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
@@ -577,6 +605,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
                     data["puedeCrear"] = False
                     data["puedeEditar"] = False
                     data["puedeEliminar"] = False
+
+        modulos_plan, permisos = apply_role_module_limits(rol_nombre, modulos_plan, permisos)
 
     return AuthContext(
         userID=user_id,
