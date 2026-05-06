@@ -109,7 +109,7 @@ def is_global_join_login(login: str | None) -> bool:
 ROLE_SUPER_ADMIN = {"super_admin", "join_superadmin"}
 ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin", "empresa_admin_impersonado"}
 ROLE_MODULE_LIMITS = {
-    "pedidos": {"pedidos", "produccion", "domicilios"},
+    "pedidos": {"pedidos", "domicilios"},
 }
 ROLE_PERMISSION_BASELINES = {
     "pedidos": {
@@ -117,12 +117,6 @@ ROLE_PERMISSION_BASELINES = {
             "puedeVer": True,
             "puedeCrear": True,
             "puedeEditar": True,
-            "puedeEliminar": False,
-        },
-        "produccion": {
-            "puedeVer": True,
-            "puedeCrear": False,
-            "puedeEditar": False,
             "puedeEliminar": False,
         },
         "domicilios": {

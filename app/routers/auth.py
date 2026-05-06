@@ -108,7 +108,6 @@ DEFAULT_ROLE_MODULE_POLICY = {
     },
     "Pedidos": {
         "pedidos": (1, 1, 1, 0),
-        "produccion": (1, 0, 0, 0),
         "domicilios": (1, 1, 1, 0),
     },
     "Domiciliario": {
