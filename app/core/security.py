@@ -111,6 +111,28 @@ ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin", "empresa_admin_impersonado"}
 ROLE_MODULE_LIMITS = {
     "pedidos": {"pedidos", "produccion", "domicilios"},
 }
+ROLE_PERMISSION_BASELINES = {
+    "pedidos": {
+        "pedidos": {
+            "puedeVer": True,
+            "puedeCrear": True,
+            "puedeEditar": True,
+            "puedeEliminar": False,
+        },
+        "produccion": {
+            "puedeVer": True,
+            "puedeCrear": False,
+            "puedeEditar": False,
+            "puedeEliminar": False,
+        },
+        "domicilios": {
+            "puedeVer": True,
+            "puedeCrear": True,
+            "puedeEditar": True,
+            "puedeEliminar": False,
+        },
+    },
+}
 
 
 def is_super_admin_context(auth: AuthContext) -> bool:
@@ -133,11 +155,25 @@ def apply_role_module_limits(
     if not allowed_modules:
         return modulos_activos, permisos
 
+    baseline_permissions = ROLE_PERMISSION_BASELINES.get(normalized_role, {})
     limited_modules = {modulo for modulo in modulos_activos if modulo in allowed_modules}
+    limited_modules.update(baseline_permissions.keys())
     limited_permissions: dict[str, dict[str, bool]] = {}
-    for modulo, data in permisos.items():
+    known_modules = set(permisos.keys()).union(allowed_modules).union(baseline_permissions.keys())
+    for modulo in known_modules:
         if modulo in allowed_modules:
-            limited_permissions[modulo] = data
+            limited_permissions[modulo] = {
+                **baseline_permissions.get(
+                    modulo,
+                    {
+                        "puedeVer": False,
+                        "puedeCrear": False,
+                        "puedeEditar": False,
+                        "puedeEliminar": False,
+                    },
+                ),
+                **permisos.get(modulo, {}),
+            }
             continue
         limited_permissions[modulo] = {
             "puedeVer": False,
