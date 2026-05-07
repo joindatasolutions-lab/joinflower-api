@@ -22,8 +22,8 @@ class ProduccionAsignarRequest(BaseModel):
 class ProduccionReasignarRequest(BaseModel):
     floristaNuevoID: Optional[int] = None
     fechaProgramadaProduccion: Optional[date] = None
-    motivo: str
-    usuarioCambio: str
+    motivo: Optional[str] = None
+    usuarioCambio: Optional[str] = None
 
 
 class ProduccionEstadoRequest(BaseModel):

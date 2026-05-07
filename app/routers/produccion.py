@@ -853,10 +853,10 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
 
 @router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    if not payload.motivo.strip():
-        raise HTTPException(status_code=400, detail="motivo es obligatorio")
-    if not payload.usuarioCambio.strip():
-        raise HTTPException(status_code=400, detail="usuarioCambio es obligatorio")
+    usuario_cambio = str(payload.usuarioCambio or auth.login or auth.nombre or "system").strip()
+    if not usuario_cambio:
+        usuario_cambio = "system"
+    motivo = str(payload.motivo or "").strip() or "Reasignación desde panel de producción"
 
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
         produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
@@ -870,8 +870,8 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
     wrapper = ProduccionAsignarRequest(
         floristaID=payload.floristaNuevoID,
         fechaProgramadaProduccion=payload.fechaProgramadaProduccion,
-        motivo=payload.motivo,
-        usuarioCambio=payload.usuarioCambio,
+        motivo=motivo,
+        usuarioCambio=usuario_cambio,
     )
     return asignar_produccion(produccion_id, wrapper, db, auth)
 

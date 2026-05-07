@@ -1,6 +1,6 @@
 ﻿import json
 import os
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -147,6 +147,10 @@ def _money_cop(value: float | int | None) -> str:
 
 def _round_money_decimal(value: Decimal | int | float | None) -> Decimal:
     return Decimal(str(value or 0)).quantize(Decimal("0.01"))
+
+
+def _quantize_peso_entero(value: Decimal | int | float | None) -> Decimal:
+    return Decimal(str(value or 0)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
 
 def _estado_permite_factura(value: str | None) -> bool:
@@ -1628,8 +1632,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                     ),
                     producto=producto,
                 ),
-                precioUnitario=float(Decimal(str(detalle.precioUnitario or 0)).quantize(Decimal("1"))),
-                subtotal=float(Decimal(str(detalle.subtotal or 0)).quantize(Decimal("1"))),
+                precioUnitario=float(_quantize_peso_entero(detalle.precioUnitario or 0)),
+                subtotal=float(_quantize_peso_entero(detalle.subtotal or 0)),
             )
             for detalle, producto in detalles
         ]
@@ -1902,7 +1906,7 @@ def actualizar_detalle_pedido(
                     },
                 )
 
-            nuevo_precio = Decimal(str(payload.productoPrecio)).quantize(Decimal("1"))
+            nuevo_precio = _quantize_peso_entero(payload.productoPrecio)
             if nuevo_precio <= 0:
                 raise HTTPException(
                     status_code=400,
@@ -2239,7 +2243,7 @@ def agregar_detalle_pedido(
                         "message": "Debes indicar un precio válido para el arreglo personalizado.",
                     },
                 )
-            precio_unitario = Decimal(str(payload.productoPrecio)).quantize(Decimal("1"))
+            precio_unitario = _quantize_peso_entero(payload.productoPrecio)
             if precio_unitario <= 0:
                 raise HTTPException(
                     status_code=400,
