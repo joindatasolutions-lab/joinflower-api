@@ -11,7 +11,7 @@ from sqlalchemy import or_, cast, String, func, text
 from datetime import date, datetime, timezone
 from io import BytesIO
 import textwrap
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from app.database import get_db
 from app.models.producto import Producto
@@ -148,30 +148,70 @@ def _estado_permite_factura(value: str | None) -> bool:
     return estado in {"APROBADO", "PAGADO"}
 
 
+def _ticket_wrap_lines(raw_line: str, width: int) -> list[str]:
+    value = str(raw_line or "")
+    chunks: list[str] = []
+    for paragraph in value.splitlines() or [""]:
+        wrapped = textwrap.wrap(
+            paragraph,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+            replace_whitespace=False,
+            drop_whitespace=False,
+        )
+        if wrapped:
+            chunks.extend(wrapped)
+        else:
+            chunks.append("")
+    return chunks or [""]
+
+
 def _render_factura_pdf(lines: list[str]) -> bytes:
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    margin_x = 40
-    y = height - 45
+    page_width = 80 * mm
+    margin_x = 4 * mm
+    font_size_title = 15
+    font_size_subtitle = 10
+    font_size_body = 10
+    line_height = 13
+    gap_after_block = 3
+    max_chars = 40
 
-    pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawString(margin_x, y, "FLORA - TIENDA DE FLORES")
-    y -= 24
-
-    pdf.setFont("Helvetica", 10)
-    max_chars = 88
-
+    estimated_lines = 0
+    normalized_blocks: list[list[str]] = []
     for raw_line in lines:
-        wrapped = textwrap.wrap(str(raw_line or ""), width=max_chars) or [""]
-        for line in wrapped:
-            if y < 45:
-                pdf.showPage()
-                pdf.setFont("Helvetica", 10)
-                y = height - 45
-            pdf.drawString(margin_x, y, line)
-            y -= 14
-        y -= 2
+        wrapped_block = _ticket_wrap_lines(str(raw_line or ""), width=max_chars)
+        normalized_blocks.append(wrapped_block)
+        estimated_lines += len(wrapped_block) + 1
+
+    content_height = max(estimated_lines * line_height + 28 * mm, 90 * mm)
+    page_height = content_height
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=(page_width, page_height))
+    y = page_height - 6 * mm
+
+    first_block = normalized_blocks[0] if normalized_blocks else []
+    second_block = normalized_blocks[1] if len(normalized_blocks) > 1 else []
+
+    if first_block:
+        pdf.setFont("Helvetica-Bold", font_size_title)
+        title = first_block[0].strip()
+        pdf.drawCentredString(page_width / 2, y, title)
+        y -= 16
+    if second_block:
+        pdf.setFont("Helvetica", font_size_subtitle)
+        subtitle = second_block[0].strip()
+        pdf.drawCentredString(page_width / 2, y, subtitle)
+        y -= 16
+
+    pdf.setFont("Helvetica", font_size_body)
+    for wrapped_block in normalized_blocks[2:]:
+        for line in wrapped_block:
+            text_value = str(line or "")
+            pdf.drawString(margin_x, y, text_value[: max_chars + 6])
+            y -= line_height
+        y -= gap_after_block
 
     pdf.save()
     buffer.seek(0)
@@ -1861,12 +1901,13 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         .all()
     )
 
-    lineas_productos = []
+    lineas_productos: list[str] = []
     observaciones_producto = []
     for detalle, producto in detalles:
         descripcion = str((producto.nombreProducto if producto else None) or "Producto").strip()
         cantidad = int(round(float(detalle.cantidad or 0)))
-        lineas_productos.append(f"- {descripcion} | Cantidad: {cantidad}")
+        lineas_productos.append(f"- {descripcion}")
+        lineas_productos.append(f"  Cantidad: {cantidad}")
         observacion_detalle = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
         if observacion_detalle:
             observaciones_producto.append(observacion_detalle)
@@ -1894,7 +1935,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     fecha_entrega_label = fecha_entrega_programada.strftime("%Y-%m-%d") if fecha_entrega_programada else "No especificada"
     zona_label = f"Zona {int(barrio.zonaID)}" if barrio and getattr(barrio, "zonaID", None) is not None else "Sin zona"
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
-    mensaje_final = str((entrega.mensaje if entrega else None) or "Gracias por su compra").strip() or "Gracias por su compra"
+    mensaje_final = "Gracias por su compra ✿"
     numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
     celular_flora = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
 
@@ -1933,7 +1974,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         "----------------------------------------",
         f"Operador: {operador_nombre}",
         f"Celular Flora: {celular_flora}",
-        "",
+        "----------------------------------------",
         mensaje_final,
     ]
 
