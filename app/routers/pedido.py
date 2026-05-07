@@ -2490,6 +2490,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
     fecha_entrega_label = fecha_entrega_programada.strftime("%Y-%m-%d") if fecha_entrega_programada else "No especificada"
+    hora_entrega_label = str((entrega.rangoHora if entrega else None) or "No especificada").strip() or "No especificada"
     zona_label = f"Zona {int(barrio.zonaID)}" if barrio and getattr(barrio, "zonaID", None) is not None else "Sin zona"
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
     mensaje_final = "Gracias por su compra ✿"
@@ -2515,6 +2516,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Pedido: #{numero_legible}",
         f"Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
         f"Entrega: {fecha_entrega_label}",
+        f"Hora entrega: {hora_entrega_label}",
         "----------------------------------------",
         "CLIENTE",
         f"Nombre: {str((cliente.nombreCompleto if cliente else None) or '-')}",
