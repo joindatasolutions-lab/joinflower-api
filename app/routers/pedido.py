@@ -1727,6 +1727,9 @@ class ActualizarDetallePedidoRequest(BaseModel):
     productoObservaciones: str | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
+    clienteNombre: str | None = None
+    clienteTelefono: str | None = None
+    clienteEmail: str | None = None
     clienteTipoIdent: str | None = None
     clienteIdentificacion: str | None = None
     destinatarioNombre: str | None = None
@@ -1922,6 +1925,15 @@ def actualizar_detalle_pedido(
             detalle.cantidad = cantidad
             needs_totals_recalc = True
 
+        if payload.clienteNombre is not None:
+            cliente.nombreCompleto = str(payload.clienteNombre).strip() or cliente.nombreCompleto
+        if payload.clienteTelefono is not None:
+            telefono_cliente = str(payload.clienteTelefono).strip()
+            cliente.telefono = telefono_cliente or None
+            if hasattr(cliente, "telefonoCompleto"):
+                cliente.telefonoCompleto = telefono_cliente or None
+        if payload.clienteEmail is not None:
+            cliente.email = str(payload.clienteEmail).strip().lower() or None
         if payload.clienteTipoIdent is not None:
             cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
             needs_totals_recalc = True
