@@ -2397,6 +2397,7 @@ def eliminar_detalle_pedido(
             )
 
         db.delete(detalle)
+        db.flush()
         cliente = db.query(Cliente).filter(Cliente.idCliente == pedido.clienteID).first()
         _recalculate_pedido_financials(
             db,
