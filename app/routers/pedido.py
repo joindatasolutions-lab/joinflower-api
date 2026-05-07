@@ -81,6 +81,8 @@ FLORA_SALES_CHANNELS = {
     "Presencial",
     "Rappi",
 }
+LINK_PAYMENT_METHODS = {"link bold", "link payu", "link wompi"}
+LINK_SURCHARGE_PCT = Decimal("5.00")
 
 
 def _tenant_order_rules(empresa_id: int) -> dict:
@@ -141,6 +143,10 @@ def _fecha_hora_humano(value: datetime | None) -> str:
 def _money_cop(value: float | int | None) -> str:
     number = int(round(float(value or 0)))
     return f"${number:,}".replace(",", ".")
+
+
+def _round_money_decimal(value: Decimal | int | float | None) -> Decimal:
+    return Decimal(str(value or 0)).quantize(Decimal("0.01"))
 
 
 def _estado_permite_factura(value: str | None) -> bool:
@@ -524,11 +530,16 @@ def _recalculate_pedido_financials(db: Session, *, pedido: Pedido, aplica_iva: b
 
     pedido.totalBruto = total_bruto.quantize(Decimal("0.01"))
     pedido.totalIva = total_iva.quantize(Decimal("0.01"))
-    pedido.totalNeto = (
-        pedido.totalBruto
-        + pedido.totalIva
-        + Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
-    ).quantize(Decimal("0.01"))
+    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
+    ajustes = _build_pedido_adjustments(
+        subtotal=Decimal(str(pedido.totalBruto or 0)),
+        iva=Decimal(str(pedido.totalIva or 0)),
+        domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
+        metodos_pago=list(pago_resumen.get("metodosPago") or []),
+        omitir_recargo_link=bool(pago_resumen.get("omitirRecargoLink")),
+        descuento_pct=Decimal(str(pago_resumen.get("descuentoPct") or 0)),
+    )
+    pedido.totalNeto = ajustes["total"]
 
 
 def _parse_payment_methods(value: str | None) -> list[str]:
@@ -737,7 +748,37 @@ def _extract_canal_flora(raw_respuesta: str | None) -> str | None:
     return text_value or None
 
 
-def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | None) -> str | None:
+def _extract_payment_adjustments(raw_respuesta: str | None) -> dict:
+    payload = _safe_parse_json(raw_respuesta)
+    metadata = payload.get("_petalopsMetadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    omitir_recargo_link = bool(metadata.get("omitirRecargoLink", False))
+    descuento_pct = float(metadata.get("descuentoPct") or 0)
+    recargo_link_pct = float(metadata.get("recargoLinkPct") or 0)
+    recargo_link_monto = float(metadata.get("recargoLinkMonto") or 0)
+    descuento_monto = float(metadata.get("descuentoMonto") or 0)
+
+    return {
+        "omitirRecargoLink": omitir_recargo_link,
+        "descuentoPct": descuento_pct,
+        "recargoLinkPct": recargo_link_pct,
+        "recargoLinkMonto": recargo_link_monto,
+        "descuentoMonto": descuento_monto,
+    }
+
+
+def _serialize_pago_metadata(
+    raw_respuesta: str | None,
+    *,
+    canal_flora: str | None,
+    omitir_recargo_link: bool | None = None,
+    descuento_pct: Decimal | None = None,
+    recargo_link_pct: Decimal | None = None,
+    recargo_link_monto: Decimal | None = None,
+    descuento_monto: Decimal | None = None,
+) -> str | None:
     payload = _safe_parse_json(raw_respuesta)
     metadata = payload.get("_petalopsMetadata")
     if not isinstance(metadata, dict):
@@ -749,6 +790,37 @@ def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | No
     else:
         metadata.pop("canalFlora", None)
 
+    if omitir_recargo_link is not None:
+        metadata["omitirRecargoLink"] = bool(omitir_recargo_link)
+
+    if descuento_pct is not None:
+        pct_value = float(_round_money_decimal(descuento_pct))
+        if pct_value > 0:
+            metadata["descuentoPct"] = pct_value
+        else:
+            metadata.pop("descuentoPct", None)
+
+    if recargo_link_pct is not None:
+        pct_value = float(_round_money_decimal(recargo_link_pct))
+        if pct_value > 0:
+            metadata["recargoLinkPct"] = pct_value
+        else:
+            metadata.pop("recargoLinkPct", None)
+
+    if recargo_link_monto is not None:
+        amount_value = float(_round_money_decimal(recargo_link_monto))
+        if amount_value > 0:
+            metadata["recargoLinkMonto"] = amount_value
+        else:
+            metadata.pop("recargoLinkMonto", None)
+
+    if descuento_monto is not None:
+        amount_value = float(_round_money_decimal(descuento_monto))
+        if amount_value > 0:
+            metadata["descuentoMonto"] = amount_value
+        else:
+            metadata.pop("descuentoMonto", None)
+
     if metadata:
         payload["_petalopsMetadata"] = metadata
     else:
@@ -759,12 +831,78 @@ def _serialize_pago_metadata(raw_respuesta: str | None, *, canal_flora: str | No
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _is_link_payment_method(method_name: str | None) -> bool:
+    return str(method_name or "").strip().lower() in LINK_PAYMENT_METHODS
+
+
+def _is_cash_payment_method(method_name: str | None) -> bool:
+    normalized = str(method_name or "").strip().lower()
+    return "efectivo" in normalized
+
+
+def _build_pedido_adjustments(
+    *,
+    subtotal: Decimal,
+    iva: Decimal,
+    domicilio: Decimal,
+    metodos_pago: list[str],
+    omitir_recargo_link: bool,
+    descuento_pct: Decimal,
+) -> dict:
+    subtotal = _round_money_decimal(subtotal)
+    iva = _round_money_decimal(iva)
+    domicilio = _round_money_decimal(domicilio)
+    base_total = _round_money_decimal(subtotal + iva + domicilio)
+    has_link_payment = any(_is_link_payment_method(item) for item in (metodos_pago or []))
+
+    recargo_link_pct = Decimal("0.00")
+    recargo_link_monto = Decimal("0.00")
+    if has_link_payment and not omitir_recargo_link:
+        recargo_link_pct = LINK_SURCHARGE_PCT
+        recargo_link_monto = _round_money_decimal((base_total * recargo_link_pct) / Decimal("100"))
+
+    descuento_pct = _round_money_decimal(descuento_pct)
+    if descuento_pct < 0:
+        descuento_pct = Decimal("0.00")
+    if descuento_pct > Decimal("100.00"):
+        descuento_pct = Decimal("100.00")
+
+    total_con_recargo = _round_money_decimal(base_total + recargo_link_monto)
+    descuento_monto = _round_money_decimal((total_con_recargo * descuento_pct) / Decimal("100"))
+    total = _round_money_decimal(total_con_recargo - descuento_monto)
+
+    return {
+        "baseTotal": base_total,
+        "hasLinkPayment": has_link_payment,
+        "omitirRecargoLink": bool(omitir_recargo_link),
+        "recargoLinkPct": recargo_link_pct,
+        "recargoLinkMonto": recargo_link_monto,
+        "descuentoPct": descuento_pct,
+        "descuentoMonto": descuento_monto,
+        "total": total,
+    }
+
+
 def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
+    pago_row = db.execute(
+        text(
+            """
+            SELECT metodo_pago, proveedor, referencia, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+    ajustes = _extract_payment_adjustments(pago_row.get("raw_respuesta") if pago_row else None)
+
     if _flora_phase2_ready(db):
         metodos_rows = db.execute(
             text(
                 """
-                SELECT mpc.nombre
+                SELECT mpc.nombre, pm.monto
                 FROM petalops.pago_metodo pm
                 JOIN petalops.metodo_pago_catalogo mpc
                   ON mpc.id_metodo_pago = pm.metodo_pago_id
@@ -791,43 +929,60 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
         ).first()
 
         metodos_pago = [str(row[0]).strip() for row in metodos_rows if row and row[0] is not None]
+        detalle_pago = [
+            {
+                "metodo": str(row[0]).strip(),
+                "monto": float(row[1] or 0),
+            }
+            for row in metodos_rows
+            if row and row[0] is not None
+        ]
+        monto_efectivo = next(
+            (
+                float(item["monto"] or 0)
+                for item in detalle_pago
+                if _is_cash_payment_method(item["metodo"])
+            ),
+            None,
+        )
         if metodos_pago or canal_row:
             metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
             return {
                 "metodoPago": metodo_pago,
                 "metodosPago": metodos_pago,
+                "detallePago": detalle_pago,
+                "montoEfectivo": monto_efectivo,
                 "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
                 "canalFlora": (str(canal_row[0]).strip() if canal_row and canal_row[0] is not None else None),
+                **ajustes,
             }
 
-    row = db.execute(
-        text(
-            """
-            SELECT metodo_pago, proveedor, referencia, raw_respuesta
-            FROM petalops.pago
-            WHERE pedido_id = :pedido_id
-              AND empresa_id = :empresa_id
-            LIMIT 1
-            """
-        ),
-        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
-    ).mappings().first()
-
-    if not row:
+    if not pago_row:
         return {
             "metodoPago": None,
             "metodosPago": [],
+            "detallePago": [],
+            "montoEfectivo": None,
             "cuentaBancaria": None,
             "canalFlora": None,
+            **ajustes,
         }
 
-    metodo_pago = str(row.get("metodo_pago") or "").strip() or None
+    metodo_pago = str(pago_row.get("metodo_pago") or "").strip() or None
     metodos_pago = _parse_payment_methods(metodo_pago)
+    monto_efectivo = (
+        float(pago_row.get("monto") or 0)
+        if any(_is_cash_payment_method(item) for item in metodos_pago)
+        else None
+    )
     return {
         "metodoPago": metodo_pago,
         "metodosPago": metodos_pago,
+        "detallePago": [],
+        "montoEfectivo": monto_efectivo,
         "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
-        "canalFlora": _extract_canal_flora(row.get("raw_respuesta")),
+        "canalFlora": _extract_canal_flora(pago_row.get("raw_respuesta")),
+        **ajustes,
     }
 
 
@@ -856,6 +1011,13 @@ def _upsert_pago_flora(
     monto: Decimal,
     metodos_pago: list[str],
     canal_flora: str | None,
+    detalle_pago: list[dict] | None = None,
+    monto_efectivo: Decimal | None = None,
+    omitir_recargo_link: bool = False,
+    descuento_pct: Decimal | None = None,
+    recargo_link_pct: Decimal | None = None,
+    recargo_link_monto: Decimal | None = None,
+    descuento_monto: Decimal | None = None,
 ):
     row = db.execute(
         text(
@@ -871,7 +1033,15 @@ def _upsert_pago_flora(
     ).mappings().first()
 
     metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
-    raw_respuesta = _serialize_pago_metadata(row.get("raw_respuesta") if row else None, canal_flora=canal_flora)
+    raw_respuesta = _serialize_pago_metadata(
+        row.get("raw_respuesta") if row else None,
+        canal_flora=canal_flora,
+        omitir_recargo_link=omitir_recargo_link,
+        descuento_pct=descuento_pct,
+        recargo_link_pct=recargo_link_pct,
+        recargo_link_monto=recargo_link_monto,
+        descuento_monto=descuento_monto,
+    )
 
     if row:
         db.execute(
@@ -987,10 +1157,30 @@ def _upsert_pago_flora(
         {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
     )
 
+    breakdown_by_method = {}
+    if isinstance(detalle_pago, list):
+        for item in detalle_pago:
+            if not isinstance(item, dict):
+                continue
+            metodo_nombre = str(item.get("metodo") or item.get("metodoPago") or "").strip()
+            if not metodo_nombre:
+                continue
+            breakdown_by_method[metodo_nombre] = _round_money_decimal(item.get("monto") or item.get("valor") or item.get("amount") or 0)
+    elif len(metodos_pago) == 1:
+        breakdown_by_method[metodos_pago[0]] = _round_money_decimal(monto)
+
     for index, metodo in enumerate(metodos_pago, start=1):
         metodo_id = metodo_by_name.get(metodo)
         if metodo_id is None:
             continue
+        monto_metodo = breakdown_by_method.get(metodo)
+        if monto_metodo is None:
+            if len(metodos_pago) == 1:
+                monto_metodo = _round_money_decimal(monto)
+            elif _is_cash_payment_method(metodo) and monto_efectivo is not None:
+                monto_metodo = _round_money_decimal(monto_efectivo)
+            else:
+                monto_metodo = Decimal("0.00")
         db.execute(
             text(
                 """
@@ -999,6 +1189,7 @@ def _upsert_pago_flora(
                     pago_id,
                     pedido_id,
                     metodo_pago_id,
+                    monto,
                     orden,
                     created_at,
                     updated_at
@@ -1007,6 +1198,7 @@ def _upsert_pago_flora(
                     :pago_id,
                     :pedido_id,
                     :metodo_pago_id,
+                    :monto,
                     :orden,
                     NOW(),
                     NOW()
@@ -1018,6 +1210,7 @@ def _upsert_pago_flora(
                 "pago_id": pago_id,
                 "pedido_id": int(pedido_id),
                 "metodo_pago_id": metodo_id,
+                "monto": monto_metodo,
                 "orden": index,
             },
         )
@@ -1384,8 +1577,15 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "estadoPago": None,
                 "metodoPago": pago_resumen["metodoPago"],
                 "metodosPago": pago_resumen["metodosPago"],
+                "detallePago": pago_resumen.get("detallePago") or [],
+                "montoEfectivo": pago_resumen.get("montoEfectivo"),
                 "cuentaBancaria": pago_resumen["cuentaBancaria"],
                 "canalFlora": pago_resumen["canalFlora"],
+                "omitirRecargoLink": bool(pago_resumen.get("omitirRecargoLink")),
+                "descuentoPct": float(pago_resumen.get("descuentoPct") or 0),
+                "recargoLinkPct": float(pago_resumen.get("recargoLinkPct") or 0),
+                "recargoLinkMonto": float(pago_resumen.get("recargoLinkMonto") or 0),
+                "descuentoMonto": float(pago_resumen.get("descuentoMonto") or 0),
             },
             camposEmpresa={"pedidoDetalle": campos_empresa},
             productos=productos,
@@ -1434,6 +1634,10 @@ class ActualizarDetallePedidoRequest(BaseModel):
     mensajeTarjeta: str | None = None
     observacionGeneral: str | None = None
     metodosPago: list[str] | None = None
+    detallePago: list[dict] | None = None
+    montoEfectivo: float | None = None
+    omitirRecargoLink: bool | None = None
+    descuentoPct: float | None = None
     canalFlora: str | None = None
 
 
@@ -1658,6 +1862,7 @@ def actualizar_detalle_pedido(
                         barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
                         barrio_nombre=entrega.barrioNombre,
                     )
+                    needs_totals_recalc = True
                 if payload.latitudDestino is not None:
                     entrega.latitudDestino = payload.latitudDestino
                 if payload.longitudDestino is not None:
@@ -1668,13 +1873,6 @@ def actualizar_detalle_pedido(
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
                 if payload.observacionGeneral is not None:
                     entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
-                if payload.barrioNombre is not None:
-                    pedido.totalNeto = (
-                        Decimal(str(pedido.totalBruto or 0))
-                        + Decimal(str(pedido.totalIva or 0))
-                        + Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
-                    ).quantize(Decimal("0.01"))
-
                 if payload.fechaEntrega is not None:
                     fecha_base = entrega.fechaEntregaProgramada or entrega.fechaEntrega
                     fecha_programada = produccion_service.calcular_fecha_programada(
@@ -1703,11 +1901,20 @@ def actualizar_detalle_pedido(
                 aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
             )
 
-        if payload.metodosPago is not None or payload.canalFlora is not None:
+        if (
+            payload.metodosPago is not None
+            or payload.canalFlora is not None
+            or payload.omitirRecargoLink is not None
+            or payload.descuentoPct is not None
+            or payload.detallePago is not None
+            or payload.montoEfectivo is not None
+        ):
             menu_config = _load_empresa_menu_config(db, empresa_id=int(pedido.empresaID))
             payment_field = menu_config.get("pedido_metodos_pago")
             channel_field = menu_config.get("pedido_canal_venta")
-            metodos_pago = [str(item or "").strip() for item in (payload.metodosPago or []) if str(item or "").strip()]
+            pago_resumen_actual = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
+            metodos_fuente = payload.metodosPago if payload.metodosPago is not None else pago_resumen_actual.get("metodosPago")
+            metodos_pago = [str(item or "").strip() for item in (metodos_fuente or []) if str(item or "").strip()]
             allowed_payment_methods = set(payment_field["opciones"]) if payment_field else set()
             invalid_payment_methods = [item for item in metodos_pago if allowed_payment_methods and item not in allowed_payment_methods]
             if invalid_payment_methods:
@@ -1716,7 +1923,8 @@ def actualizar_detalle_pedido(
                     detail={"code": "PAYMENT_METHOD_INVALID", "message": f"Métodos de pago inválidos: {', '.join(invalid_payment_methods)}"},
                 )
 
-            canal_flora = str(payload.canalFlora or "").strip() or None
+            canal_value = payload.canalFlora if payload.canalFlora is not None else pago_resumen_actual.get("canalFlora")
+            canal_flora = str(canal_value or "").strip() or None
             allowed_channels = set(channel_field["opciones"]) if channel_field else set()
             if channel_field and not canal_flora:
                 raise HTTPException(
@@ -1729,6 +1937,39 @@ def actualizar_detalle_pedido(
                     detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
                 )
 
+            descuento_pct = Decimal(str(
+                payload.descuentoPct
+                if payload.descuentoPct is not None
+                else pago_resumen_actual.get("descuentoPct") or 0
+            ))
+            if descuento_pct < 0 or descuento_pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "ORDER_DISCOUNT_INVALID", "message": "El descuento debe estar entre 0% y 100%."},
+                )
+
+            omitir_recargo_link = bool(
+                payload.omitirRecargoLink
+                if payload.omitirRecargoLink is not None
+                else pago_resumen_actual.get("omitirRecargoLink")
+            )
+            ajustes = _build_pedido_adjustments(
+                subtotal=Decimal(str(pedido.totalBruto or 0)),
+                iva=Decimal(str(pedido.totalIva or 0)),
+                domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
+                metodos_pago=metodos_pago,
+                omitir_recargo_link=omitir_recargo_link,
+                descuento_pct=descuento_pct,
+            )
+            pedido.totalNeto = ajustes["total"]
+
+            detalle_pago = payload.detallePago if payload.detallePago is not None else pago_resumen_actual.get("detallePago")
+            monto_efectivo = (
+                Decimal(str(payload.montoEfectivo))
+                if payload.montoEfectivo is not None
+                else (Decimal(str(pago_resumen_actual.get("montoEfectivo"))) if pago_resumen_actual.get("montoEfectivo") is not None else None)
+            )
+
             monto_pago = Decimal(str(pedido.totalNeto or pedido.totalBruto or 0))
             _upsert_pago_flora(
                 db,
@@ -1737,6 +1978,13 @@ def actualizar_detalle_pedido(
                 monto=monto_pago,
                 metodos_pago=metodos_pago,
                 canal_flora=canal_flora,
+                detalle_pago=detalle_pago,
+                monto_efectivo=monto_efectivo,
+                omitir_recargo_link=omitir_recargo_link,
+                descuento_pct=ajustes["descuentoPct"],
+                recargo_link_pct=ajustes["recargoLinkPct"],
+                recargo_link_monto=ajustes["recargoLinkMonto"],
+                descuento_monto=ajustes["descuentoMonto"],
             )
 
         db.commit()
@@ -1939,6 +2187,9 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
     celular_flora = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
 
+    recargo_link_monto = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
+    descuento_monto = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
+
     contenido_lineas = [
         empresa_titulo.upper(),
         empresa_subtitulo,
@@ -1970,6 +2221,8 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         "----------------------------------------",
         f"Subtotal: {_money_cop(pedido.totalBruto)}",
         f"Domicilio: {_money_cop(getattr(pedido, 'costoDomicilio', 0) or 0)}",
+        *( [f"Recargo link ({int(round(float(pago_resumen.get('recargoLinkPct') or 0)))}%): {_money_cop(recargo_link_monto)}"] if recargo_link_monto > 0 else [] ),
+        *( [f"Descuento ({float(pago_resumen.get('descuentoPct') or 0):g}%): -{_money_cop(descuento_monto)}"] if descuento_monto > 0 else [] ),
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
         f"Operador: {operador_nombre}",
