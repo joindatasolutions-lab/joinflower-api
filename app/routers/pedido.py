@@ -996,6 +996,26 @@ def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> d
     if rules["require_sales_channel_before_approval"] and not pago_resumen["canalFlora"]:
         missing.append("medio de venta")
 
+    metodos_pago = [str(item or "").strip() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
+    detalle_pago = pago_resumen.get("detallePago") or []
+    if len(metodos_pago) > 1:
+        if not detalle_pago or len(detalle_pago) < len(metodos_pago):
+            missing.append("monto por cada método de pago")
+        else:
+            total_detalle = Decimal("0.00")
+            metodos_con_monto = set()
+            for item in detalle_pago:
+                metodo = str(item.get("metodo") or item.get("metodoPago") or "").strip()
+                monto = Decimal(str(item.get("monto") or item.get("valor") or item.get("amount") or 0))
+                if metodo and monto > 0:
+                    metodos_con_monto.add(metodo)
+                    total_detalle += monto
+            if any(metodo not in metodos_con_monto for metodo in metodos_pago):
+                missing.append("monto por cada método de pago")
+            total_pedido = _round_money_decimal(db.query(Pedido.totalNeto).filter(Pedido.idPedido == int(pedido_id), Pedido.empresaID == int(empresa_id)).scalar() or 0)
+            if _round_money_decimal(total_detalle) != total_pedido:
+                missing.append("distribución correcta de los montos de pago")
+
     if not missing:
         return {"puedeAprobar": True, "motivo": None, "pagoResumen": pago_resumen}
 
@@ -1264,6 +1284,91 @@ def _upsert_pago_flora(
                     "canal_venta_id": int(canal_row[0]),
                 },
             )
+
+
+def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
+    pago_row = db.execute(
+        text(
+            """
+            SELECT id_pago
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {
+            "pedido_id": int(pedido.idPedido),
+            "empresa_id": int(pedido.empresaID),
+        },
+    ).first()
+    if not pago_row:
+        return
+
+    monto = Decimal(str(pedido.totalNeto or pedido.totalBruto or 0))
+    db.execute(
+        text(
+            """
+            UPDATE petalops.pago
+            SET monto = :monto,
+                updated_at = NOW()
+            WHERE id_pago = :id_pago
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "id_pago": int(pago_row[0]),
+            "empresa_id": int(pedido.empresaID),
+            "monto": monto,
+        },
+    )
+
+    if not _flora_phase2_ready(db):
+        return
+
+    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
+    metodos_pago = list(pago_resumen.get("metodosPago") or [])
+    if len(metodos_pago) != 1:
+        return
+
+    metodo_row = db.execute(
+        text(
+            """
+            SELECT pm.id_pago_metodo
+            FROM petalops.pago_metodo pm
+            JOIN petalops.metodo_pago_catalogo mpc
+              ON mpc.id_metodo_pago = pm.metodo_pago_id
+            WHERE pm.empresa_id = :empresa_id
+              AND pm.pedido_id = :pedido_id
+              AND mpc.nombre = :metodo
+            LIMIT 1
+            """
+        ),
+        {
+            "empresa_id": int(pedido.empresaID),
+            "pedido_id": int(pedido.idPedido),
+            "metodo": str(metodos_pago[0]),
+        },
+    ).first()
+    if not metodo_row:
+        return
+
+    db.execute(
+        text(
+            """
+            UPDATE petalops.pago_metodo
+            SET monto = :monto,
+                updated_at = NOW()
+            WHERE id_pago_metodo = :id_pago_metodo
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "id_pago_metodo": int(metodo_row[0]),
+            "empresa_id": int(pedido.empresaID),
+            "monto": monto,
+        },
+    )
 
 
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -1641,6 +1746,13 @@ class ActualizarDetallePedidoRequest(BaseModel):
     canalFlora: str | None = None
 
 
+class AgregarDetallePedidoRequest(BaseModel):
+    productoID: int
+    cantidad: float | None = 1
+    productoObservaciones: str | None = None
+    productoPrecio: float | None = None
+
+
 @router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def actualizar_detalle_pedido(
     pedido_id: int,
@@ -1900,6 +2012,7 @@ def actualizar_detalle_pedido(
                 pedido=pedido,
                 aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
             )
+            _sync_existing_pago_total(db, pedido=pedido)
 
         if (
             payload.metodosPago is not None
@@ -1916,6 +2029,11 @@ def actualizar_detalle_pedido(
             metodos_fuente = payload.metodosPago if payload.metodosPago is not None else pago_resumen_actual.get("metodosPago")
             metodos_pago = [str(item or "").strip() for item in (metodos_fuente or []) if str(item or "").strip()]
             allowed_payment_methods = set(payment_field["opciones"]) if payment_field else set()
+            if payment_field and not metodos_pago:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "PAYMENT_METHOD_REQUIRED", "message": f"{payment_field['titulo'] or 'Método de pago'} es obligatorio"},
+                )
             invalid_payment_methods = [item for item in metodos_pago if allowed_payment_methods and item not in allowed_payment_methods]
             if invalid_payment_methods:
                 raise HTTPException(
@@ -1970,6 +2088,34 @@ def actualizar_detalle_pedido(
                 else (Decimal(str(pago_resumen_actual.get("montoEfectivo"))) if pago_resumen_actual.get("montoEfectivo") is not None else None)
             )
 
+            if len(metodos_pago) > 1:
+                if not isinstance(detalle_pago, list) or len(detalle_pago) < len(metodos_pago):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": "PAYMENT_BREAKDOWN_REQUIRED", "message": "Debes indicar el monto correspondiente para cada método de pago."},
+                    )
+                breakdown_total = Decimal("0.00")
+                breakdown_methods = set()
+                for item in detalle_pago:
+                    if not isinstance(item, dict):
+                        continue
+                    metodo = str(item.get("metodo") or item.get("metodoPago") or "").strip()
+                    monto = Decimal(str(item.get("monto") or item.get("valor") or item.get("amount") or 0))
+                    if not metodo or monto <= 0:
+                        continue
+                    breakdown_methods.add(metodo)
+                    breakdown_total += monto
+                if any(metodo not in breakdown_methods for metodo in metodos_pago):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": "PAYMENT_BREAKDOWN_REQUIRED", "message": "Debes indicar el monto correspondiente para cada método de pago."},
+                    )
+                if _round_money_decimal(breakdown_total) != _round_money_decimal(ajustes["total"]):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": "PAYMENT_BREAKDOWN_TOTAL_INVALID", "message": "La suma de los montos por método de pago debe ser igual al total del pedido."},
+                    )
+
             monto_pago = Decimal(str(pedido.totalNeto or pedido.totalBruto or 0))
             _upsert_pago_flora(
                 db,
@@ -2010,6 +2156,167 @@ def actualizar_detalle_pedido(
             status_code=500,
             detail={
                 "code": "PEDIDO_UPDATE_INTERNAL_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
+
+
+@router.post("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def agregar_detalle_pedido(
+    pedido_id: int,
+    payload: AgregarDetallePedidoRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    try:
+        empresa_id = int(auth.empresaID)
+        has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
+        pedido = (
+            db.query(Pedido)
+            .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .first()
+        )
+        if not pedido:
+            raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
+        assert_same_empresa(auth, int(pedido.empresaID))
+        if not _estado_pedido_editable(db, pedido.estadoPedidoID):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PEDIDO_NOT_EDITABLE", "message": "No se pueden editar pedidos entregados o cancelados"},
+            )
+
+        producto = (
+            db.query(Producto)
+            .filter(
+                Producto.idProducto == int(payload.productoID),
+                Producto.empresaID == int(pedido.empresaID),
+            )
+            .first()
+        )
+        if not producto:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "PRODUCTO_NOT_FOUND", "message": "Arreglo no encontrado"},
+            )
+
+        cantidad = Decimal(str(payload.cantidad or 1))
+        if cantidad <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "PEDIDO_CANTIDAD_INVALIDA", "message": "La cantidad debe ser mayor que cero"},
+            )
+
+        existing_detail = (
+            db.query(PedidoDetalle)
+            .filter(
+                PedidoDetalle.pedidoID == int(pedido.idPedido),
+                PedidoDetalle.empresaID == int(pedido.empresaID),
+                PedidoDetalle.productoID == int(payload.productoID),
+            )
+            .order_by(PedidoDetalle.idPedidoDetalle.asc())
+            .first()
+        )
+
+        if _is_custom_producto(producto):
+            if payload.productoPrecio is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEDIDO_PRECIO_SOLO_PERSONALIZADO",
+                        "message": "Debes indicar un precio válido para el arreglo personalizado.",
+                    },
+                )
+            precio_unitario = Decimal(str(payload.productoPrecio)).quantize(Decimal("1"))
+            if precio_unitario <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEDIDO_PRECIO_INVALIDO",
+                        "message": "Debes indicar un precio válido para el arreglo personalizado.",
+                    },
+                )
+        else:
+            precio_unitario = _find_branch_product_price(
+                db,
+                empresa_id=int(pedido.empresaID),
+                sucursal_id=int(pedido.sucursalID),
+                producto_id=int(payload.productoID),
+            )
+
+        observaciones = (
+            _sanitize_producto_observacion(payload.productoObservaciones, producto=producto)
+            if has_observaciones_personalizados
+            else None
+        )
+
+        if existing_detail:
+            existing_detail.cantidad = Decimal(str(existing_detail.cantidad or 0)) + cantidad
+            if _is_custom_producto(producto):
+                existing_detail.precioUnitario = precio_unitario
+            if has_observaciones_personalizados and observaciones and not getattr(existing_detail, "observacionesPersonalizados", None):
+                existing_detail.observacionesPersonalizados = observaciones
+            detalle_id = int(existing_detail.idPedidoDetalle)
+            action = "merged"
+        else:
+            detalle = PedidoDetalle(
+                empresaID=int(pedido.empresaID),
+                sucursalID=int(pedido.sucursalID),
+                pedidoID=int(pedido.idPedido),
+                productoID=int(payload.productoID),
+                cantidad=cantidad,
+                precioUnitario=precio_unitario,
+                ivaUnitario=Decimal("0.00"),
+                subtotal=Decimal("0.00"),
+                observacionesPersonalizados=observaciones if has_observaciones_personalizados else None,
+            )
+            db.add(detalle)
+            db.flush()
+            detalle_id = int(detalle.idPedidoDetalle)
+            action = "created"
+
+        cliente = (
+            db.query(Cliente)
+            .filter(
+                Cliente.idCliente == int(pedido.clienteID),
+                Cliente.empresaID == int(pedido.empresaID),
+            )
+            .first()
+        )
+        _recalculate_pedido_financials(
+            db,
+            pedido=pedido,
+            aplica_iva=_normalize_ident_type(getattr(cliente, "tipoIdent", None)) == "NIT",
+        )
+        _sync_existing_pago_total(db, pedido=pedido)
+        db.commit()
+        return {
+            "status": "ok",
+            "action": action,
+            "pedidoID": int(pedido.idPedido),
+            "detalleID": detalle_id,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        pedido_logger.error("Error SQL agregando detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_DETALLE_CREATE_DB_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
+    except Exception:
+        db.rollback()
+        pedido_logger.error("Error inesperado agregando detalle de pedido. pedido_id=%s", pedido_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_DETALLE_CREATE_INTERNAL_ERROR",
                 "message": "Error interno del servidor",
                 "module": "pedido",
             },
@@ -2078,8 +2385,9 @@ def eliminar_detalle_pedido(
         _recalculate_pedido_financials(
             db,
             pedido=pedido,
-            aplica_iva=_cliente_requires_iva(cliente),
+            aplica_iva=_normalize_ident_type(getattr(cliente, "tipoIdent", None)) == "NIT",
         )
+        _sync_existing_pago_total(db, pedido=pedido)
         db.commit()
         return {"status": "ok", "pedidoID": int(pedido.idPedido), "detalleID": int(detalle_id)}
     except HTTPException:
@@ -2170,6 +2478,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     empresa_subtitulo = empresa_partes[1] if len(empresa_partes) > 1 else "Tienda de Flores"
     forma_pago = str(pago_resumen.get("metodoPago") or "No especificada").strip() or "No especificada"
     metodos_pago = [str(item or "").strip().lower() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
+    detalle_pago = pago_resumen.get("detallePago") or []
     if any("cuenta por cobrar" in item for item in metodos_pago):
         tipo_pago = "Cuentas Por Cobrar"
     elif any("transferencia" in item for item in metodos_pago):
@@ -2189,6 +2498,15 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     recargo_link_monto = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
     descuento_monto = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
+    lineas_pago = []
+    if detalle_pago:
+        for item in detalle_pago:
+            metodo = str(item.get("metodo") or item.get("metodoPago") or "").strip()
+            monto = Decimal(str(item.get("monto") or item.get("valor") or item.get("amount") or 0))
+            if metodo:
+                lineas_pago.append(f"- {metodo}: {_money_cop(monto)}")
+    elif forma_pago != "No especificada":
+        lineas_pago.append(f"- {forma_pago}: {_money_cop(pedido.totalNeto)}")
 
     contenido_lineas = [
         empresa_titulo.upper(),
@@ -2204,6 +2522,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Telefono: {str((cliente.telefonoCompleto if cliente else None) or (cliente.telefono if cliente else None) or '-')}",
         f"Pago: {forma_pago}",
         f"Tipo pago: {tipo_pago}",
+        *(lineas_pago if lineas_pago else []),
         "----------------------------------------",
         "ENTREGA",
         f"Destinatario: {str((entrega.destinatario if entrega else None) or (cliente.nombreCompleto if cliente else None) or '-')}",
