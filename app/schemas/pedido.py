@@ -112,6 +112,7 @@ class PedidoListResponse(BaseModel):
 
 
 class PedidoDetalleProducto(BaseModel):
+    detalleID: Optional[int] = None
     productoID: int
     codigoProducto: Optional[str] = None
     nombreProducto: str

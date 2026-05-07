@@ -1277,6 +1277,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         productos = [
             PedidoDetalleProducto(
+                detalleID=int(detalle.idPedidoDetalle),
                 productoID=int(producto.idProducto),
                 codigoProducto=(str(producto.codigoProducto).strip() if producto.codigoProducto else None),
                 nombreProducto=str(producto.nombreProducto or "Producto"),
@@ -1374,6 +1375,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 
 class ActualizarDetallePedidoRequest(BaseModel):
+    detalleID: int | None = None
     productoID: int | None = None
     productoPrecio: float | None = None
     cantidad: float | None = None
@@ -1430,15 +1432,37 @@ def actualizar_detalle_pedido(
         if not cliente:
             raise HTTPException(status_code=404, detail={"code": "CLIENTE_NOT_FOUND", "message": "Cliente no encontrado"})
 
-        detalle = (
+        detalle_query = (
             db.query(PedidoDetalle)
             .filter(
                 PedidoDetalle.pedidoID == pedido_id,
                 PedidoDetalle.empresaID == int(pedido.empresaID),
             )
-            .order_by(PedidoDetalle.idPedidoDetalle.asc())
-            .first()
         )
+        detalle = None
+        if payload.detalleID is not None:
+            detalle = (
+                detalle_query
+                .filter(PedidoDetalle.idPedidoDetalle == int(payload.detalleID))
+                .first()
+            )
+            if not detalle:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "code": "PEDIDO_DETALLE_NOT_FOUND",
+                        "message": "No fue posible ubicar el arreglo seleccionado dentro del pedido.",
+                    },
+                )
+        elif payload.productoID is not None:
+            detalle = (
+                detalle_query
+                .filter(PedidoDetalle.productoID == int(payload.productoID))
+                .order_by(PedidoDetalle.idPedidoDetalle.asc())
+                .first()
+            )
+        if not detalle:
+            detalle = detalle_query.order_by(PedidoDetalle.idPedidoDetalle.asc()).first()
         needs_totals_recalc = False
         producto_detalle_actual: Producto | None = None
 
