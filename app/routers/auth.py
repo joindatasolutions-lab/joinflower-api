@@ -117,6 +117,9 @@ DEFAULT_ROLE_MODULE_POLICY = {
         "catalogo": (1, 1, 1, 0),
         "inventario": (1, 1, 1, 0),
     },
+    "Contabilidad": {
+        "contabilidad": (1, 1, 1, 0),
+    },
     "Operativo": {
         "pedidos": (1, 1, 0, 0),
         "produccion": (1, 1, 0, 0),
