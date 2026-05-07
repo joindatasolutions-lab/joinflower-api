@@ -1728,6 +1728,88 @@ def actualizar_detalle_pedido(
         )
 
 
+@router.delete("/pedido/{pedido_id}/detalle/{detalle_id}", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def eliminar_detalle_pedido(
+    pedido_id: int,
+    detalle_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    try:
+        empresa_id = int(auth.empresaID)
+        pedido = (
+            db.query(Pedido)
+            .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .first()
+        )
+        if not pedido:
+            raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
+
+        estado_db = db.query(EstadoPedido).filter(EstadoPedido.idEstadoPedido == pedido.estadoPedidoID).first()
+        estado_nombre = normalize_status_name(estado_db.nombreEstado if estado_db else None)
+        if estado_nombre not in {"PENDIENTE", "CREADO"}:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PEDIDO_DETALLE_DELETE_INVALID_STATE",
+                    "message": "Solo puedes eliminar arreglos en pedidos creados o pendientes.",
+                },
+            )
+
+        detalle = (
+            db.query(PedidoDetalle)
+            .filter(
+                PedidoDetalle.idPedidoDetalle == detalle_id,
+                PedidoDetalle.pedidoID == pedido_id,
+                PedidoDetalle.empresaID == empresa_id,
+            )
+            .first()
+        )
+        if not detalle:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "PEDIDO_DETALLE_NOT_FOUND", "message": "Arreglo no encontrado dentro del pedido."},
+            )
+
+        total_detalles = (
+            db.query(func.count(PedidoDetalle.idPedidoDetalle))
+            .filter(PedidoDetalle.pedidoID == pedido_id, PedidoDetalle.empresaID == empresa_id)
+            .scalar()
+        )
+        if int(total_detalles or 0) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PEDIDO_DETALLE_LAST_ITEM",
+                    "message": "No puedes eliminar el único arreglo del pedido.",
+                },
+            )
+
+        db.delete(detalle)
+        cliente = db.query(Cliente).filter(Cliente.idCliente == pedido.clienteID).first()
+        _recalculate_pedido_financials(
+            db,
+            pedido=pedido,
+            aplica_iva=_cliente_requires_iva(cliente),
+        )
+        db.commit()
+        return {"status": "ok", "pedidoID": int(pedido.idPedido), "detalleID": int(detalle_id)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        pedido_logger.error("Error SQL eliminando detalle de pedido. pedido_id=%s detalle_id=%s", pedido_id, detalle_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_DETALLE_DELETE_DB_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
+
+
 @router.get("/pedido/{pedido_id}/factura", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row_query = (
