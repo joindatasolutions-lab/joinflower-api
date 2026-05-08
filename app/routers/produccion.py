@@ -474,19 +474,6 @@ def actualizar_estado_florista(florista_id: int, payload: FloristaEstadoRequest,
     nuevo_estado = _estado_florista_norm(payload.estado)
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
         current_florista = _current_florista_for_user(db, auth)
-        if current_florista:
-            current_florista_id = int(current_florista.idFlorista or 0)
-            actual_florista_id = int(produccion.floristaID or 0)
-            destino_florista_id = int(payload.floristaNuevoID or 0)
-            takeover_allowed = (
-                (actual_florista_id == 0 and destino_florista_id == current_florista_id)
-                or (actual_florista_id != 0 and destino_florista_id == current_florista_id)
-            )
-            if takeover_allowed:
-                class _FloristaGuard:
-                    def __init__(self, florista_id: int):
-                        self.idFlorista = florista_id
-                current_florista = _FloristaGuard(actual_florista_id)
         if not current_florista or int(current_florista.idFlorista) != int(florista_id):
             raise HTTPException(status_code=403, detail="Solo puedes actualizar tu propio estado de florista")
         if nuevo_estado not in {"Activo", "Inactivo"}:
