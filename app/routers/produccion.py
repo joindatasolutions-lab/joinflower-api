@@ -869,16 +869,29 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
     usuario_cambio = str(payload.usuarioCambio or auth.login or auth.nombre or "system").strip()
     if not usuario_cambio:
         usuario_cambio = "system"
-    motivo = str(payload.motivo or "").strip() or "Reasignación desde panel de producción"
+    motivo = str(payload.motivo or "").strip() or "Reasignaci?n desde panel de producci?n"
 
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
         produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
         if not produccion:
-            raise _err("PRODUCCION_NOT_FOUND", "Registro de producciÃ³n no encontrado", status_code=404)
+            raise _err("PRODUCCION_NOT_FOUND", "Registro de producci?n no encontrado", status_code=404)
         assert_same_empresa(auth, int(produccion.empresaID))
         current_florista = _current_florista_for_user(db, auth)
-        if not current_florista or int(produccion.floristaID or 0) != int(current_florista.idFlorista):
-            raise HTTPException(status_code=403, detail="Solo puedes reasignar producciones que hoy estÃ¡n asignadas a ti")
+        current_florista_id = int(current_florista.idFlorista) if current_florista else 0
+        actual_florista_id = int(produccion.floristaID or 0)
+        destino_florista_id = int(payload.floristaNuevoID or 0)
+        permitido = (
+            current_florista_id > 0 and (
+                actual_florista_id == current_florista_id
+                or (actual_florista_id == 0 and destino_florista_id == current_florista_id)
+                or (actual_florista_id != 0 and destino_florista_id == current_florista_id)
+            )
+        )
+        if not permitido:
+            raise HTTPException(
+                status_code=403,
+                detail="Solo puedes ceder tus arreglos, tomar arreglos sin asignar o traer a tu nombre arreglos de otro florista.",
+            )
 
     wrapper = ProduccionAsignarRequest(
         floristaID=payload.floristaNuevoID,
