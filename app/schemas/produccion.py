@@ -125,6 +125,11 @@ class ReasignacionHistorialItem(BaseModel):
     produccionID: int
     floristaAnteriorID: Optional[int] = None
     floristaNuevoID: Optional[int] = None
+    floristaAnteriorNombre: Optional[str] = None
+    floristaNuevoNombre: Optional[str] = None
+    numeroPedido: Optional[int] = None
+    cliente: Optional[str] = None
+    tipoMovimiento: str
     fechaCambio: datetime
     motivo: str
     usuarioCambio: str

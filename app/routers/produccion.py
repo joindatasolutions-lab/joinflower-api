@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, func, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
@@ -269,6 +269,33 @@ def _log_historial(
         motivo=motivo,
         usuario=usuario,
     )
+
+
+def _is_manual_historial_event(motivo: str | None, usuario: str | None) -> bool:
+    motivo_text = str(motivo or "").strip().lower()
+    usuario_text = str(usuario or "").strip().lower()
+    auto_tokens = ("autom", "autoasign", "asignacion automatica", "reasignacion automatica")
+    auto_users = {
+        "pedido.aprobar",
+        "produccion.asignar_pendientes_hoy",
+        "produccion.asignar_pendientes_fecha",
+        "system",
+    }
+    if any(token in motivo_text for token in auto_tokens):
+        return False
+    if usuario_text in auto_users:
+        return False
+    return True
+
+
+def _tipo_movimiento_historial(florista_anterior_id: int | None, florista_nuevo_id: int | None) -> str:
+    if florista_anterior_id is None and florista_nuevo_id is not None:
+        return "ASIGNACION_MANUAL"
+    if florista_anterior_id is not None and florista_nuevo_id is not None:
+        return "REASIGNACION_MANUAL"
+    if florista_anterior_id is not None and florista_nuevo_id is None:
+        return "DESASIGNACION_MANUAL"
+    return "MOVIMIENTO_MANUAL"
 
 
 def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int]) -> dict[int, dict[str, str | int | None]]:
@@ -1180,7 +1207,36 @@ def historial_reasignaciones(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    q = db.query(ProduccionHistorial).filter(
+    anterior_florista = aliased(Florista)
+    nuevo_florista = aliased(Florista)
+    q = db.query(
+        ProduccionHistorial,
+        Produccion.pedidoID,
+        Pedido.numeroPedido,
+        Cliente.nombreCompleto,
+        anterior_florista.nombre.label("floristaAnteriorNombre"),
+        nuevo_florista.nombre.label("floristaNuevoNombre"),
+    ).join(
+        Produccion,
+        (Produccion.idProduccion == ProduccionHistorial.produccionID)
+        & (Produccion.empresaID == ProduccionHistorial.empresaID),
+    ).outerjoin(
+        Pedido,
+        (Pedido.idPedido == Produccion.pedidoID)
+        & (Pedido.empresaID == Produccion.empresaID),
+    ).outerjoin(
+        Cliente,
+        (Cliente.idCliente == Pedido.clienteID)
+        & (Cliente.empresaID == Pedido.empresaID),
+    ).outerjoin(
+        anterior_florista,
+        (anterior_florista.idFlorista == ProduccionHistorial.floristaAnteriorID)
+        & (anterior_florista.empresaID == ProduccionHistorial.empresaID),
+    ).outerjoin(
+        nuevo_florista,
+        (nuevo_florista.idFlorista == ProduccionHistorial.floristaNuevoID)
+        & (nuevo_florista.empresaID == ProduccionHistorial.empresaID),
+    ).filter(
         ProduccionHistorial.empresaID == empresa_id,
         ProduccionHistorial.fechaCambio >= datetime.combine(fecha_desde, datetime.min.time()),
         ProduccionHistorial.fechaCambio <= datetime.combine(fecha_hasta, datetime.max.time()),
@@ -1191,14 +1247,23 @@ def historial_reasignaciones(
     rows = q.order_by(ProduccionHistorial.fechaCambio.desc()).all()
     items = [
         ReasignacionHistorialItem(
-            produccionID=int(row.produccionID),
-            floristaAnteriorID=(int(row.floristaAnteriorID) if row.floristaAnteriorID else None),
-            floristaNuevoID=(int(row.floristaNuevoID) if row.floristaNuevoID else None),
-            fechaCambio=row.fechaCambio,
-            motivo=row.motivo,
-            usuarioCambio=row.usuarioCambio,
+            produccionID=int(row[0].produccionID),
+            floristaAnteriorID=(int(row[0].floristaAnteriorID) if row[0].floristaAnteriorID else None),
+            floristaNuevoID=(int(row[0].floristaNuevoID) if row[0].floristaNuevoID else None),
+            floristaAnteriorNombre=(str(row[4] or "").strip() or None),
+            floristaNuevoNombre=(str(row[5] or "").strip() or None),
+            numeroPedido=(int(row[2]) if row[2] is not None else None),
+            cliente=(str(row[3] or "").strip() or None),
+            tipoMovimiento=_tipo_movimiento_historial(
+                int(row[0].floristaAnteriorID) if row[0].floristaAnteriorID else None,
+                int(row[0].floristaNuevoID) if row[0].floristaNuevoID else None,
+            ),
+            fechaCambio=row[0].fechaCambio,
+            motivo=row[0].motivo,
+            usuarioCambio=row[0].usuarioCambio,
         )
         for row in rows
+        if _is_manual_historial_event(row[0].motivo, row[0].usuarioCambio)
     ]
 
     return ReasignacionHistorialResponse(items=items, total=len(items))

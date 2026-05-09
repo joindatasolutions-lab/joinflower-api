@@ -39,3 +39,13 @@ def set_cache(key: str, value: Any, ttl: int) -> None:
     payload = json.dumps(value, ensure_ascii=True, default=str)
 
     _MEMORY_CACHE[safe_key] = (time.time() + ttl_seconds, payload)
+
+
+def invalidate_cache_prefix(prefix: str) -> None:
+    safe_prefix = str(prefix or "").strip()
+    if not safe_prefix:
+        return
+
+    for key in list(_MEMORY_CACHE.keys()):
+        if key.startswith(safe_prefix):
+            _MEMORY_CACHE.pop(key, None)

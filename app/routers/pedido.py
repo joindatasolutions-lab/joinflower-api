@@ -711,6 +711,26 @@ def _resolve_costo_domicilio(
     return Decimal("0.00")
 
 
+def _normalize_delivery_type_from_barrio_name(barrio_nombre: str | None) -> str:
+    nombre = str(barrio_nombre or "").strip().lower()
+    return "recogida_en_tienda" if nombre == "recoger en tienda" else "domicilio"
+
+
+def _find_barrio_by_name(db: Session, *, empresa_id: int, sucursal_id: int, barrio_nombre: str | None) -> Barrio | None:
+    nombre = str(barrio_nombre or "").strip()
+    if not nombre or nombre.lower() == "recoger en tienda":
+        return None
+    return (
+        db.query(Barrio)
+        .filter(
+            Barrio.empresaID == int(empresa_id),
+            Barrio.sucursalID == int(sucursal_id),
+            func.lower(Barrio.nombreBarrio) == nombre.lower(),
+        )
+        .first()
+    )
+
+
 def _pedido_domicilio_valor(pedido: Pedido) -> Decimal:
     costo = Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
     if costo > 0:
@@ -1982,11 +2002,19 @@ def actualizar_detalle_pedido(
                     entrega.direccion = str(payload.direccion).strip() or None
                 if payload.barrioNombre is not None:
                     entrega.barrioNombre = str(payload.barrioNombre).strip() or None
+                    entrega.tipoEntrega = _normalize_delivery_type_from_barrio_name(entrega.barrioNombre)
+                    barrio_actualizado = _find_barrio_by_name(
+                        db,
+                        empresa_id=int(pedido.empresaID),
+                        sucursal_id=int(pedido.sucursalID),
+                        barrio_nombre=entrega.barrioNombre,
+                    )
+                    entrega.barrioID = int(barrio_actualizado.idBarrio) if barrio_actualizado else None
                     pedido.costoDomicilio = _resolve_costo_domicilio(
                         db,
                         empresa_id=int(pedido.empresaID),
                         sucursal_id=int(pedido.sucursalID),
-                        tipo_entrega=getattr(entrega, "tipoEntrega", None),
+                        tipo_entrega=entrega.tipoEntrega,
                         barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
                         barrio_nombre=entrega.barrioNombre,
                     )
@@ -2148,6 +2176,22 @@ def actualizar_detalle_pedido(
                 recargo_link_monto=ajustes["recargoLinkMonto"],
                 descuento_monto=ajustes["descuentoMonto"],
             )
+
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="GUARDAR_PEDIDO",
+            estado_origen_id=(int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None),
+            estado_destino_id=(int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None),
+            extra={
+                "detalleID": (int(payload.detalleID) if payload.detalleID is not None else None),
+                "productoID": (int(payload.productoID) if payload.productoID is not None else None),
+                "barrioNombre": payload.barrioNombre,
+                "fechaEntrega": payload.fechaEntrega,
+                "horaEntrega": payload.horaEntrega,
+            },
+        )
 
         db.commit()
         return {"status": "ok", "pedidoID": pedido_id}
@@ -2576,7 +2620,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
-@router.get("/pedidos/trazabilidad/aprobaciones", dependencies=[Depends(require_module_access("trazabilidad", "puedeVer"))])
+@router.get("/pedidos/trazabilidad/aprobaciones", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def trazabilidad_aprobaciones_pedidos(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
@@ -2620,7 +2664,7 @@ def trazabilidad_aprobaciones_pedidos(
               ON c.empresa_id = pa.empresa_id
              AND c.id_cliente = p.cliente_id
             WHERE pa.empresa_id = :empresa_id
-              AND pa.accion IN ('APROBAR_PEDIDO', 'APROBAR_PEDIDO_PIPELINE')
+              AND pa.accion IN ('APROBAR_PEDIDO', 'APROBAR_PEDIDO_PIPELINE', 'GUARDAR_PEDIDO')
               AND pa.created_at >= :fecha_desde
               AND pa.created_at <= :fecha_hasta
               {sucursal_filter}
@@ -2640,6 +2684,7 @@ def trazabilidad_aprobaciones_pedidos(
                 "usuarioID": (int(row["actor_user_id"]) if row.get("actor_user_id") is not None else None),
                 "usuario": actor_login,
                 "pedidos": set(),
+                "acciones": 0,
                 "valorTotal": Decimal("0"),
                 "ultimoMovimiento": None,
             },
@@ -2647,6 +2692,7 @@ def trazabilidad_aprobaciones_pedidos(
         pedido_id = int(row.get("pedido_id") or 0)
         if pedido_id:
             bucket["pedidos"].add(pedido_id)
+        bucket["acciones"] += 1
         bucket["valorTotal"] += Decimal(str(row.get("total_neto") or 0))
         created_at = row.get("created_at")
         if bucket["ultimoMovimiento"] is None or (created_at and created_at > bucket["ultimoMovimiento"]):
@@ -2672,13 +2718,14 @@ def trazabilidad_aprobaciones_pedidos(
             {
                 "usuarioID": data["usuarioID"],
                 "usuario": data["usuario"],
+                "acciones": int(data["acciones"]),
                 "pedidosAprobados": len(data["pedidos"]),
                 "valorTotal": float(data["valorTotal"].quantize(Decimal("0.01"))),
                 "ultimoMovimiento": data["ultimoMovimiento"],
             }
             for data in resumen.values()
         ],
-        key=lambda item: (-int(item["pedidosAprobados"]), item["usuario"]),
+        key=lambda item: (-int(item["acciones"]), item["usuario"]),
     )
 
     return {

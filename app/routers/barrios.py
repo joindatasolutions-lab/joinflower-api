@@ -8,9 +8,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.barrio import Barrio
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
-from app.services.cache import get_cache, set_cache
+from app.services.cache import get_cache, invalidate_cache_prefix, set_cache
 
 router = APIRouter()
+
+
+def _invalidate_barrios_cache(empresa_id: int, sucursal_id: int) -> None:
+    invalidate_cache_prefix(f"barrios:v2:{int(empresa_id)}:{int(sucursal_id)}:")
 
 
 def _activo_truthy(column):
@@ -98,6 +102,7 @@ def create_barrio(
     db.add(barrio)
     db.commit()
     db.refresh(barrio)
+    _invalidate_barrios_cache(empresa_id=empresa_id, sucursal_id=int(payload.sucursalID))
 
     return {
         "status": "ok",
@@ -149,6 +154,7 @@ def update_barrio(
     barrio.updatedAt = datetime.now(timezone.utc)
     db.commit()
     db.refresh(barrio)
+    _invalidate_barrios_cache(empresa_id=empresa_id, sucursal_id=int(payload.sucursalID))
 
     return {
         "status": "ok",
@@ -183,6 +189,7 @@ def delete_barrio(
 
     db.delete(barrio)
     db.commit()
+    _invalidate_barrios_cache(empresa_id=empresa_id, sucursal_id=int(sucursal_id))
 
     return {
         "status": "ok",
