@@ -2400,8 +2400,7 @@ def eliminar_detalle_pedido(
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
 
-        estado_db = db.query(EstadoPedido).filter(EstadoPedido.idEstadoPedido == pedido.estadoPedidoID).first()
-        estado_nombre = normalize_status_name(estado_db.nombreEstado if estado_db else None)
+        estado_nombre = _estado_pedido_nombre(db, pedido.estadoPedidoID)
         if estado_nombre not in {"PENDIENTE", "CREADO"}:
             raise HTTPException(
                 status_code=400,
@@ -2461,6 +2460,17 @@ def eliminar_detalle_pedido(
             status_code=500,
             detail={
                 "code": "PEDIDO_DETALLE_DELETE_DB_ERROR",
+                "message": "Error interno del servidor",
+                "module": "pedido",
+            },
+        )
+    except Exception:
+        db.rollback()
+        pedido_logger.error("Error eliminando detalle de pedido. pedido_id=%s detalle_id=%s", pedido_id, detalle_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PEDIDO_DETALLE_DELETE_ERROR",
                 "message": "Error interno del servidor",
                 "module": "pedido",
             },
