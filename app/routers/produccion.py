@@ -230,18 +230,6 @@ def _validate_florista_disponibilidad(db: Session, florista: Florista, fecha_pro
     if _is_florista_in_incapacity(florista, fecha_programada):
         raise HTTPException(status_code=400, detail="El florista está en incapacidad para la fecha programada")
 
-    capacidad = max(int(florista.capacidadDiaria or 0), 1)
-    carga = _count_carga_florista(
-        db=db,
-        empresa_id=empresa_id,
-        sucursal_id=sucursal_id,
-        florista_id=int(florista.idFlorista),
-        fecha_programada=fecha_programada,
-        ignore_produccion_id=ignore_produccion_id,
-    )
-    if carga >= capacidad:
-        raise HTTPException(status_code=400, detail="El florista alcanzó su capacidad diaria")
-
 
 def _seleccionar_florista_auto(db: Session, empresa_id: int, sucursal_id: int, fecha_programada: date, ignore_produccion_id: int | None = None) -> Florista | None:
     return produccion_service.seleccionar_florista_auto(
