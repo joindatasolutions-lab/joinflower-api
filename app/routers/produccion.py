@@ -80,15 +80,90 @@ def _require_production_admin(auth=Depends(get_current_auth_context)):
     return auth
 
 
+def _normalize_lookup_value(value: object | None) -> str:
+    return str(value or "").strip().lower()
+
+
 def _current_florista_for_user(db: Session, auth) -> Florista | None:
-    if getattr(auth, "userID", None) is None:
+    empresa_id = int(getattr(auth, "empresaID", 0) or 0)
+    if empresa_id <= 0:
         return None
+
+    user_id = getattr(auth, "userID", None)
+    if user_id is not None:
+        florista = (
+            db.query(Florista)
+            .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+            .filter(
+                Florista.usuarioID == int(user_id),
+                Florista.empresaID == empresa_id,
+            )
+            .first()
+        )
+        if florista:
+            return florista
+
+    login = _normalize_lookup_value(getattr(auth, "login", None))
+    email = _normalize_lookup_value(getattr(auth, "email", None))
+    nombre = _normalize_lookup_value(getattr(auth, "nombre", None))
+    sucursal_id = getattr(auth, "sucursalID", None)
+
+    if not any([login, email, nombre]):
+        return None
+
+    # Fallback for environments where empleado.usuario_id is missing or stale.
+    row = db.execute(
+        text(
+            """
+            SELECT e.id_empleado
+            FROM petalops.empleado e
+            JOIN petalops.perfil_florista pf
+              ON pf.empleado_id = e.id_empleado
+            LEFT JOIN petalops.usuario u
+              ON u.id_usuario = e.usuario_id
+             AND u.empresa_id = e.empresa_id
+            WHERE e.empresa_id = :empresa_id
+              AND (
+                    (:login <> '' AND lower(coalesce(u.login, '')) = :login)
+                 OR (:email <> '' AND lower(coalesce(u.email, '')) = :email)
+                 OR (:email <> '' AND lower(coalesce(e.email, '')) = :email)
+                 OR (:login <> '' AND lower(coalesce(e.usuario, '')) = :login)
+                 OR (:nombre <> '' AND lower(coalesce(e.nombre_empleado, '')) = :nombre)
+              )
+            ORDER BY
+              CASE
+                WHEN :sucursal_id IS NOT NULL AND e.sucursal_id = :sucursal_id THEN 0
+                ELSE 1
+              END,
+              CASE
+                WHEN :login <> '' AND lower(coalesce(u.login, '')) = :login THEN 0
+                WHEN :email <> '' AND lower(coalesce(u.email, '')) = :email THEN 1
+                WHEN :email <> '' AND lower(coalesce(e.email, '')) = :email THEN 2
+                WHEN :login <> '' AND lower(coalesce(e.usuario, '')) = :login THEN 3
+                WHEN :nombre <> '' AND lower(coalesce(e.nombre_empleado, '')) = :nombre THEN 4
+                ELSE 5
+              END,
+              e.id_empleado
+            LIMIT 1
+            """
+        ),
+        {
+            "empresa_id": empresa_id,
+            "sucursal_id": int(sucursal_id) if sucursal_id is not None else None,
+            "login": login,
+            "email": email,
+            "nombre": nombre,
+        },
+    ).first()
+    if not row or row[0] is None:
+        return None
+
     return (
         db.query(Florista)
         .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
         .filter(
-            Florista.usuarioID == int(auth.userID),
-            Florista.empresaID == int(auth.empresaID),
+            Florista.idFlorista == int(row[0]),
+            Florista.empresaID == empresa_id,
         )
         .first()
     )
@@ -776,8 +851,6 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
     if not fecha_programada:
         raise HTTPException(status_code=400, detail="fechaProgramadaProduccion es obligatoria")
-    if fecha_programada > date.today():
-        raise HTTPException(status_code=400, detail="No se permite asignar producciones con fecha futura")
 
     estado_actual = _estado_produccion_norm(produccion.estado, db=db)
     if estado_actual == ESTADO_EN_PRODUCCION and not (payload.motivo and payload.usuarioCambio):
@@ -857,28 +930,6 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
     if not usuario_cambio:
         usuario_cambio = "system"
     motivo = str(payload.motivo or "").strip() or "Reasignaci?n desde panel de producci?n"
-
-    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
-        produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
-        if not produccion:
-            raise _err("PRODUCCION_NOT_FOUND", "Registro de producci?n no encontrado", status_code=404)
-        assert_same_empresa(auth, int(produccion.empresaID))
-        current_florista = _current_florista_for_user(db, auth)
-        current_florista_id = int(current_florista.idFlorista) if current_florista else 0
-        actual_florista_id = int(produccion.floristaID or 0)
-        destino_florista_id = int(payload.floristaNuevoID or 0)
-        permitido = (
-            current_florista_id > 0 and (
-                actual_florista_id == current_florista_id
-                or (actual_florista_id == 0 and destino_florista_id == current_florista_id)
-                or (actual_florista_id != 0 and destino_florista_id == current_florista_id)
-            )
-        )
-        if not permitido:
-            raise HTTPException(
-                status_code=403,
-                detail="Solo puedes ceder tus arreglos, tomar arreglos sin asignar o traer a tu nombre arreglos de otro florista.",
-            )
 
     wrapper = ProduccionAsignarRequest(
         floristaID=payload.floristaNuevoID,
