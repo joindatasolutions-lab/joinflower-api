@@ -1207,15 +1207,15 @@ def historial_reasignaciones(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    anterior_florista = aliased(Florista)
-    nuevo_florista = aliased(Florista)
+    florista_anterior = Florista.__table__.alias("florista_anterior")
+    florista_nuevo = Florista.__table__.alias("florista_nuevo")
     q = db.query(
         ProduccionHistorial,
         Produccion.pedidoID,
         Pedido.numeroPedido,
         Cliente.nombreCompleto,
-        anterior_florista.nombre.label("floristaAnteriorNombre"),
-        nuevo_florista.nombre.label("floristaNuevoNombre"),
+        florista_anterior.c.nombre_empleado.label("floristaAnteriorNombre"),
+        florista_nuevo.c.nombre_empleado.label("floristaNuevoNombre"),
     ).join(
         Produccion,
         (Produccion.idProduccion == ProduccionHistorial.produccionID)
@@ -1229,13 +1229,13 @@ def historial_reasignaciones(
         (Cliente.idCliente == Pedido.clienteID)
         & (Cliente.empresaID == Pedido.empresaID),
     ).outerjoin(
-        anterior_florista,
-        (anterior_florista.idFlorista == ProduccionHistorial.floristaAnteriorID)
-        & (anterior_florista.empresaID == ProduccionHistorial.empresaID),
+        florista_anterior,
+        (florista_anterior.c.id_empleado == ProduccionHistorial.floristaAnteriorID)
+        & (florista_anterior.c.empresa_id == ProduccionHistorial.empresaID),
     ).outerjoin(
-        nuevo_florista,
-        (nuevo_florista.idFlorista == ProduccionHistorial.floristaNuevoID)
-        & (nuevo_florista.empresaID == ProduccionHistorial.empresaID),
+        florista_nuevo,
+        (florista_nuevo.c.id_empleado == ProduccionHistorial.floristaNuevoID)
+        & (florista_nuevo.c.empresa_id == ProduccionHistorial.empresaID),
     ).filter(
         ProduccionHistorial.empresaID == empresa_id,
         ProduccionHistorial.fechaCambio >= datetime.combine(fecha_desde, datetime.min.time()),
@@ -1259,8 +1259,8 @@ def historial_reasignaciones(
                 int(row[0].floristaNuevoID) if row[0].floristaNuevoID else None,
             ),
             fechaCambio=row[0].fechaCambio,
-            motivo=row[0].motivo,
-            usuarioCambio=row[0].usuarioCambio,
+            motivo=(str(row[0].motivo or "").strip() or "Sin motivo"),
+            usuarioCambio=(str(row[0].usuarioCambio or "").strip() or "system"),
         )
         for row in rows
         if _is_manual_historial_event(row[0].motivo, row[0].usuarioCambio)

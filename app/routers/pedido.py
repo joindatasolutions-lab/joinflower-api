@@ -2672,7 +2672,7 @@ def trazabilidad_aprobaciones_pedidos(
              AND p.id_pedido = pa.pedido_id
             LEFT JOIN petalops.cliente c
               ON c.empresa_id = pa.empresa_id
-             AND c.id_cliente = p.cliente_id
+             AND c.cliente_id = p.cliente_id
             WHERE pa.empresa_id = :empresa_id
               AND pa.accion IN ('APROBAR_PEDIDO', 'APROBAR_PEDIDO_PIPELINE', 'GUARDAR_PEDIDO')
               AND pa.created_at >= :fecha_desde
