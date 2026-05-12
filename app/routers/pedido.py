@@ -1010,6 +1010,118 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
     }
 
 
+def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[int]) -> dict[int, dict]:
+    if not pedido_ids:
+        return {}
+
+    pago_rows = db.execute(
+        text(
+            """
+            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta
+            FROM petalops.pago
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = ANY(:pedido_ids)
+            """
+        ),
+        {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+    ).mappings().all()
+    pago_map = {int(row["pedido_id"]): row for row in pago_rows if row.get("pedido_id") is not None}
+
+    phase2_rows: dict[int, list[dict]] = {}
+    canales_map: dict[int, str | None] = {}
+    if _flora_phase2_ready(db):
+        metodos_rows = db.execute(
+            text(
+                """
+                SELECT pm.pedido_id, mpc.nombre, pm.monto
+                FROM petalops.pago_metodo pm
+                JOIN petalops.metodo_pago_catalogo mpc
+                  ON mpc.id_metodo_pago = pm.metodo_pago_id
+                WHERE pm.empresa_id = :empresa_id
+                  AND pm.pedido_id = ANY(:pedido_ids)
+                ORDER BY pm.pedido_id ASC, pm.orden ASC, mpc.orden ASC, mpc.nombre ASC
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+        ).mappings().all()
+        for row in metodos_rows:
+            pedido_id = int(row["pedido_id"])
+            phase2_rows.setdefault(pedido_id, []).append(
+                {
+                    "metodo": str(row["nombre"]).strip(),
+                    "monto": float(row["monto"] or 0),
+                }
+            )
+
+        canal_rows = db.execute(
+            text(
+                """
+                SELECT pcv.pedido_id, cv.nombre
+                FROM petalops.pedido_canal_venta pcv
+                JOIN petalops.canal_venta cv
+                  ON cv.id_canal_venta = pcv.canal_venta_id
+                WHERE pcv.empresa_id = :empresa_id
+                  AND pcv.pedido_id = ANY(:pedido_ids)
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+        ).mappings().all()
+        canales_map = {
+            int(row["pedido_id"]): (str(row["nombre"]).strip() if row.get("nombre") is not None else None)
+            for row in canal_rows
+            if row.get("pedido_id") is not None
+        }
+
+    result: dict[int, dict] = {}
+    for pedido_id in pedido_ids:
+        pago_row = pago_map.get(int(pedido_id))
+        ajustes = _extract_payment_adjustments(pago_row.get("raw_respuesta") if pago_row else None)
+        detalle_pago = phase2_rows.get(int(pedido_id), [])
+        metodos_pago = [str(item["metodo"]).strip() for item in detalle_pago if str(item.get("metodo") or "").strip()]
+        canal_flora = canales_map.get(int(pedido_id))
+        if metodos_pago or canal_flora:
+            metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+            monto_efectivo = next(
+                (float(item["monto"] or 0) for item in detalle_pago if _is_cash_payment_method(item["metodo"])),
+                None,
+            )
+            result[int(pedido_id)] = {
+                "metodoPago": metodo_pago,
+                "metodosPago": metodos_pago,
+                "detallePago": detalle_pago,
+                "montoEfectivo": monto_efectivo,
+                "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
+                "canalFlora": canal_flora,
+                **ajustes,
+            }
+            continue
+
+        if not pago_row:
+            result[int(pedido_id)] = {
+                "metodoPago": None,
+                "metodosPago": [],
+                "detallePago": [],
+                "montoEfectivo": None,
+                "cuentaBancaria": None,
+                "canalFlora": None,
+                **ajustes,
+            }
+            continue
+
+        metodo_pago = str(pago_row.get("metodo_pago") or "").strip() or None
+        metodos_pago = _parse_payment_methods(metodo_pago)
+        result[int(pedido_id)] = {
+            "metodoPago": metodo_pago,
+            "metodosPago": metodos_pago,
+            "detallePago": [],
+            "montoEfectivo": None,
+            "cuentaBancaria": ", ".join([item for item in metodos_pago if item.startswith("Transferencia ")]) or None,
+            "canalFlora": _extract_canal_flora(pago_row.get("raw_respuesta")),
+            **ajustes,
+        }
+    return result
+
+
 def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
     rules = _tenant_order_rules(db, int(empresa_id))
     pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
@@ -2742,6 +2854,194 @@ def trazabilidad_aprobaciones_pedidos(
         "resumen": resumen_items,
         "detalle": detalle,
         "total": len(detalle),
+    }
+
+
+@router.get("/contabilidad/resumen", dependencies=[Depends(require_module_access("contabilidad", "puedeVer"))])
+def resumen_contabilidad(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha_desde: date = Query(..., alias="fechaDesde"),
+    fecha_hasta: date = Query(..., alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+    order_query = (
+        db.query(Pedido, EstadoPedido)
+        .join(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+        .filter(
+            Pedido.empresaID == int(empresa_id),
+            Pedido.fechaPedido >= datetime.combine(fecha_desde, datetime.min.time()),
+            Pedido.fechaPedido <= datetime.combine(fecha_hasta, datetime.max.time()),
+            func.upper(EstadoPedido.nombreEstado).in_(["APROBADO", "PAGADO"]),
+        )
+    )
+    if sucursal_id is not None:
+        order_query = order_query.filter(Pedido.sucursalID == int(sucursal_id))
+
+    order_rows = order_query.order_by(Pedido.fechaPedido.asc(), Pedido.idPedido.asc()).all()
+    pedido_ids = [int(pedido.idPedido) for pedido, _ in order_rows]
+    if not pedido_ids:
+        return {"orderRows": [], "arrangementRows": [], "paymentAccountRows": []}
+
+    detalle_rows = (
+        db.query(PedidoDetalle, Producto)
+        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
+        .filter(
+            PedidoDetalle.empresaID == int(empresa_id),
+            PedidoDetalle.pedidoID.in_(pedido_ids),
+        )
+        .all()
+    )
+    detalles_por_pedido: dict[int, list[tuple[PedidoDetalle, Producto | None]]] = {}
+    for detalle, producto in detalle_rows:
+        detalles_por_pedido.setdefault(int(detalle.pedidoID), []).append((detalle, producto))
+
+    pagos_por_pedido = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
+
+    resumen_por_fecha: dict[str, dict] = {}
+    arreglos_map: dict[str, dict] = {}
+    cuentas_map: dict[str, dict] = {}
+    total_recaudo_global = Decimal("0.00")
+
+    for pedido, _estado in order_rows:
+        pedido_id = int(pedido.idPedido)
+        fecha_key = _fecha_pedido_str(pedido.fechaPedido) or "Sin fecha"
+        pago_resumen = pagos_por_pedido.get(pedido_id, {})
+        subtotal = Decimal(str(pedido.totalBruto or 0))
+        iva = Decimal(str(pedido.totalIva or 0))
+        domicilio = Decimal(str(_pedido_domicilio_valor(pedido)))
+        total = Decimal(str(pedido.totalNeto or 0))
+        recargos = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
+        descuentos = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
+        efectivo = Decimal("0.00")
+        for entry in (pago_resumen.get("detallePago") or []):
+            metodo = str(entry.get("metodo") or entry.get("metodoPago") or "").strip()
+            monto = Decimal(str(entry.get("monto") or entry.get("valor") or 0))
+            if _is_cash_payment_method(metodo):
+                efectivo += monto
+
+        current = resumen_por_fecha.get(fecha_key) or {
+            "fecha": fecha_key,
+            "cantidadPedidos": 0,
+            "totalArreglos": Decimal("0.00"),
+            "totalDomicilios": Decimal("0.00"),
+            "totalRecargos": Decimal("0.00"),
+            "totalDescuentos": Decimal("0.00"),
+            "totalVenta": Decimal("0.00"),
+            "totalEfectivo": Decimal("0.00"),
+        }
+        current["cantidadPedidos"] += 1
+        current["totalArreglos"] += subtotal + iva
+        current["totalDomicilios"] += domicilio
+        current["totalRecargos"] += recargos
+        current["totalDescuentos"] += descuentos
+        current["totalVenta"] += total
+        current["totalEfectivo"] += efectivo
+        resumen_por_fecha[fecha_key] = current
+
+        for detalle, producto in detalles_por_pedido.get(pedido_id, []):
+            codigo = str(getattr(producto, "codigoProducto", "") or "").strip()
+            nombre = str(getattr(producto, "nombreProducto", None) or "Arreglo").strip() or "Arreglo"
+            producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
+            key = f"{producto_id or 'na'}::{codigo or 'sin-codigo'}::{nombre}"
+            row = arreglos_map.get(key) or {
+                "key": key,
+                "productoId": producto_id or None,
+                "codigo": codigo or None,
+                "nombre": nombre,
+                "unidades": Decimal("0.00"),
+                "pedidoIDs": set(),
+                "totalVendido": Decimal("0.00"),
+            }
+            row["unidades"] += Decimal(str(detalle.cantidad or 0))
+            row["pedidoIDs"].add(pedido_id)
+            row["totalVendido"] += Decimal(str(detalle.subtotal or 0))
+            arreglos_map[key] = row
+
+        payment_entries = pago_resumen.get("detallePago") or []
+        if not payment_entries:
+            metodo_pago = str(pago_resumen.get("metodoPago") or "").strip()
+            if metodo_pago:
+                payment_entries = [{"metodo": metodo_pago, "monto": float(total)}]
+        for entry in payment_entries:
+            cuenta = str(entry.get("metodo") or entry.get("metodoPago") or entry.get("nombre") or "Sin especificar").strip() or "Sin especificar"
+            key = cuenta.casefold()
+            row = cuentas_map.get(key) or {
+                "key": key,
+                "cuenta": cuenta,
+                "pedidosSet": set(),
+                "metodosSet": set(),
+                "totalRecaudado": Decimal("0.00"),
+                "ultimoMovimiento": fecha_key if fecha_key != "Sin fecha" else "",
+            }
+            monto = Decimal(str(entry.get("monto") or entry.get("valor") or entry.get("amount") or 0))
+            row["pedidosSet"].add(pedido_id)
+            row["metodosSet"].add(cuenta)
+            row["totalRecaudado"] += monto
+            if fecha_key != "Sin fecha" and (not row["ultimoMovimiento"] or fecha_key > row["ultimoMovimiento"]):
+                row["ultimoMovimiento"] = fecha_key
+            cuentas_map[key] = row
+            total_recaudo_global += monto
+
+    order_rows_payload = sorted(
+        [
+            {
+                "fecha": item["fecha"],
+                "cantidadPedidos": int(item["cantidadPedidos"]),
+                "totalArreglos": float(item["totalArreglos"].quantize(Decimal("0.01"))),
+                "totalDomicilios": float(item["totalDomicilios"].quantize(Decimal("0.01"))),
+                "totalRecargos": float(item["totalRecargos"].quantize(Decimal("0.01"))),
+                "totalDescuentos": float(item["totalDescuentos"].quantize(Decimal("0.01"))),
+                "totalVenta": float(item["totalVenta"].quantize(Decimal("0.01"))),
+                "totalEfectivo": float(item["totalEfectivo"].quantize(Decimal("0.01"))),
+            }
+            for item in resumen_por_fecha.values()
+        ],
+        key=lambda item: item["fecha"],
+    )
+    arrangement_rows_payload = sorted(
+        [
+            {
+                "key": item["key"],
+                "productoId": item["productoId"],
+                "codigo": item["codigo"],
+                "nombre": item["nombre"],
+                "unidades": float(item["unidades"].quantize(Decimal("0.01"))),
+                "pedidos": len(item["pedidoIDs"]),
+                "pedidoIDs": sorted(item["pedidoIDs"]),
+                "totalVendido": float(item["totalVendido"].quantize(Decimal("0.01"))),
+            }
+            for item in arreglos_map.values()
+        ],
+        key=lambda item: (-float(item["unidades"]), -float(item["totalVendido"]), item["nombre"]),
+    )
+    payment_rows_payload = sorted(
+        [
+            {
+                "key": item["key"],
+                "cuenta": item["cuenta"],
+                "pedidos": len(item["pedidosSet"]),
+                "metodos": sorted(item["metodosSet"]),
+                "totalRecaudado": float(item["totalRecaudado"].quantize(Decimal("0.01"))),
+                "promedioPedido": float(
+                    (item["totalRecaudado"] / Decimal(len(item["pedidosSet"]))).quantize(Decimal("0.01"))
+                ) if item["pedidosSet"] else 0.0,
+                "participacionPct": float(
+                    ((item["totalRecaudado"] / total_recaudo_global) * Decimal("100")).quantize(Decimal("0.01"))
+                ) if total_recaudo_global > 0 else 0.0,
+                "ultimoMovimiento": item["ultimoMovimiento"] or "-",
+            }
+            for item in cuentas_map.values()
+        ],
+        key=lambda item: (-float(item["totalRecaudado"]), -int(item["pedidos"]), item["cuenta"]),
+    )
+
+    return {
+        "orderRows": order_rows_payload,
+        "arrangementRows": arrangement_rows_payload,
+        "paymentAccountRows": payment_rows_payload,
     }
 
 
