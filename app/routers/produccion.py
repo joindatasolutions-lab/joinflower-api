@@ -1008,17 +1008,6 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
             ignore_produccion_id=int(produccion.idProduccion),
         )
 
-        simultaneos = _count_simultaneos_en_produccion(
-            db,
-            empresa_id=int(produccion.empresaID),
-            sucursal_id=int(produccion.sucursalID),
-            florista_id=int(produccion.floristaID),
-            ignore_produccion_id=int(produccion.idProduccion),
-        )
-        max_simultaneos = max(int(florista.trabajosSimultaneosPermitidos or 1), 1)
-        if simultaneos >= max_simultaneos:
-            raise HTTPException(status_code=400, detail="El florista alcanzó sus trabajos simultáneos permitidos")
-
     now_utc = _utc_now_naive()
     produccion.estado = produccion_service.estado_produccion_id(db, nuevo_estado)
 
