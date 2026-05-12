@@ -676,7 +676,7 @@ def listar_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    target_fecha = fecha
+    target_fecha = fecha or date.today()
     auto_resumen = AutoAsignacionResumen(
         ejecutada=False,
         evaluadas=0,
