@@ -102,6 +102,8 @@ class PedidoListItem(BaseModel):
     estado: str
     telefono: Optional[str] = None
     telefonoCompleto: Optional[str] = None
+    facturaImpresa: Optional[bool] = None
+    facturaImpresaAt: Optional[str] = None
 
 
 class PedidoListResponse(BaseModel):
@@ -109,6 +111,7 @@ class PedidoListResponse(BaseModel):
     total: int
     page: int
     pageSize: int
+    facturasPendientesImpresion: Optional[int] = None
 
 
 class PedidoDetalleProducto(BaseModel):

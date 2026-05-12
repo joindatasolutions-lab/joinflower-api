@@ -40,7 +40,13 @@ from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
-from app.core.security import assert_same_empresa, get_current_auth_context, is_super_admin_context, require_module_access
+from app.core.security import (
+    assert_same_empresa,
+    get_current_auth_context,
+    is_empresa_admin_context,
+    is_super_admin_context,
+    require_module_access,
+)
 from app.middlewares.rate_limit import limiter
 
 router = APIRouter()
@@ -71,6 +77,7 @@ FLORA_PAYMENT_METHODS = {
     "Transferencia 1340",
     "Transferencia Jaque",
     "Transferencia QR",
+    "RAPPI",
     "Anulado",
 }
 FLORA_SALES_CHANNELS = {
@@ -541,7 +548,8 @@ def _recalculate_pedido_financials(db: Session, *, pedido: Pedido, aplica_iva: b
         domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
         metodos_pago=list(pago_resumen.get("metodosPago") or []),
         omitir_recargo_link=bool(pago_resumen.get("omitirRecargoLink")),
-        descuento_pct=Decimal(str(pago_resumen.get("descuentoPct") or 0)),
+        descuento_monto=Decimal(str(pago_resumen.get("descuentoMonto") or 0)),
+        saldo_favor_monto=Decimal(str(pago_resumen.get("saldoFavorMonto") or 0)),
     )
     pedido.totalNeto = ajustes["total"]
 
@@ -608,13 +616,17 @@ def _load_empresa_menu_rows(db: Session, *, empresa_id: int, seccion: str = "ped
                 opciones = []
         if not isinstance(opciones, list):
             opciones = []
+        codigo = str(row["codigo"])
+        opciones_normalizadas = [str(item) for item in opciones if str(item).strip()]
+        if codigo == "pedido_metodos_pago" and "RAPPI" not in opciones_normalizadas:
+            opciones_normalizadas.append("RAPPI")
         result.append(
             {
-                "codigo": str(row["codigo"]),
+                "codigo": codigo,
                 "titulo": str(row["titulo"]),
                 "seccion": str(row["seccion"]),
                 "tipoControl": str(row["tipo_control"]),
-                "opciones": [str(item) for item in opciones if str(item).strip()],
+                "opciones": opciones_normalizadas,
                 "requeridoAprobacion": bool(row["requerido_aprobacion"]),
                 "activo": bool(row["activo"]),
                 "orden": int(row["orden"] or 0),
@@ -780,16 +792,28 @@ def _extract_payment_adjustments(raw_respuesta: str | None) -> dict:
 
     omitir_recargo_link = bool(metadata.get("omitirRecargoLink", False))
     descuento_pct = float(metadata.get("descuentoPct") or 0)
+    descuento_nota = str(metadata.get("descuentoNota") or "").strip() or None
     recargo_link_pct = float(metadata.get("recargoLinkPct") or 0)
     recargo_link_monto = float(metadata.get("recargoLinkMonto") or 0)
     descuento_monto = float(metadata.get("descuentoMonto") or 0)
+    saldo_favor_monto = float(metadata.get("saldoFavorMonto") or 0)
+    saldo_favor_nota = str(metadata.get("saldoFavorNota") or "").strip() or None
+    factura_impresa = bool(metadata.get("facturaImpresa", False))
+    factura_impresa_at = str(metadata.get("facturaImpresaAt") or "").strip() or None
+    factura_impresa_by = str(metadata.get("facturaImpresaBy") or "").strip() or None
 
     return {
         "omitirRecargoLink": omitir_recargo_link,
         "descuentoPct": descuento_pct,
+        "descuentoNota": descuento_nota,
         "recargoLinkPct": recargo_link_pct,
         "recargoLinkMonto": recargo_link_monto,
         "descuentoMonto": descuento_monto,
+        "saldoFavorMonto": saldo_favor_monto,
+        "saldoFavorNota": saldo_favor_nota,
+        "facturaImpresa": factura_impresa,
+        "facturaImpresaAt": factura_impresa_at,
+        "facturaImpresaBy": factura_impresa_by,
     }
 
 
@@ -799,9 +823,15 @@ def _serialize_pago_metadata(
     canal_flora: str | None,
     omitir_recargo_link: bool | None = None,
     descuento_pct: Decimal | None = None,
+    descuento_nota: str | None = None,
     recargo_link_pct: Decimal | None = None,
     recargo_link_monto: Decimal | None = None,
     descuento_monto: Decimal | None = None,
+    saldo_favor_monto: Decimal | None = None,
+    saldo_favor_nota: str | None = None,
+    factura_impresa: bool | None = None,
+    factura_impresa_at: str | None = None,
+    factura_impresa_by: str | None = None,
 ) -> str | None:
     payload = _safe_parse_json(raw_respuesta)
     metadata = payload.get("_petalopsMetadata")
@@ -824,6 +854,13 @@ def _serialize_pago_metadata(
         else:
             metadata.pop("descuentoPct", None)
 
+    if descuento_nota is not None:
+        cleaned_descuento_nota = str(descuento_nota or "").strip()
+        if cleaned_descuento_nota:
+            metadata["descuentoNota"] = cleaned_descuento_nota
+        else:
+            metadata.pop("descuentoNota", None)
+
     if recargo_link_pct is not None:
         pct_value = float(_round_money_decimal(recargo_link_pct))
         if pct_value > 0:
@@ -844,6 +881,40 @@ def _serialize_pago_metadata(
             metadata["descuentoMonto"] = amount_value
         else:
             metadata.pop("descuentoMonto", None)
+
+    if saldo_favor_monto is not None:
+        amount_value = float(_round_money_decimal(saldo_favor_monto))
+        if amount_value > 0:
+            metadata["saldoFavorMonto"] = amount_value
+        else:
+            metadata.pop("saldoFavorMonto", None)
+
+    if saldo_favor_nota is not None:
+        cleaned_saldo_favor_nota = str(saldo_favor_nota or "").strip()
+        if cleaned_saldo_favor_nota:
+            metadata["saldoFavorNota"] = cleaned_saldo_favor_nota
+        else:
+            metadata.pop("saldoFavorNota", None)
+
+    if factura_impresa is not None:
+        metadata["facturaImpresa"] = bool(factura_impresa)
+        if not factura_impresa:
+            metadata.pop("facturaImpresaAt", None)
+            metadata.pop("facturaImpresaBy", None)
+
+    if factura_impresa_at is not None:
+        cleaned_factura_impresa_at = str(factura_impresa_at or "").strip()
+        if cleaned_factura_impresa_at:
+            metadata["facturaImpresaAt"] = cleaned_factura_impresa_at
+        else:
+            metadata.pop("facturaImpresaAt", None)
+
+    if factura_impresa_by is not None:
+        cleaned_factura_impresa_by = str(factura_impresa_by or "").strip()
+        if cleaned_factura_impresa_by:
+            metadata["facturaImpresaBy"] = cleaned_factura_impresa_by
+        else:
+            metadata.pop("facturaImpresaBy", None)
 
     if metadata:
         payload["_petalopsMetadata"] = metadata
@@ -871,7 +942,8 @@ def _build_pedido_adjustments(
     domicilio: Decimal,
     metodos_pago: list[str],
     omitir_recargo_link: bool,
-    descuento_pct: Decimal,
+    descuento_monto: Decimal,
+    saldo_favor_monto: Decimal,
 ) -> dict:
     subtotal = _round_money_decimal(subtotal)
     iva = _round_money_decimal(iva)
@@ -885,15 +957,19 @@ def _build_pedido_adjustments(
         recargo_link_pct = LINK_SURCHARGE_PCT
         recargo_link_monto = _round_money_decimal((base_total * recargo_link_pct) / Decimal("100"))
 
-    descuento_pct = _round_money_decimal(descuento_pct)
-    if descuento_pct < 0:
-        descuento_pct = Decimal("0.00")
-    if descuento_pct > Decimal("100.00"):
-        descuento_pct = Decimal("100.00")
-
     total_con_recargo = _round_money_decimal(base_total + recargo_link_monto)
-    descuento_monto = _round_money_decimal((total_con_recargo * descuento_pct) / Decimal("100"))
-    total = _round_money_decimal(total_con_recargo - descuento_monto)
+    descuento_monto = _round_money_decimal(descuento_monto)
+    saldo_favor_monto = _round_money_decimal(saldo_favor_monto)
+    if descuento_monto < 0:
+        descuento_monto = Decimal("0.00")
+    if saldo_favor_monto < 0:
+        saldo_favor_monto = Decimal("0.00")
+    if descuento_monto > total_con_recargo:
+        descuento_monto = total_con_recargo
+    total_despues_descuento = _round_money_decimal(total_con_recargo - descuento_monto)
+    if saldo_favor_monto > total_despues_descuento:
+        saldo_favor_monto = total_despues_descuento
+    total = _round_money_decimal(total_despues_descuento - saldo_favor_monto)
 
     return {
         "baseTotal": base_total,
@@ -901,8 +977,9 @@ def _build_pedido_adjustments(
         "omitirRecargoLink": bool(omitir_recargo_link),
         "recargoLinkPct": recargo_link_pct,
         "recargoLinkMonto": recargo_link_monto,
-        "descuentoPct": descuento_pct,
+        "descuentoPct": Decimal("0.00"),
         "descuentoMonto": descuento_monto,
+        "saldoFavorMonto": saldo_favor_monto,
         "total": total,
     }
 
@@ -1008,6 +1085,53 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
         "canalFlora": _extract_canal_flora(pago_row.get("raw_respuesta")),
         **ajustes,
     }
+
+
+def _mark_factura_impresa(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    actor_login: str | None,
+) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT id_pago, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+    if not row:
+        return
+
+    raw_respuesta = _serialize_pago_metadata(
+        row.get("raw_respuesta"),
+        canal_flora=_extract_canal_flora(row.get("raw_respuesta")),
+        factura_impresa=True,
+        factura_impresa_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        factura_impresa_by=str(actor_login or "").strip() or None,
+    )
+    db.execute(
+        text(
+            """
+            UPDATE petalops.pago
+            SET raw_respuesta = :raw_respuesta,
+                updated_at = NOW()
+            WHERE id_pago = :id_pago
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "id_pago": int(row["id_pago"]),
+            "empresa_id": int(empresa_id),
+            "raw_respuesta": raw_respuesta,
+        },
+    )
 
 
 def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[int]) -> dict[int, dict]:
@@ -1171,9 +1295,12 @@ def _upsert_pago_flora(
     monto_efectivo: Decimal | None = None,
     omitir_recargo_link: bool = False,
     descuento_pct: Decimal | None = None,
+    descuento_nota: str | None = None,
     recargo_link_pct: Decimal | None = None,
     recargo_link_monto: Decimal | None = None,
     descuento_monto: Decimal | None = None,
+    saldo_favor_monto: Decimal | None = None,
+    saldo_favor_nota: str | None = None,
 ):
     row = db.execute(
         text(
@@ -1194,9 +1321,12 @@ def _upsert_pago_flora(
         canal_flora=canal_flora,
         omitir_recargo_link=omitir_recargo_link,
         descuento_pct=descuento_pct,
+        descuento_nota=descuento_nota,
         recargo_link_pct=recargo_link_pct,
         recargo_link_monto=recargo_link_monto,
         descuento_monto=descuento_monto,
+        saldo_favor_monto=saldo_favor_monto,
+        saldo_favor_nota=saldo_favor_nota,
     )
 
     if row:
@@ -1517,6 +1647,7 @@ def listar_pedidos(
     q: str | None = Query(None),
     fecha_desde: datetime | None = Query(None, alias="fechaDesde"),
     fecha_hasta: datetime | None = Query(None, alias="fechaHasta"),
+    sin_imprimir: bool = Query(False, alias="sinImprimir"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
@@ -1596,23 +1727,51 @@ def listar_pedidos(
             )
         )
 
-    total = db.query(func.count()).select_from(base.subquery()).scalar()
-
-    ids_page = (
+    candidate_rows = (
         base.distinct()
         .order_by(
             text("\"numeroOrdenFlag\""),
             text("\"ordenListado\" DESC"),
             Pedido.idPedido.desc(),
         )
-        .offset((page - 1) * page_size)
-        .limit(page_size)
         .all()
     )
+    candidate_ids = [int(row[0]) for row in candidate_rows]
+    if not candidate_ids:
+        return PedidoListResponse(items=[], total=0, page=page, pageSize=page_size, facturasPendientesImpresion=0)
 
-    pedido_ids = [int(row[0]) for row in ids_page]
+    estado_rows = (
+        db.query(Pedido.idPedido, EstadoPedido.nombreEstado)
+        .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(candidate_ids))
+        .all()
+    )
+    estado_map = {
+        int(pedido_id): str(nombre_estado or "SIN_ESTADO")
+        for pedido_id, nombre_estado in estado_rows
+    }
+    pago_resumen_map = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=candidate_ids)
+    pending_invoice_ids = [
+        int(pedido_id)
+        for pedido_id in candidate_ids
+        if _estado_permite_factura(estado_map.get(int(pedido_id)))
+        and not bool((pago_resumen_map.get(int(pedido_id)) or {}).get("facturaImpresa"))
+    ]
+    facturas_pendientes_impresion = len(pending_invoice_ids)
+    filtered_ids = pending_invoice_ids if sin_imprimir else candidate_ids
+    total = len(filtered_ids)
+
+    pedido_ids = filtered_ids[(page - 1) * page_size : ((page - 1) * page_size) + page_size]
     if not pedido_ids:
-        return PedidoListResponse(items=[], total=total, page=page, pageSize=page_size)
+        return PedidoListResponse(
+            items=[],
+            total=total,
+            page=page,
+            pageSize=page_size,
+            facturasPendientesImpresion=facturas_pendientes_impresion,
+        )
+
+    pago_resumen_page = {int(pedido_id): pago_resumen_map.get(int(pedido_id), {}) for pedido_id in pedido_ids}
 
     pedido_rows = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
@@ -1630,23 +1789,9 @@ def listar_pedidos(
         .all()
     )
 
-    pagos_rows = db.execute(
-        text(
-            """
-            SELECT pedido_id, metodo_pago
-            FROM petalops.pago
-            WHERE empresa_id = :empresa_id
-              AND pedido_id = ANY(:pedido_ids)
-            """
-        ),
-        {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
-    ).all()
-
     productos_por_pedido: dict[int, list[str]] = {}
     for pedido_id, nombre_producto in detalles_rows:
         productos_por_pedido.setdefault(int(pedido_id), []).append(str(nombre_producto or "Producto"))
-
-    pago_por_pedido = {int(row[0]): (str(row[1]).strip() if row[1] is not None else None) for row in pagos_rows}
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
 
@@ -1680,13 +1825,15 @@ def listar_pedidos(
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
-                metodoPago=pago_por_pedido.get(pedido_id),
-                canalFlora=approval_gate["pagoResumen"]["canalFlora"],
+                metodoPago=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("metodoPago"),
+                canalFlora=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("canalFlora"),
                 puedeAprobar=approval_gate["puedeAprobar"],
                 motivoBloqueoAprobacion=approval_gate["motivo"],
                 estado=estado_nombre,
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
+                facturaImpresa=bool((pago_resumen_page.get(pedido_id) or {}).get("facturaImpresa")),
+                facturaImpresaAt=(pago_resumen_page.get(pedido_id) or {}).get("facturaImpresaAt"),
             )
         )
 
@@ -1702,7 +1849,13 @@ def listar_pedidos(
         )
     )
 
-    return PedidoListResponse(items=items, total=total, page=page, pageSize=page_size)
+    return PedidoListResponse(
+        items=items,
+        total=total,
+        page=page,
+        pageSize=page_size,
+        facturasPendientesImpresion=facturas_pendientes_impresion,
+    )
 
 
 @router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -1827,6 +1980,11 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "recargoLinkPct": float(pago_resumen.get("recargoLinkPct") or 0),
                 "recargoLinkMonto": float(pago_resumen.get("recargoLinkMonto") or 0),
                 "descuentoMonto": float(pago_resumen.get("descuentoMonto") or 0),
+                "descuentoNota": pago_resumen.get("descuentoNota"),
+                "saldoFavorMonto": float(pago_resumen.get("saldoFavorMonto") or 0),
+                "saldoFavorNota": pago_resumen.get("saldoFavorNota"),
+                "facturaImpresa": bool(pago_resumen.get("facturaImpresa")),
+                "facturaImpresaAt": pago_resumen.get("facturaImpresaAt"),
             },
             camposEmpresa={"pedidoDetalle": campos_empresa},
             productos=productos,
@@ -1881,7 +2039,10 @@ class ActualizarDetallePedidoRequest(BaseModel):
     detallePago: list[dict] | None = None
     montoEfectivo: float | None = None
     omitirRecargoLink: bool | None = None
-    descuentoPct: float | None = None
+    descuentoMonto: float | None = None
+    descuentoNota: str | None = None
+    saldoFavorMonto: float | None = None
+    saldoFavorNota: str | None = None
     canalFlora: str | None = None
 
 
@@ -2061,6 +2222,16 @@ def actualizar_detalle_pedido(
             detalle.cantidad = cantidad
             needs_totals_recalc = True
 
+        if any(value is not None for value in (payload.clienteNombre, payload.clienteTelefono)):
+            if not (is_empresa_admin_context(auth) or is_super_admin_context(auth)):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "PEDIDO_CLIENT_EDIT_FORBIDDEN",
+                        "message": "Solo un usuario administrador puede editar nombre o teléfono del cliente.",
+                    },
+                )
+
         if payload.clienteNombre is not None:
             cliente.nombreCompleto = str(payload.clienteNombre).strip() or cliente.nombreCompleto
         if payload.clienteTelefono is not None:
@@ -2174,7 +2345,10 @@ def actualizar_detalle_pedido(
             payload.metodosPago is not None
             or payload.canalFlora is not None
             or payload.omitirRecargoLink is not None
-            or payload.descuentoPct is not None
+            or payload.descuentoMonto is not None
+            or payload.descuentoNota is not None
+            or payload.saldoFavorMonto is not None
+            or payload.saldoFavorNota is not None
             or payload.detallePago is not None
             or payload.montoEfectivo is not None
         ):
@@ -2211,15 +2385,25 @@ def actualizar_detalle_pedido(
                     detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
                 )
 
-            descuento_pct = Decimal(str(
-                payload.descuentoPct
-                if payload.descuentoPct is not None
-                else pago_resumen_actual.get("descuentoPct") or 0
+            descuento_monto = Decimal(str(
+                payload.descuentoMonto
+                if payload.descuentoMonto is not None
+                else pago_resumen_actual.get("descuentoMonto") or 0
             ))
-            if descuento_pct < 0 or descuento_pct > 100:
+            saldo_favor_monto = Decimal(str(
+                payload.saldoFavorMonto
+                if payload.saldoFavorMonto is not None
+                else pago_resumen_actual.get("saldoFavorMonto") or 0
+            ))
+            if descuento_monto < 0:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "ORDER_DISCOUNT_INVALID", "message": "El descuento debe estar entre 0% y 100%."},
+                    detail={"code": "ORDER_DISCOUNT_INVALID", "message": "El descuento debe ser un valor entero positivo."},
+                )
+            if saldo_favor_monto < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "ORDER_SALDO_FAVOR_INVALID", "message": "El saldo a favor debe ser un valor entero positivo."},
                 )
 
             omitir_recargo_link = bool(
@@ -2233,7 +2417,8 @@ def actualizar_detalle_pedido(
                 domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
                 metodos_pago=metodos_pago,
                 omitir_recargo_link=omitir_recargo_link,
-                descuento_pct=descuento_pct,
+                descuento_monto=descuento_monto,
+                saldo_favor_monto=saldo_favor_monto,
             )
             pedido.totalNeto = ajustes["total"]
 
@@ -2284,9 +2469,12 @@ def actualizar_detalle_pedido(
                 monto_efectivo=monto_efectivo,
                 omitir_recargo_link=omitir_recargo_link,
                 descuento_pct=ajustes["descuentoPct"],
+                descuento_nota=payload.descuentoNota if payload.descuentoNota is not None else pago_resumen_actual.get("descuentoNota"),
                 recargo_link_pct=ajustes["recargoLinkPct"],
                 recargo_link_monto=ajustes["recargoLinkMonto"],
                 descuento_monto=ajustes["descuentoMonto"],
+                saldo_favor_monto=ajustes["saldoFavorMonto"],
+                saldo_favor_nota=payload.saldoFavorNota if payload.saldoFavorNota is not None else pago_resumen_actual.get("saldoFavorNota"),
             )
 
         _audit_pedido_action(
@@ -2652,7 +2840,13 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
             observaciones_producto.append(observacion_detalle)
     productos_texto = "\n".join(lineas_productos) if lineas_productos else "Sin productos"
 
-    observaciones = " | ".join(observaciones_producto) or str((entrega.observacionGeneral if entrega else None) or "Sin observaciones")
+    observacion_entrega = str((entrega.observacionGeneral if entrega else None) or "").strip()
+    observacion_productos = " | ".join(observaciones_producto).strip()
+    observaciones_factura = [
+        f"Observaciones productos: {observacion_productos}" if observacion_productos else None,
+        f"Observaciones entrega: {observacion_entrega}" if observacion_entrega else None,
+    ]
+    observaciones = "\n".join([item for item in observaciones_factura if item]) or "Sin observaciones"
     empresa_nombre = str(
         (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "FLORA - TIENDA DE FLORES")
     ).strip()
@@ -2682,6 +2876,9 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     recargo_link_monto = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
     descuento_monto = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
+    saldo_favor_monto = Decimal(str(pago_resumen.get("saldoFavorMonto") or 0))
+    descuento_nota = str(pago_resumen.get("descuentoNota") or "").strip()
+    saldo_favor_nota = str(pago_resumen.get("saldoFavorNota") or "").strip()
     lineas_pago = []
     if detalle_pago:
         for item in detalle_pago:
@@ -2726,7 +2923,10 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Subtotal: {_money_cop(pedido.totalBruto)}",
         f"Domicilio: {_money_cop(getattr(pedido, 'costoDomicilio', 0) or 0)}",
         *( [f"Recargo link ({int(round(float(pago_resumen.get('recargoLinkPct') or 0)))}%): {_money_cop(recargo_link_monto)}"] if recargo_link_monto > 0 else [] ),
-        *( [f"Descuento ({float(pago_resumen.get('descuentoPct') or 0):g}%): -{_money_cop(descuento_monto)}"] if descuento_monto > 0 else [] ),
+        *( [f"Descuento: -{_money_cop(descuento_monto)}"] if descuento_monto > 0 else [] ),
+        *( [f"Nota descuento: {descuento_nota}"] if descuento_nota else [] ),
+        *( [f"Saldo a favor: -{_money_cop(saldo_favor_monto)}"] if saldo_favor_monto > 0 else [] ),
+        *( [f"Nota saldo a favor: {saldo_favor_nota}"] if saldo_favor_nota else [] ),
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
         f"Operador: {operador_nombre}",
@@ -2734,6 +2934,14 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         "----------------------------------------",
         mensaje_final,
     ]
+
+    _mark_factura_impresa(
+        db,
+        pedido_id=int(pedido.idPedido),
+        empresa_id=int(pedido.empresaID),
+        actor_login=getattr(auth, "login", None),
+    )
+    db.commit()
 
     pdf_bytes = _render_factura_pdf(contenido_lineas)
     headers = {
