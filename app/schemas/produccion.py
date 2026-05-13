@@ -81,10 +81,15 @@ class AutoAsignacionResumen(BaseModel):
     sinDisponibilidad: int
 
 
+class ProduccionMetricasResumen(BaseModel):
+    pendientesFuturos: int
+
+
 class ProduccionListResponse(BaseModel):
     items: List[ProduccionItem]
     total: int
     autoAsignacion: Optional[AutoAsignacionResumen] = None
+    metricas: Optional[ProduccionMetricasResumen] = None
 
 
 class ProduccionResumenResponse(BaseModel):

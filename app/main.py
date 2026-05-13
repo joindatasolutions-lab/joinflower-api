@@ -1,4 +1,5 @@
-﻿import os
+import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logger import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.database import engine
+from app.jobs.produccion_autoassign_job import ProduccionAutoassignJob, autoassign_job_enabled
 from app.middlewares.rate_limit import limiter
 from app.routers import auth
 from app.routers import barrios
@@ -19,8 +21,8 @@ from app.routers import cliente
 from app.routers import domicilios
 from app.routers import entregas
 from app.routers import inventario
-from app.routers import pipeline
 from app.routers import pedido
+from app.routers import pipeline
 from app.routers import produccion
 
 configure_logging()
@@ -43,9 +45,24 @@ extra_origins = [
 if extra_origins:
     ALLOWED_ORIGINS.extend(extra_origins)
 
+_produccion_autoassign_job = ProduccionAutoassignJob()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if autoassign_job_enabled():
+        _produccion_autoassign_job.start()
+    try:
+        yield
+    finally:
+        if autoassign_job_enabled():
+            _produccion_autoassign_job.stop()
+
+
 app = FastAPI(
     title="PetalOps API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 register_exception_handlers(app)

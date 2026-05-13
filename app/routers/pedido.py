@@ -1699,16 +1699,18 @@ def listar_pedidos(
     if sucursal_id is not None:
         base = base.filter(Pedido.sucursalID == sucursal_id)
 
-    if estado:
+    has_search = bool(str(q or "").strip())
+
+    if estado and not has_search:
         base = base.filter(func.upper(EstadoPedido.nombreEstado) == estado.upper())
 
-    if fecha_desde:
+    if fecha_desde and not has_search:
         base = base.filter(Pedido.fechaPedido >= fecha_desde)
 
-    if fecha_hasta:
+    if fecha_hasta and not has_search:
         base = base.filter(Pedido.fechaPedido <= fecha_hasta)
 
-    if q:
+    if has_search:
         term = f"%{q.strip()}%"
         base = (
             base.outerjoin(PedidoDetalle, PedidoDetalle.pedidoID == Pedido.idPedido)

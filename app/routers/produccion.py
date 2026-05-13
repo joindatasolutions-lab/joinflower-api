@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, func, text
+from sqlalchemy import String, and_, func, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
@@ -34,6 +34,7 @@ from app.schemas.produccion import (
     ProduccionItem,
     ProduccionKanbanResponse,
     ProduccionListResponse,
+    ProduccionMetricasResumen,
     ProduccionReasignarRequest,
     ProduccionRecalcularPedidoRequest,
     ProduccionResumenResponse,
@@ -354,6 +355,8 @@ def _build_items(
     fecha_programada: date | None,
     estado: str | None,
     incluir_cancelado: bool,
+    include_overdue_unassigned: bool = False,
+    search_q: str | None = None,
 ) -> list[ProduccionItem]:
     q = (
         db.query(Produccion, Pedido, Cliente, Entrega, Florista)
@@ -366,10 +369,36 @@ def _build_items(
 
     if sucursal_id is not None:
         q = q.filter(Produccion.sucursalID == sucursal_id)
-    if fecha_programada is not None:
-        q = q.filter(Produccion.fechaProgramadaProduccion == fecha_programada)
+    if search_q:
+        search_term = f"%{str(search_q).strip()}%"
+        q = q.filter(
+            or_(
+                func.cast(Pedido.idPedido, String).ilike(search_term),
+                func.cast(Pedido.numeroPedido, String).ilike(search_term),
+                func.coalesce(Pedido.codigoPedido, "").ilike(search_term),
+                func.coalesce(Cliente.nombreCompleto, "").ilike(search_term),
+                func.coalesce(Florista.nombre, "").ilike(search_term),
+            )
+        )
+    estado_pendiente_id = produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE)
+    estado_filtro_norm = _estado_produccion_norm(estado, db=db) if estado else None
 
-    if estado:
+    if fecha_programada is not None and not search_q:
+        if include_overdue_unassigned and estado_filtro_norm in {None, ESTADO_PENDIENTE}:
+            q = q.filter(
+                or_(
+                    Produccion.fechaProgramadaProduccion == fecha_programada,
+                    and_(
+                        Produccion.fechaProgramadaProduccion < fecha_programada,
+                        Produccion.floristaID.is_(None),
+                        Produccion.estado == estado_pendiente_id,
+                    ),
+                )
+            )
+        else:
+            q = q.filter(Produccion.fechaProgramadaProduccion == fecha_programada)
+
+    if estado and not search_q:
         q = q.filter(Produccion.estado == produccion_service.estado_produccion_id(db, estado))
     elif not incluir_cancelado:
         q = q.filter(Produccion.estado != produccion_service.estado_produccion_id(db, ESTADO_CANCELADO))
@@ -670,6 +699,7 @@ def listar_produccion(
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     fecha: date | None = Query(None),
     estado: str | None = Query(None),
+    q: str | None = Query(None),
     incluir_cancelado: bool = Query(False, alias="incluirCancelado"),
     auto_asignar_pendientes_hoy: bool = Query(True, alias="autoAsignarPendientesHoy"),
     db: Session = Depends(get_db),
@@ -677,6 +707,11 @@ def listar_produccion(
 ):
     assert_same_empresa(auth, empresa_id)
     target_fecha = fecha or date.today()
+    current_florista = None
+    include_overdue_unassigned = False
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        current_florista = _current_florista_for_user(db, auth)
+        include_overdue_unassigned = current_florista is not None
     auto_resumen = AutoAsignacionResumen(
         ejecutada=False,
         evaluadas=0,
@@ -709,8 +744,27 @@ def listar_produccion(
         fecha_programada=target_fecha,
         estado=estado,
         incluir_cancelado=incluir_cancelado,
+        include_overdue_unassigned=include_overdue_unassigned,
+        search_q=q,
     )
-    return ProduccionListResponse(items=items, total=len(items), autoAsignacion=auto_resumen)
+    estado_pendiente_id = produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE)
+    futuros_pendientes_q = (
+        db.query(func.count(Produccion.idProduccion))
+        .filter(
+            Produccion.empresaID == empresa_id,
+            Produccion.estado == estado_pendiente_id,
+            Produccion.fechaProgramadaProduccion > date.today(),
+        )
+    )
+    if sucursal_id is not None:
+        futuros_pendientes_q = futuros_pendientes_q.filter(Produccion.sucursalID == sucursal_id)
+    pendientes_futuros = int(futuros_pendientes_q.scalar() or 0)
+    return ProduccionListResponse(
+        items=items,
+        total=len(items),
+        autoAsignacion=auto_resumen,
+        metricas=ProduccionMetricasResumen(pendientesFuturos=pendientes_futuros),
+    )
 
 
 @router.post("/asignar-pendientes-hoy", response_model=AutoAsignacionResponse, dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
