@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import re
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -106,6 +107,11 @@ def _tenant_order_rules(empresa_id: int) -> dict:
 
 def _activo_truthy(column):
     return func.lower(cast(column, String)).in_(["true", "t", "1"])
+
+
+def _catalog_code_from_name(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    return normalized or "metodo_pago"
 
 
 def _numero_pedido_humano(pedido: Pedido) -> str:
@@ -1046,8 +1052,14 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
             ),
             None,
         )
+        metodo_pago_legacy = str(pago_row.get("metodo_pago") or "").strip() if pago_row else ""
+        metodos_pago_legacy = _parse_payment_methods(metodo_pago_legacy)
+        if not metodos_pago and metodos_pago_legacy:
+            metodos_pago = metodos_pago_legacy
         if metodos_pago or canal_row:
-            metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+            metodo_pago = " | ".join(metodos_pago) if metodos_pago else (metodo_pago_legacy or None)
+            if not detalle_pago and len(metodos_pago) == 1 and pago_row:
+                detalle_pago = [{"metodo": metodos_pago[0], "monto": float(pago_row.get("monto") or 0)}]
             return {
                 "metodoPago": metodo_pago,
                 "metodosPago": metodos_pago,
@@ -1203,12 +1215,18 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
         detalle_pago = phase2_rows.get(int(pedido_id), [])
         metodos_pago = [str(item["metodo"]).strip() for item in detalle_pago if str(item.get("metodo") or "").strip()]
         canal_flora = canales_map.get(int(pedido_id))
+        metodo_pago_legacy = str(pago_row.get("metodo_pago") or "").strip() if pago_row else ""
+        metodos_pago_legacy = _parse_payment_methods(metodo_pago_legacy)
+        if not metodos_pago and metodos_pago_legacy:
+            metodos_pago = metodos_pago_legacy
         if metodos_pago or canal_flora:
             metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
             monto_efectivo = next(
                 (float(item["monto"] or 0) for item in detalle_pago if _is_cash_payment_method(item["metodo"])),
                 None,
             )
+            if not detalle_pago and len(metodos_pago) == 1 and pago_row:
+                detalle_pago = [{"metodo": metodos_pago[0], "monto": float(pago_row.get("monto") or 0)}]
             result[int(pedido_id)] = {
                 "metodoPago": metodo_pago,
                 "metodosPago": metodos_pago,
@@ -1423,14 +1441,64 @@ def _upsert_pago_flora(
                 SELECT id_metodo_pago, nombre
                 FROM petalops.metodo_pago_catalogo
                 WHERE empresa_id = :empresa_id
-                  AND nombre = ANY(:names)
+                  AND lower(nombre) = ANY(:names)
                 """
             ),
-            {"empresa_id": int(empresa_id), "names": metodos_pago},
+            {"empresa_id": int(empresa_id), "names": [str(item or "").strip().lower() for item in metodos_pago]},
         ).mappings().all()
-        metodo_by_name = {str(row["nombre"]).strip(): int(row["id_metodo_pago"]) for row in metodo_catalog_rows}
+        metodo_by_name = {str(row["nombre"]).strip().lower(): int(row["id_metodo_pago"]) for row in metodo_catalog_rows}
     else:
         metodo_by_name = {}
+
+    missing_methods = [
+        metodo
+        for metodo in metodos_pago
+        if str(metodo or "").strip() and str(metodo or "").strip().lower() not in metodo_by_name
+    ]
+    for metodo in missing_methods:
+        next_order_row = db.execute(
+            text(
+                """
+                SELECT COALESCE(MAX(orden), 0) + 1
+                FROM petalops.metodo_pago_catalogo
+                WHERE empresa_id = :empresa_id
+                """
+            ),
+            {"empresa_id": int(empresa_id)},
+        ).first()
+        next_order = int(next_order_row[0] or 1) if next_order_row else 1
+        inserted = db.execute(
+            text(
+                """
+                INSERT INTO petalops.metodo_pago_catalogo (
+                    empresa_id,
+                    codigo,
+                    nombre,
+                    orden,
+                    activo,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    :empresa_id,
+                    :codigo,
+                    :nombre,
+                    :orden,
+                    TRUE,
+                    NOW(),
+                    NOW()
+                )
+                RETURNING id_metodo_pago
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "codigo": _catalog_code_from_name(metodo),
+                "nombre": str(metodo).strip(),
+                "orden": next_order,
+            },
+        ).first()
+        if inserted and inserted[0] is not None:
+            metodo_by_name[str(metodo).strip().lower()] = int(inserted[0])
 
     db.execute(
         text(
@@ -1456,7 +1524,7 @@ def _upsert_pago_flora(
         breakdown_by_method[metodos_pago[0]] = _round_money_decimal(monto)
 
     for index, metodo in enumerate(metodos_pago, start=1):
-        metodo_id = metodo_by_name.get(metodo)
+        metodo_id = metodo_by_name.get(str(metodo).strip().lower())
         if metodo_id is None:
             continue
         monto_metodo = breakdown_by_method.get(metodo)
@@ -1519,7 +1587,7 @@ def _upsert_pago_flora(
                 SELECT id_canal_venta
                 FROM petalops.canal_venta
                 WHERE empresa_id = :empresa_id
-                  AND nombre = :nombre
+                  AND lower(nombre) = lower(:nombre)
                 LIMIT 1
                 """
             ),
