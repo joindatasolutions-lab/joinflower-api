@@ -253,6 +253,7 @@ def seleccionar_florista_auto(
         .filter(
             Florista.empresaID == empresa_id,
             Florista.sucursalID == sucursal_id,
+            func.upper(Florista.cargo) == "FLORISTA",
             _activo_truthy(Florista.activo),
         )
         .all()

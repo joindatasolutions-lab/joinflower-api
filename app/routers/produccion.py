@@ -225,6 +225,9 @@ def _count_simultaneos_en_produccion(db: Session, empresa_id: int, sucursal_id: 
 
 
 def _validate_florista_disponibilidad(db: Session, florista: Florista, fecha_programada: date, empresa_id: int, sucursal_id: int, ignore_produccion_id: int | None = None):
+    if str(getattr(florista, "cargo", "") or "").strip().upper() != "FLORISTA":
+        raise HTTPException(status_code=400, detail="El empleado seleccionado no tiene perfil de florista")
+
     if _estado_florista_norm(florista.estado) != "Activo" or bool(florista.activo) is False:
         raise HTTPException(status_code=400, detail="El florista no está Activo")
 
@@ -933,6 +936,7 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
                 Florista.idFlorista == payload.floristaID,
                 Florista.empresaID == produccion.empresaID,
                 Florista.sucursalID == produccion.sucursalID,
+                func.upper(Florista.cargo) == "FLORISTA",
             )
             .first()
         )
@@ -1047,7 +1051,10 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
         florista = (
             db.query(Florista)
             .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
-            .filter(Florista.idFlorista == produccion.floristaID)
+            .filter(
+                Florista.idFlorista == produccion.floristaID,
+                func.upper(Florista.cargo) == "FLORISTA",
+            )
             .first()
         )
         if not florista:
@@ -1152,7 +1159,15 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
             produccion.fechaProgramadaProduccion = fecha_programada
 
             if produccion.floristaID:
-                florista = db.query(Florista).filter(Florista.idFlorista == produccion.floristaID).first()
+                florista = (
+                    db.query(Florista)
+                    .join(PerfilFlorista, PerfilFlorista.empleadoID == Florista.idFlorista)
+                    .filter(
+                        Florista.idFlorista == produccion.floristaID,
+                        func.upper(Florista.cargo) == "FLORISTA",
+                    )
+                    .first()
+                )
                 if not florista:
                     produccion.floristaID = None
                 else:

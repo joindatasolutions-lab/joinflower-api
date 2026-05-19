@@ -1141,6 +1141,22 @@ def actualizar_estado_usuario(
 
     usuario.estado = estado
     usuario.updatedAt = datetime.now(timezone.utc)
+    db.execute(
+        text(
+            """
+            UPDATE petalops.empleado
+            SET activo = :activo,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE empresa_id = :empresa_id
+              AND usuario_id = :usuario_id
+            """
+        ),
+        {
+            "activo": 1 if estado == "Activo" else 0,
+            "empresa_id": int(usuario.empresaID),
+            "usuario_id": int(usuario.idusuario),
+        },
+    )
     _audit_user_action(
         db,
         actor=auth,
