@@ -110,6 +110,9 @@ DEFAULT_ROLE_MODULE_POLICY = {
         "pedidos": (1, 1, 1, 0),
         "domicilios": (1, 1, 1, 0),
     },
+    "Recepcion": {
+        "pedidos": (1, 1, 1, 0),
+    },
     "Domiciliario": {
         "domicilios": (1, 1, 1, 0),
     },
@@ -951,6 +954,8 @@ def listar_usuarios(
         query = query.filter(Usuario.sucursalID == sucursal_id)
     if estado:
         query = query.filter(func.upper(Usuario.estado) == str(estado).strip().upper())
+    else:
+        query = query.filter(func.upper(Usuario.estado) != "ELIMINADO")
     if q:
         term = f"%{str(q).strip()}%"
         query = query.filter(
@@ -1195,6 +1200,19 @@ def eliminar_usuario(
 
         _ensure_usuario_modulo_table(db)
         db.execute(text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"), {"user_id": target_id})
+        db.execute(
+            text(
+                """
+                UPDATE petalops.empleado
+                SET usuario_id = NULL,
+                    activo = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE empresa_id = :empresa_id
+                  AND usuario_id = :user_id
+                """
+            ),
+            {"empresa_id": int(usuario.empresaID), "user_id": target_id},
+        )
         _audit_user_action(
             db,
             actor=auth,
@@ -1207,7 +1225,39 @@ def eliminar_usuario(
             },
         )
         db.delete(usuario)
-        db.commit()
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
+            deleted_login = f"deleted_{target_id}_{str(usuario.login or '').strip()}"[:80]
+            usuario.login = deleted_login
+            usuario.email = f"{deleted_login}@deleted.local"
+            usuario.estado = "Eliminado"
+            usuario.updatedAt = datetime.now(timezone.utc)
+            _ensure_usuario_modulo_table(db)
+            db.execute(text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"), {"user_id": target_id})
+            db.execute(
+                text(
+                    """
+                    UPDATE petalops.empleado
+                    SET usuario_id = NULL,
+                        activo = 0,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE empresa_id = :empresa_id
+                      AND usuario_id = :user_id
+                    """
+                ),
+                {"empresa_id": int(usuario.empresaID), "user_id": target_id},
+            )
+            _audit_user_action(
+                db,
+                actor=auth,
+                action="USER_SOFT_DELETED",
+                target=usuario,
+                extra={"login": str(usuario.login or ""), "reason": "hard_delete_blocked_by_references"},
+            )
+            db.commit()
         return UserDeleteResponse(status="ok", userID=target_id)
     except SQLAlchemyError:
         db.rollback()

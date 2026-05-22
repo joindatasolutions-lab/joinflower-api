@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.security import assert_same_empresa, get_current_auth_context, is_empresa_admin_context, is_super_admin_context, require_module_access
 from app.database import get_db
 from app.models.cliente import Cliente
 from app.schemas.cliente import ClientePayload, ClienteUpdatePayload
@@ -170,6 +170,9 @@ def update_cliente(
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=403, detail="Solo administradores pueden editar clientes")
+
     scoped_empresa_id = _resolve_empresa_id(auth, int(payload.empresaID))
 
     cliente = (

@@ -1900,6 +1900,7 @@ def listar_pedidos(
                 puedeAprobar=approval_gate["puedeAprobar"],
                 motivoBloqueoAprobacion=approval_gate["motivo"],
                 estado=estado_nombre,
+                motivoRechazo=pedido.motivoRechazo,
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
                 facturaImpresa=bool((pago_resumen_page.get(pedido_id) or {}).get("facturaImpresa")),
@@ -3439,17 +3440,41 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         raise HTTPException(status_code=404, detail="Pedido no encontrado")
     assert_same_empresa(auth, int(pedido.empresaID))
 
-    pendientes = _ids_estado_pendiente(db)
-    if pendientes and int(pedido.estadoPedidoID) not in pendientes:
-        raise HTTPException(status_code=400, detail="Solo se pueden rechazar pedidos en estado Pendiente")
+    estado_origen_id = int(pedido.estadoPedidoID)
+    estado_actual = _estado_pedido_nombre(db, estado_origen_id)
+    es_pendiente = estado_actual in {"CREADO", "PENDIENTE"}
+    es_aprobado = estado_actual in {"APROBADO", "PAGADO"}
+    if not es_pendiente and not (es_aprobado and (is_empresa_admin_context(auth) or is_super_admin_context(auth))):
+        raise HTTPException(status_code=400, detail="Solo administradores pueden cancelar pedidos aprobados")
 
-    estado_rechazado = _buscar_estado_por_nombre(db, "RECHAZADO", "CANCELADO")
+    estado_rechazado = (
+        _buscar_estado_por_nombre(db, "CANCELADO")
+        if es_aprobado
+        else _buscar_estado_por_nombre(db, "RECHAZADO", "CANCELADO")
+    )
     if not estado_rechazado:
-        raise HTTPException(status_code=400, detail="No existe estado de rechazo activo (RECHAZADO/CANCELADO)")
+        raise HTTPException(status_code=400, detail="No existe estado de rechazo/cancelación activo")
+
+    if not _transicion_pedido_permitida(
+        db,
+        int(pedido.empresaID),
+        estado_origen_id,
+        int(estado_rechazado.idEstadoPedido),
+    ):
+        raise HTTPException(status_code=400, detail="Transición de estado inválida para el pedido")
 
     pedido.estadoPedidoID = estado_rechazado.idEstadoPedido
     pedido.motivoRechazo = motivo[:300]
     pedido.updatedAt = datetime.now(timezone.utc)
+    _audit_pedido_action(
+        db=db,
+        actor=auth,
+        pedido=pedido,
+        accion=("CANCELAR_PEDIDO_APROBADO" if es_aprobado else "RECHAZAR_PEDIDO"),
+        estado_origen_id=estado_origen_id,
+        estado_destino_id=int(estado_rechazado.idEstadoPedido),
+        extra={"motivo": pedido.motivoRechazo},
+    )
     db.commit()
 
     return {
