@@ -53,6 +53,7 @@ def test_asignar_produccion_does_not_block_when_daily_capacity_is_exceeded(monke
         empresaID=3,
         sucursalID=3,
         nombre="Elibeth Salgado",
+        cargo="Florista",
         estado="Activo",
         activo=1,
         capacidadDiaria=1,

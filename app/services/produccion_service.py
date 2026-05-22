@@ -259,7 +259,7 @@ def seleccionar_florista_auto(
         .all()
     )
 
-    ranking: list[tuple[int, float, int, Florista]] = []
+    ranking: list[tuple[int, int, Florista]] = []
     for florista in floristas:
         fid = int(florista.idFlorista)
         if excluded_florista_id is not None and fid == excluded_florista_id:
@@ -269,7 +269,6 @@ def seleccionar_florista_auto(
         if is_florista_in_incapacity(florista, fecha_programada):
             continue
 
-        capacidad = max(int(florista.capacidadDiaria or 0), 1)
         ocupacion = count_carga_florista(
             db=db,
             empresa_id=empresa_id,
@@ -278,14 +277,11 @@ def seleccionar_florista_auto(
             fecha_programada=fecha_programada,
             ignore_produccion_id=ignore_produccion_id,
         )
-        if ocupacion >= capacidad:
-            continue
 
-        ratio = ocupacion / capacidad
-        ranking.append((ocupacion, ratio, fid, florista))
+        ranking.append((ocupacion, fid, florista))
 
-    ranking.sort(key=lambda item: (item[0], item[1], item[2]))
-    return ranking[0][3] if ranking else None
+    ranking.sort(key=lambda item: (item[0], item[1]))
+    return ranking[0][2] if ranking else None
 
 
 def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
