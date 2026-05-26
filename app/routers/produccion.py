@@ -703,13 +703,14 @@ def listar_produccion(
     fecha: date | None = Query(None),
     estado: str | None = Query(None),
     q: str | None = Query(None),
+    todas_fechas: bool = Query(False, alias="todasFechas"),
     incluir_cancelado: bool = Query(False, alias="incluirCancelado"),
     auto_asignar_pendientes_hoy: bool = Query(True, alias="autoAsignarPendientesHoy"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    target_fecha = fecha or date.today()
+    target_fecha = None if todas_fechas else (fecha or date.today())
     current_florista = None
     include_overdue_unassigned = False
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
@@ -1023,6 +1024,15 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
         produccion_logger.warning("Producción no encontrada. produccion_id=%s", produccion_id)
         raise _err("PRODUCCION_NOT_FOUND", "Registro de producción no encontrado", status_code=404)
     assert_same_empresa(auth, int(produccion.empresaID))
+
+    if not is_super_admin_context(auth) and not is_empresa_admin_context(auth):
+        current_florista = _current_florista_for_user(db, auth)
+        if (
+            current_florista is None
+            or produccion.floristaID is None
+            or int(produccion.floristaID) != int(current_florista.idFlorista)
+        ):
+            raise HTTPException(status_code=403, detail="Solo puedes cambiar el estado de tus propias producciones")
 
     estado_actual = _estado_produccion_norm(produccion.estado, db=db)
     nuevo_estado = _estado_produccion_norm(payload.nuevoEstado, db=db)

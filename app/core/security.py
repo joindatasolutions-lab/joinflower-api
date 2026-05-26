@@ -108,25 +108,8 @@ def is_global_join_login(login: str | None) -> bool:
 
 ROLE_SUPER_ADMIN = {"super_admin", "join_superadmin"}
 ROLE_EMPRESA_ADMIN = {"empresa_admin", "admin", "empresa_admin_impersonado"}
-ROLE_MODULE_LIMITS = {
-    "pedidos": {"pedidos", "domicilios"},
-}
-ROLE_PERMISSION_BASELINES = {
-    "pedidos": {
-        "pedidos": {
-            "puedeVer": True,
-            "puedeCrear": True,
-            "puedeEditar": True,
-            "puedeEliminar": False,
-        },
-        "domicilios": {
-            "puedeVer": True,
-            "puedeCrear": True,
-            "puedeEditar": True,
-            "puedeEliminar": False,
-        },
-    },
-}
+ROLE_MODULE_LIMITS = {}
+ROLE_PERMISSION_BASELINES = {}
 
 
 def is_super_admin_context(auth: AuthContext) -> bool:
@@ -628,6 +611,14 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         if user_overrides is not None:
             modulos_usuario = {modulo for modulo, activo in user_overrides.items() if activo}
             modulos_plan = modulos_plan.intersection(modulos_usuario)
+
+            for modulo in modulos_plan:
+                permisos[modulo] = {
+                    "puedeVer": True,
+                    "puedeCrear": True,
+                    "puedeEditar": True,
+                    "puedeEliminar": bool(permisos.get(modulo, {}).get("puedeEliminar", False)),
+                }
 
             for modulo, data in permisos.items():
                 if modulo not in modulos_usuario:

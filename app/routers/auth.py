@@ -1,6 +1,7 @@
 ﻿from datetime import datetime, timezone
 import json
 import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, text
@@ -12,7 +13,6 @@ from app.core.security import (
     JWT_EXPIRE_MINUTES,
     _quote_ident,
     _resolve_table_spec,
-    apply_role_module_limits,
     auth_schema_error,
     create_access_token,
     get_current_auth_context,
@@ -360,6 +360,16 @@ def _normalize_module_list(values: list[str] | None) -> list[str]:
     return normalized
 
 
+def _user_email_or_default(raw_email: str | None, login: str, user_id: int | None = None) -> str:
+    email = str(raw_email or "").strip().lower()
+    if email:
+        return email
+    safe_login = re.sub(r"[^a-z0-9._-]+", "_", str(login or "").strip().lower()).strip("._-")
+    if not safe_login:
+        safe_login = f"usuario_{user_id}" if user_id is not None else "usuario"
+    return f"{safe_login}@petalops.local"
+
+
 def _load_role_viewable_modules(db: Session, rol_id: int) -> set[str]:
     permiso_table, permiso_columns = _resolve_table_spec(
         db,
@@ -414,8 +424,7 @@ def _load_user_modules(db: Session, user_id: int, role_name: str | None = None) 
     if not overrides:
         return []
     modules = {modulo for modulo, activo in overrides.items() if bool(activo)}
-    limited_modules, _ = apply_role_module_limits(role_name, modules, {})
-    return sorted(limited_modules)
+    return sorted(modules)
 
 
 def _next_florista_internal_number(db: Session, empresa_id: int, sucursal_id: int | None) -> int:
@@ -818,7 +827,7 @@ def crear_usuario(
         _ensure_default_operational_roles(db, target_empresa_id)
 
         login = payload.login.strip().lower()
-        email = payload.email.strip().lower()
+        email = _user_email_or_default(payload.email, login)
         estado = (payload.estado or "Activo").strip().title()
         if estado not in {"Activo", "Inactivo"}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="estado debe ser Activo o Inactivo")
@@ -858,16 +867,8 @@ def crear_usuario(
             for item in _build_empresa_module_items(db, target_empresa_id)
             if bool(item.activo)
         }
-        role_viewable_modules = _load_role_viewable_modules(db, int(payload.rolID))
-        effective_modules = (
-            available_modules.intersection(role_viewable_modules)
-            if role_viewable_modules
-            else set(available_modules)
-        )
         requested_user_modules = _normalize_module_list(payload.modulosAcceso)
-        selected_user_modules = [module for module in requested_user_modules if module in effective_modules]
-        if payload.modulosAcceso is not None and not selected_user_modules and effective_modules:
-            selected_user_modules = sorted(effective_modules)
+        selected_user_modules = [module for module in requested_user_modules if module in available_modules]
 
         usuario = Usuario(
             empresaID=target_empresa_id,
@@ -1023,7 +1024,7 @@ def actualizar_usuario(
         _ensure_default_operational_roles(db, int(usuario.empresaID))
 
         login = payload.login.strip().lower()
-        email = payload.email.strip().lower()
+        email = str(usuario.email or "").strip().lower() if payload.email is None else _user_email_or_default(payload.email, login, int(usuario.idusuario))
         estado = (payload.estado or "Activo").strip().title()
         if estado not in {"Activo", "Inactivo"}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="estado debe ser Activo o Inactivo")
@@ -1059,16 +1060,8 @@ def actualizar_usuario(
             for item in _build_empresa_module_items(db, target_empresa_id)
             if bool(item.activo)
         }
-        role_viewable_modules = _load_role_viewable_modules(db, int(payload.rolID))
-        effective_modules = (
-            available_modules.intersection(role_viewable_modules)
-            if role_viewable_modules
-            else set(available_modules)
-        )
         requested_user_modules = _normalize_module_list(payload.modulosAcceso)
-        selected_user_modules = [module for module in requested_user_modules if module in effective_modules]
-        if payload.modulosAcceso is not None and not selected_user_modules and effective_modules:
-            selected_user_modules = sorted(effective_modules)
+        selected_user_modules = [module for module in requested_user_modules if module in available_modules]
 
         usuario.nombre = payload.nombre.strip()
         usuario.login = login

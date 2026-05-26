@@ -108,7 +108,7 @@ class UserCreateRequest(BaseModel):
     nombre: str = Field(min_length=3)
     login: str = Field(min_length=3)
     password: str = Field(min_length=6)
-    email: str = Field(min_length=3)
+    email: str | None = None
     rolID: int
     sucursalID: int
     estado: str | None = "Activo"
@@ -166,7 +166,7 @@ class UserDetailResponse(BaseModel):
 class UserUpdateRequest(BaseModel):
     nombre: str = Field(min_length=3)
     login: str = Field(min_length=3)
-    email: str = Field(min_length=3)
+    email: str | None = None
     password: str | None = Field(default=None, min_length=6)
     rolID: int
     sucursalID: int
