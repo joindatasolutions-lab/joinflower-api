@@ -360,13 +360,38 @@ def _build_items(
     incluir_cancelado: bool,
     include_overdue_unassigned: bool = False,
     search_q: str | None = None,
+    metric_filter: str | None = None,
 ) -> list[ProduccionItem]:
     q = (
         db.query(Produccion, Pedido, Cliente, Entrega, Florista)
-        .join(Pedido, Pedido.idPedido == Produccion.pedidoID)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
-        .outerjoin(Florista, Florista.idFlorista == Produccion.floristaID)
+        .join(
+            Pedido,
+            and_(
+                Pedido.idPedido == Produccion.pedidoID,
+                Pedido.empresaID == Produccion.empresaID,
+            ),
+        )
+        .join(
+            Cliente,
+            and_(
+                Cliente.idCliente == Pedido.clienteID,
+                Cliente.empresaID == Pedido.empresaID,
+            ),
+        )
+        .outerjoin(
+            Entrega,
+            and_(
+                Entrega.pedidoID == Pedido.idPedido,
+                Entrega.empresaID == Pedido.empresaID,
+            ),
+        )
+        .outerjoin(
+            Florista,
+            and_(
+                Florista.idFlorista == Produccion.floristaID,
+                Florista.empresaID == Produccion.empresaID,
+            ),
+        )
         .filter(Produccion.empresaID == empresa_id)
     )
 
@@ -385,8 +410,19 @@ def _build_items(
         )
     estado_pendiente_id = produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE)
     estado_filtro_norm = _estado_produccion_norm(estado, db=db) if estado else None
+    metric_filter_norm = str(metric_filter or "").strip()
 
-    if fecha_programada is not None and not search_q:
+    if metric_filter_norm and not search_q:
+        q = q.filter(Produccion.estado == estado_pendiente_id)
+        if metric_filter_norm == "pendientesHoy":
+            q = q.filter(Produccion.fechaProgramadaProduccion == date.today())
+        elif metric_filter_norm == "sinAsignar":
+            q = q.filter(Produccion.floristaID.is_(None))
+        elif metric_filter_norm == "atrasados":
+            q = q.filter(Produccion.fechaProgramadaProduccion < date.today())
+        elif metric_filter_norm == "pendientesFuturos":
+            q = q.filter(Produccion.fechaProgramadaProduccion > date.today())
+    elif fecha_programada is not None and not search_q:
         if include_overdue_unassigned and estado_filtro_norm in {None, ESTADO_PENDIENTE}:
             q = q.filter(
                 or_(
@@ -704,13 +740,15 @@ def listar_produccion(
     estado: str | None = Query(None),
     q: str | None = Query(None),
     todas_fechas: bool = Query(False, alias="todasFechas"),
+    metric_filter: str | None = Query(None, alias="metricFilter"),
     incluir_cancelado: bool = Query(False, alias="incluirCancelado"),
     auto_asignar_pendientes_hoy: bool = Query(True, alias="autoAsignarPendientesHoy"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    target_fecha = None if todas_fechas else (fecha or date.today())
+    metric_filter = metric_filter if metric_filter in {"pendientesHoy", "sinAsignar", "atrasados", "pendientesFuturos"} else None
+    target_fecha = None if (todas_fechas or metric_filter) else (fecha or date.today())
     current_florista = None
     include_overdue_unassigned = False
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
@@ -723,7 +761,7 @@ def listar_produccion(
         sinDisponibilidad=0,
     )
 
-    if auto_asignar_pendientes_hoy:
+    if auto_asignar_pendientes_hoy and not metric_filter and not q and target_fecha == date.today():
         stats = produccion_service.asignar_pendientes_por_fecha(
             db=db,
             empresa_id=empresa_id,
@@ -750,24 +788,33 @@ def listar_produccion(
         incluir_cancelado=incluir_cancelado,
         include_overdue_unassigned=include_overdue_unassigned,
         search_q=q,
+        metric_filter=metric_filter,
     )
     estado_pendiente_id = produccion_service.estado_produccion_id(db, ESTADO_PENDIENTE)
-    futuros_pendientes_q = (
-        db.query(func.count(Produccion.idProduccion))
+    metricas_base_q = (
+        db.query(Produccion)
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.estado == estado_pendiente_id,
-            Produccion.fechaProgramadaProduccion > date.today(),
         )
     )
     if sucursal_id is not None:
-        futuros_pendientes_q = futuros_pendientes_q.filter(Produccion.sucursalID == sucursal_id)
-    pendientes_futuros = int(futuros_pendientes_q.scalar() or 0)
+        metricas_base_q = metricas_base_q.filter(Produccion.sucursalID == sucursal_id)
+    hoy = date.today()
+    pendientes_hoy = int(metricas_base_q.filter(Produccion.fechaProgramadaProduccion == hoy).count() or 0)
+    sin_asignar = int(metricas_base_q.filter(Produccion.floristaID.is_(None)).count() or 0)
+    atrasados = int(metricas_base_q.filter(Produccion.fechaProgramadaProduccion < hoy).count() or 0)
+    pendientes_futuros = int(metricas_base_q.filter(Produccion.fechaProgramadaProduccion > hoy).count() or 0)
     return ProduccionListResponse(
         items=items,
         total=len(items),
         autoAsignacion=auto_resumen,
-        metricas=ProduccionMetricasResumen(pendientesFuturos=pendientes_futuros),
+        metricas=ProduccionMetricasResumen(
+            pendientesHoy=pendientes_hoy,
+            sinAsignar=sin_asignar,
+            atrasados=atrasados,
+            pendientesFuturos=pendientes_futuros,
+        ),
     )
 
 

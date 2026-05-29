@@ -91,6 +91,9 @@ class PedidoListItem(BaseModel):
     horaPedido: Optional[str] = None
     cliente: str
     destinatario: Optional[str] = None
+    tipoEntrega: Optional[str] = None
+    direccionEntrega: Optional[str] = None
+    barrioNombre: Optional[str] = None
     fechaEntrega: Optional[datetime] = None
     horaEntrega: Optional[str] = None
     productos: List[str]

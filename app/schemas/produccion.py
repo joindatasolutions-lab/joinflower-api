@@ -82,6 +82,9 @@ class AutoAsignacionResumen(BaseModel):
 
 
 class ProduccionMetricasResumen(BaseModel):
+    pendientesHoy: int = 0
+    sinAsignar: int = 0
+    atrasados: int = 0
     pendientesFuturos: int
 
 

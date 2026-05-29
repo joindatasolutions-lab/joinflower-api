@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy import or_, cast, String, func, text
+from sqlalchemy import and_, or_, cast, String, func, text
 from datetime import date, datetime, timezone
 from io import BytesIO
 import textwrap
@@ -25,6 +25,7 @@ from app.models.produccion import Produccion
 from app.models.transicionestadopedido import TransicionEstadoPedido
 from app.models.estadopedido import EstadoPedido
 from app.models.entrega import Entrega
+from app.models.sucursal import Sucursal
 
 from app.schemas.pedido import (
     PedidoCheckoutRequest,
@@ -1716,6 +1717,7 @@ def listar_pedidos(
     fecha_desde: datetime | None = Query(None, alias="fechaDesde"),
     fecha_hasta: datetime | None = Query(None, alias="fechaHasta"),
     sin_imprimir: bool = Query(False, alias="sinImprimir"),
+    solo_tienda: bool = Query(False, alias="soloTienda"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
@@ -1758,8 +1760,20 @@ def listar_pedidos(
                 """
             ),
         )
-        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
+        .outerjoin(
+            Cliente,
+            and_(
+                Cliente.idCliente == Pedido.clienteID,
+                Cliente.empresaID == Pedido.empresaID,
+            ),
+        )
+        .outerjoin(
+            Entrega,
+            and_(
+                Entrega.pedidoID == Pedido.idPedido,
+                Entrega.empresaID == Pedido.empresaID,
+            ),
+        )
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.empresaID == empresa_id)
     )
@@ -1778,21 +1792,94 @@ def listar_pedidos(
     if fecha_hasta and not has_search:
         base = base.filter(Pedido.fechaPedido <= fecha_hasta)
 
+    if solo_tienda:
+        base = base.filter(
+            or_(
+                func.lower(func.coalesce(Entrega.tipoEntrega, "")).in_(("recogida_en_tienda", "tienda")),
+                func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
+            )
+        )
+
     if has_search:
         term = f"%{q.strip()}%"
+        payment_and_channel_search = text(
+            """
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM petalops.pago p
+                    LEFT JOIN petalops.pago_metodo pm
+                      ON pm.pago_id = p.id_pago
+                     AND pm.empresa_id = p.empresa_id
+                    LEFT JOIN petalops.metodo_pago_catalogo mpc
+                      ON mpc.id_metodo_pago = pm.metodo_pago_id
+                     AND mpc.empresa_id = p.empresa_id
+                    WHERE p.empresa_id = petalops.pedido.empresa_id
+                      AND p.pedido_id = petalops.pedido.id_pedido
+                      AND (
+                          COALESCE(p.metodo_pago, '') ILIKE :search_term
+                          OR COALESCE(p.proveedor, '') ILIKE :search_term
+                          OR COALESCE(p.referencia, '') ILIKE :search_term
+                          OR COALESCE(mpc.nombre, '') ILIKE :search_term
+                      )
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM petalops.pedido_canal_venta pcv
+                    JOIN petalops.canal_venta cv
+                      ON cv.id_canal_venta = pcv.canal_venta_id
+                     AND cv.empresa_id = pcv.empresa_id
+                    WHERE pcv.empresa_id = petalops.pedido.empresa_id
+                      AND pcv.pedido_id = petalops.pedido.id_pedido
+                      AND COALESCE(cv.nombre, '') ILIKE :search_term
+                )
+            )
+            """
+        ).bindparams(search_term=term)
         base = (
-            base.outerjoin(PedidoDetalle, PedidoDetalle.pedidoID == Pedido.idPedido)
-            .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
+            base.outerjoin(
+                PedidoDetalle,
+                and_(
+                    PedidoDetalle.pedidoID == Pedido.idPedido,
+                    PedidoDetalle.empresaID == Pedido.empresaID,
+                ),
+            )
+            .outerjoin(
+                Producto,
+                and_(
+                    Producto.idProducto == PedidoDetalle.productoID,
+                    Producto.empresaID == Pedido.empresaID,
+                ),
+            )
+            .outerjoin(
+                Sucursal,
+                and_(
+                    Sucursal.idSucursal == Pedido.sucursalID,
+                    Sucursal.empresaID == Pedido.empresaID,
+                ),
+            )
             .filter(
                 or_(
                     cast(Pedido.idPedido, String).ilike(term),
                     cast(Pedido.numeroPedido, String).ilike(term),
                     func.coalesce(Pedido.codigoPedido, "").ilike(term),
-                    Cliente.nombreCompleto.ilike(term),
-                    Cliente.telefono.ilike(term),
-                    Cliente.identificacion.ilike(term),
-                    Entrega.destinatario.ilike(term),
-                    Producto.nombreProducto.ilike(term),
+                    func.coalesce(Cliente.nombreCompleto, "").ilike(term),
+                    func.coalesce(Cliente.telefono, "").ilike(term),
+                    func.coalesce(Cliente.telefonoCompleto, "").ilike(term),
+                    func.coalesce(Cliente.identificacion, "").ilike(term),
+                    func.coalesce(Entrega.destinatario, "").ilike(term),
+                    func.coalesce(Entrega.telefonoDestino, "").ilike(term),
+                    func.coalesce(Entrega.direccion, "").ilike(term),
+                    func.coalesce(Entrega.barrioNombre, "").ilike(term),
+                    func.coalesce(Entrega.mensaje, "").ilike(term),
+                    func.coalesce(Entrega.firma, "").ilike(term),
+                    func.coalesce(Entrega.firmaNombre, "").ilike(term),
+                    func.coalesce(Entrega.observacionGeneral, "").ilike(term),
+                    func.coalesce(Entrega.observaciones, "").ilike(term),
+                    func.coalesce(PedidoDetalle.observacionesPersonalizados, "").ilike(term),
+                    func.coalesce(Producto.nombreProducto, "").ilike(term),
+                    func.coalesce(Sucursal.telefono, "").ilike(term),
+                    payment_and_channel_search,
                 )
             )
         )
@@ -1845,17 +1932,35 @@ def listar_pedidos(
 
     pedido_rows = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
-        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Entrega, Entrega.pedidoID == Pedido.idPedido)
+        .outerjoin(
+            Cliente,
+            and_(
+                Cliente.idCliente == Pedido.clienteID,
+                Cliente.empresaID == Pedido.empresaID,
+            ),
+        )
+        .outerjoin(
+            Entrega,
+            and_(
+                Entrega.pedidoID == Pedido.idPedido,
+                Entrega.empresaID == Pedido.empresaID,
+            ),
+        )
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-        .filter(Pedido.idPedido.in_(pedido_ids))
+        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(pedido_ids))
         .all()
     )
 
     detalles_rows = (
         db.query(PedidoDetalle.pedidoID, Producto.nombreProducto)
-        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(PedidoDetalle.pedidoID.in_(pedido_ids))
+        .outerjoin(
+            Producto,
+            and_(
+                Producto.idProducto == PedidoDetalle.productoID,
+                Producto.empresaID == PedidoDetalle.empresaID,
+            ),
+        )
+        .filter(PedidoDetalle.empresaID == int(empresa_id), PedidoDetalle.pedidoID.in_(pedido_ids))
         .all()
     )
 
@@ -1891,6 +1996,9 @@ def listar_pedidos(
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
                 destinatario=str((entrega.destinatario if entrega else None) or ""),
+                tipoEntrega=str((entrega.tipoEntrega if entrega else None) or ""),
+                direccionEntrega=str((entrega.direccion if entrega else None) or ""),
+                barrioNombre=str((entrega.barrioNombre if entrega else None) or ""),
                 fechaEntrega=_scheduled_entrega_datetime(entrega),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
@@ -2772,12 +2880,13 @@ def eliminar_detalle_pedido(
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
 
         estado_nombre = _estado_pedido_nombre(db, pedido.estadoPedidoID)
-        if estado_nombre not in {"PENDIENTE", "CREADO"}:
+        es_admin = is_empresa_admin_context(auth) or is_super_admin_context(auth)
+        if estado_nombre not in {"PENDIENTE", "CREADO"} and not (estado_nombre == "APROBADO" and es_admin):
             raise HTTPException(
                 status_code=400,
                 detail={
                     "code": "PEDIDO_DETALLE_DELETE_INVALID_STATE",
-                    "message": "Solo puedes eliminar arreglos en pedidos creados o pendientes.",
+                    "message": "Solo administradores pueden eliminar arreglos en pedidos aprobados.",
                 },
             )
 
@@ -2808,6 +2917,42 @@ def eliminar_detalle_pedido(
                     "code": "PEDIDO_DETALLE_LAST_ITEM",
                     "message": "No puedes eliminar el único arreglo del pedido.",
                 },
+            )
+
+        producciones_detalle = (
+            db.query(Produccion)
+            .filter(
+                Produccion.pedidoID == pedido_id,
+                Produccion.pedidoDetalleID == detalle_id,
+                Produccion.empresaID == empresa_id,
+            )
+            .all()
+        )
+        estado_cancelado_id = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_CANCELADO)
+        now = datetime.now(timezone.utc)
+        for produccion in producciones_detalle:
+            if int(produccion.estado or 0) == int(estado_cancelado_id):
+                continue
+            if not produccion_service.transicion_produccion_permitida(
+                db,
+                empresa_id=empresa_id,
+                origen=produccion.estado,
+                destino=produccion_service.ESTADO_CANCELADO,
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PRODUCCION_TRANSITION_INVALID",
+                        "message": "No hay transición configurada para cancelar la producción del arreglo.",
+                    },
+                )
+            produccion.estado = estado_cancelado_id
+            produccion.updatedAt = now
+            nota_cancelacion = f"Cancelado por eliminacion del arreglo {detalle_id} en pedido {pedido_id}."
+            produccion.observacionesInternas = (
+                f"{str(produccion.observacionesInternas).strip()}\n{nota_cancelacion}"
+                if produccion.observacionesInternas
+                else nota_cancelacion
             )
 
         db.delete(detalle)
