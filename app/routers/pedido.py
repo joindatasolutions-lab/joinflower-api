@@ -3291,6 +3291,7 @@ def resumen_contabilidad(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(empresa_id))
+    estados_contables = ["APROBADO", "PAGADO", "CANCELADO", "RECHAZADO"]
     order_query = (
         db.query(Pedido, EstadoPedido)
         .join(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
@@ -3298,7 +3299,7 @@ def resumen_contabilidad(
             Pedido.empresaID == int(empresa_id),
             Pedido.fechaPedido >= datetime.combine(fecha_desde, datetime.min.time()),
             Pedido.fechaPedido <= datetime.combine(fecha_hasta, datetime.max.time()),
-            func.upper(EstadoPedido.nombreEstado).in_(["APROBADO", "PAGADO"]),
+            func.upper(EstadoPedido.nombreEstado).in_(estados_contables),
         )
     )
     if sucursal_id is not None:
@@ -3307,7 +3308,17 @@ def resumen_contabilidad(
     order_rows = order_query.order_by(Pedido.fechaPedido.asc(), Pedido.idPedido.asc()).all()
     pedido_ids = [int(pedido.idPedido) for pedido, _ in order_rows]
     if not pedido_ids:
-        return {"orderRows": [], "arrangementRows": [], "paymentAccountRows": []}
+        return {"orderRows": [], "arrangementRows": [], "paymentAccountRows": [], "accountingDetailRows": []}
+
+    cliente_ids = [int(pedido.clienteID) for pedido, _ in order_rows if pedido.clienteID is not None]
+    cliente_rows = (
+        db.query(Cliente)
+        .filter(Cliente.empresaID == int(empresa_id), Cliente.idCliente.in_(cliente_ids))
+        .all()
+        if cliente_ids
+        else []
+    )
+    cliente_por_id = {int(cliente.idCliente): cliente for cliente in cliente_rows}
 
     detalle_rows = (
         db.query(PedidoDetalle, Producto)
@@ -3323,24 +3334,62 @@ def resumen_contabilidad(
         detalles_por_pedido.setdefault(int(detalle.pedidoID), []).append((detalle, producto))
 
     pagos_por_pedido = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
+    _ensure_pedido_auditoria_table(db)
+    auditoria_rows = db.execute(
+        text(
+            """
+            SELECT DISTINCT ON (pa.pedido_id)
+              pa.pedido_id,
+              pa.actor_login
+            FROM petalops.pedido_auditoria pa
+            WHERE pa.empresa_id = :empresa_id
+              AND pa.pedido_id = ANY(:pedido_ids)
+              AND pa.accion IN ('APROBAR_PEDIDO', 'APROBAR_PEDIDO_PIPELINE', 'GUARDAR_PEDIDO', 'CAMBIAR_ESTADO_PEDIDO')
+            ORDER BY pa.pedido_id, pa.created_at DESC, pa.id_audit DESC
+            """
+        ),
+        {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+    ).mappings().all()
+    usuario_por_pedido = {
+        int(row["pedido_id"]): str(row.get("actor_login") or "system").strip() or "system"
+        for row in auditoria_rows
+        if row.get("pedido_id") is not None
+    }
 
     resumen_por_fecha: dict[str, dict] = {}
     arreglos_map: dict[str, dict] = {}
     cuentas_map: dict[str, dict] = {}
+    detalles_contables: list[dict] = []
     total_recaudo_global = Decimal("0.00")
 
-    for pedido, _estado in order_rows:
+    for pedido, estado in order_rows:
         pedido_id = int(pedido.idPedido)
         fecha_key = _fecha_pedido_str(pedido.fechaPedido) or "Sin fecha"
         pago_resumen = pagos_por_pedido.get(pedido_id, {})
+        estado_nombre = str(estado.nombreEstado if estado else "SIN_ESTADO").strip().upper()
+        es_cancelado = estado_nombre in {"CANCELADO", "RECHAZADO"}
         subtotal = Decimal(str(pedido.totalBruto or 0))
         iva = Decimal(str(pedido.totalIva or 0))
         domicilio = Decimal(str(_pedido_domicilio_valor(pedido)))
         total = Decimal(str(pedido.totalNeto or 0))
         recargos = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
         descuentos = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
+        saldo_favor = Decimal(str(pago_resumen.get("saldoFavorMonto") or 0))
+        descuento_nota = str(pago_resumen.get("descuentoNota") or "").strip()
+        saldo_favor_nota = str(pago_resumen.get("saldoFavorNota") or "").strip()
+        payment_entries = pago_resumen.get("detallePago") or []
+        if not payment_entries:
+            metodo_pago = str(pago_resumen.get("metodoPago") or "").strip()
+            if metodo_pago:
+                payment_entries = [{"metodo": metodo_pago, "monto": float(total)}]
+        cuentas_pago = []
+        for entry in payment_entries:
+            cuenta = str(entry.get("metodo") or entry.get("metodoPago") or entry.get("nombre") or "").strip()
+            if cuenta:
+                cuentas_pago.append(cuenta)
+        cuenta_pago = " | ".join(dict.fromkeys(cuentas_pago)) or "Sin especificar"
         efectivo = Decimal("0.00")
-        for entry in (pago_resumen.get("detallePago") or []):
+        for entry in payment_entries:
             metodo = str(entry.get("metodo") or entry.get("metodoPago") or "").strip()
             monto = Decimal(str(entry.get("monto") or entry.get("valor") or 0))
             if _is_cash_payment_method(metodo):
@@ -3353,17 +3402,58 @@ def resumen_contabilidad(
             "totalDomicilios": Decimal("0.00"),
             "totalRecargos": Decimal("0.00"),
             "totalDescuentos": Decimal("0.00"),
+            "totalSaldoFavor": Decimal("0.00"),
             "totalVenta": Decimal("0.00"),
             "totalEfectivo": Decimal("0.00"),
+            "pedidosCancelados": 0,
         }
         current["cantidadPedidos"] += 1
-        current["totalArreglos"] += subtotal + iva
-        current["totalDomicilios"] += domicilio
-        current["totalRecargos"] += recargos
+        if es_cancelado:
+            current["pedidosCancelados"] += 1
+        else:
+            current["totalArreglos"] += subtotal + iva
+            current["totalDomicilios"] += domicilio
+            current["totalRecargos"] += recargos
+            current["totalVenta"] += total
+            current["totalEfectivo"] += efectivo
         current["totalDescuentos"] += descuentos
-        current["totalVenta"] += total
-        current["totalEfectivo"] += efectivo
+        current["totalSaldoFavor"] += saldo_favor
         resumen_por_fecha[fecha_key] = current
+
+        observaciones_pedido = []
+        for detalle, _producto in detalles_por_pedido.get(pedido_id, []):
+            observacion_detalle = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
+            if observacion_detalle:
+                observaciones_pedido.append(observacion_detalle)
+        entrega_obs_rows = (
+            db.query(Entrega.observacionGeneral, Entrega.observaciones)
+            .filter(Entrega.empresaID == int(empresa_id), Entrega.pedidoID == pedido_id)
+            .all()
+        )
+        for observacion_general, observaciones in entrega_obs_rows:
+            for value in (observacion_general, observaciones):
+                cleaned = str(value or "").strip()
+                if cleaned:
+                    observaciones_pedido.append(cleaned)
+
+        detalles_contables.append({
+            "pedidoID": pedido_id,
+            "numeroPedido": _numero_pedido_valor(pedido),
+            "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+            "fecha": fecha_key,
+            "usuarioSistema": usuario_por_pedido.get(pedido_id, "system"),
+            "cliente": str(getattr(cliente_por_id.get(int(pedido.clienteID or 0)), "nombreCompleto", "") or "Cliente"),
+            "cuentaPago": cuenta_pago,
+            "estado": estado_nombre,
+            "cancelado": bool(es_cancelado),
+            "notaCancelacion": str(pedido.motivoRechazo or "").strip() or None,
+            "descuentoMonto": float(descuentos.quantize(Decimal("0.01"))),
+            "descuentoNota": descuento_nota or None,
+            "saldoFavorMonto": float(saldo_favor.quantize(Decimal("0.01"))),
+            "saldoFavorNota": saldo_favor_nota or None,
+            "observaciones": " | ".join(dict.fromkeys(observaciones_pedido)) or None,
+            "totalVenta": float(total.quantize(Decimal("0.01"))),
+        })
 
         for detalle, producto in detalles_por_pedido.get(pedido_id, []):
             codigo = str(getattr(producto, "codigoProducto", "") or "").strip()
@@ -3384,11 +3474,6 @@ def resumen_contabilidad(
             row["totalVendido"] += Decimal(str(detalle.subtotal or 0))
             arreglos_map[key] = row
 
-        payment_entries = pago_resumen.get("detallePago") or []
-        if not payment_entries:
-            metodo_pago = str(pago_resumen.get("metodoPago") or "").strip()
-            if metodo_pago:
-                payment_entries = [{"metodo": metodo_pago, "monto": float(total)}]
         for entry in payment_entries:
             cuenta = str(entry.get("metodo") or entry.get("metodoPago") or entry.get("nombre") or "Sin especificar").strip() or "Sin especificar"
             key = cuenta.casefold()
@@ -3418,8 +3503,10 @@ def resumen_contabilidad(
                 "totalDomicilios": float(item["totalDomicilios"].quantize(Decimal("0.01"))),
                 "totalRecargos": float(item["totalRecargos"].quantize(Decimal("0.01"))),
                 "totalDescuentos": float(item["totalDescuentos"].quantize(Decimal("0.01"))),
+                "totalSaldoFavor": float(item["totalSaldoFavor"].quantize(Decimal("0.01"))),
                 "totalVenta": float(item["totalVenta"].quantize(Decimal("0.01"))),
                 "totalEfectivo": float(item["totalEfectivo"].quantize(Decimal("0.01"))),
+                "pedidosCancelados": int(item["pedidosCancelados"]),
             }
             for item in resumen_por_fecha.values()
         ],
@@ -3466,6 +3553,7 @@ def resumen_contabilidad(
         "orderRows": order_rows_payload,
         "arrangementRows": arrangement_rows_payload,
         "paymentAccountRows": payment_rows_payload,
+        "accountingDetailRows": detalles_contables,
     }
 
 

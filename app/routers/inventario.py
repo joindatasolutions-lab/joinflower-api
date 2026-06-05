@@ -12,6 +12,7 @@ from app.models.inventario import Inventario
 from app.models.insumo import Insumo
 from app.models.movimientoinventario import MovimientoInventario
 from app.models.proveedor import Proveedor
+from app.models.receta import Receta, RecetaDetalle
 from app.schemas.inventario import (
     InventarioActivoRequest,
     InventarioCreateRequest,
@@ -25,6 +26,14 @@ from app.schemas.inventario import (
     ProveedorCreateRequest,
     ProveedorItem,
     ProveedorListResponse,
+    RecetaCreateRequest,
+    RecetaDetalleAgregarRequest,
+    RecetaDetalleActualizarRequest,
+    RecetaDetalleItem,
+    RecetaItem,
+    RecetaListItem,
+    RecetaListResponse,
+    RecetaUpdateRequest,
 )
 
 router = APIRouter(
@@ -70,6 +79,11 @@ def _to_item(
     subcategoria: str | None = None,
     color: str | None = None,
     descripcion: str | None = None,
+    tamano: str | None = None,
+    unidad_medida: str | None = None,
+    fecha_vencimiento=None,
+    marca: str | None = None,
+    precio_venta: Decimal | None = None,
     proveedor_id: int | None = None,
     proveedor_nombre: str | None = None,
     codigo_proveedor: str | None = None,
@@ -85,6 +99,11 @@ def _to_item(
         subcategoria=(str(subcategoria) if subcategoria is not None else None),
         color=(str(color) if color is not None else None),
         descripcion=(str(descripcion) if descripcion is not None else None),
+        tamano=(str(tamano) if tamano is not None else None),
+        unidadMedida=(str(unidad_medida) if unidad_medida is not None else None),
+        fechaVencimiento=fecha_vencimiento,
+        marca=(str(marca) if marca is not None else None),
+        precioVenta=(Decimal(precio_venta) if precio_venta is not None else None),
         proveedorID=(int(proveedor_id) if proveedor_id is not None else None),
         proveedor=proveedor_nombre,
         codigoProveedor=(str(codigo_proveedor) if codigo_proveedor is not None else None),
@@ -98,14 +117,24 @@ def _to_item(
 
 
 def _normalize_movimiento_tipo(value: str) -> str:
-    normalized = str(value or "").strip().lower()
+    normalized = str(value or "").strip().lower().replace("é", "e").replace("é", "e")
     mapping = {
         "entrada": "Entrada",
         "salida": "Salida",
         "ajuste": "Ajuste",
+        "perdida": "Pérdida",
+        "perdidas": "Pérdida",
     }
+    # Also handle with accent
+    normalized_acc = str(value or "").strip().lower()
+    mapping_acc = {
+        "pérdida": "Pérdida",
+        "pérdidas": "Pérdida",
+    }
+    if normalized_acc in mapping_acc:
+        return mapping_acc[normalized_acc]
     if normalized not in mapping:
-        raise HTTPException(status_code=400, detail="tipoMovimiento debe ser Entrada, Salida o Ajuste")
+        raise HTTPException(status_code=400, detail="tipoMovimiento debe ser Entrada, Salida, Ajuste o Pérdida")
     return mapping[normalized]
 
 
@@ -113,33 +142,35 @@ MOVIMIENTO_TIPO_CODIGO_A_ID = {
     "entrada": 1,
     "salida": 2,
     "ajuste": 3,
+    "perdida": 4,
 }
 
 MOVIMIENTO_TIPO_ID_A_LABEL = {
     1: "Entrada",
     2: "Salida",
     3: "Ajuste",
+    4: "Pérdida",
 }
 
 
 def _resolve_movimiento_tipo_id(db: Session, value: str) -> int:
     tipo = _normalize_movimiento_tipo(value)
-    codigo = tipo.lower()
+    codigo_key = tipo.lower().replace("é", "e").replace("é", "e")
     row = db.execute(
         text(
             """
             SELECT id_tipo_movimiento
             FROM petalops.tipo_movimiento
-            WHERE lower(codigo) = :codigo
-               OR lower(nombre) = :codigo
+            WHERE lower(translate(codigo, 'éíóú', 'eiou')) = lower(translate(:codigo, 'éíóú', 'eiou'))
+               OR lower(translate(nombre, 'éíóú', 'eiou')) = lower(translate(:codigo, 'éíóú', 'eiou'))
             LIMIT 1
             """
         ),
-        {"codigo": codigo},
+        {"codigo": codigo_key},
     ).first()
     if row:
         return int(row[0])
-    resolved = MOVIMIENTO_TIPO_CODIGO_A_ID.get(codigo)
+    resolved = MOVIMIENTO_TIPO_CODIGO_A_ID.get(codigo_key)
     if resolved is None:
         raise HTTPException(status_code=400, detail="tipoMovimiento no configurado en catalogo")
     return int(resolved)
@@ -180,16 +211,35 @@ def _load_item_relations(db: Session, item: Inventario) -> tuple[Insumo | None, 
 
 def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
     insumo, proveedor = _load_item_relations(db, item)
+    # Use new `categoria` column; fall back to `unidad_medida` for legacy records
+    categoria_val = None
+    if insumo:
+        if insumo.categoria:
+            categoria_val = str(insumo.categoria)
+        elif insumo.unidadMedida:
+            categoria_val = str(insumo.unidadMedida)
     return _to_item(
         item,
         codigo=(str(insumo.codigoBarra) if insumo and insumo.codigoBarra else None),
         nombre=(str(insumo.nombreInsumo) if insumo and insumo.nombreInsumo else None),
-        categoria=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else "Insumos"),
+        categoria=categoria_val,
+        subcategoria=(str(insumo.subcategoria) if insumo and insumo.subcategoria else None),
+        color=(str(insumo.color) if insumo and insumo.color else None),
+        descripcion=(str(insumo.descripcion) if insumo and insumo.descripcion else None),
+        tamano=(str(insumo.tamano) if insumo and insumo.tamano else None),
+        unidad_medida=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else None),
+        fecha_vencimiento=(insumo.fechaVencimiento if insumo else None),
+        marca=(str(insumo.marca) if insumo and insumo.marca else None),
+        precio_venta=(Decimal(insumo.precioVenta) if insumo and insumo.precioVenta is not None else None),
         proveedor_id=(int(insumo.proveedorID) if insumo and insumo.proveedorID is not None else None),
         proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
         codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
     )
 
+
+# ---------------------------------------------------------------------------
+# Proveedores
+# ---------------------------------------------------------------------------
 
 @router.get("/proveedores", response_model=ProveedorListResponse)
 def listar_proveedores(
@@ -284,10 +334,15 @@ def crear_proveedor(
     )
 
 
+# ---------------------------------------------------------------------------
+# Inventario
+# ---------------------------------------------------------------------------
+
 @router.get("", response_model=InventarioListResponse)
 def listar_inventario(
     empresa_id: int = Query(..., alias="empresaID"),
     categoria: str | None = Query(None),
+    subcategoria: str | None = Query(None),
     estado: str | None = Query(None),
     proveedor_id: int | None = Query(None, alias="proveedorID"),
     q: str | None = Query(None),
@@ -304,15 +359,26 @@ def listar_inventario(
         .filter(Inventario.empresaID == empresa_id)
     )
 
+    has_categoria_col = _has_column(db, "insumo", "categoria")
+
     if categoria:
-        query = query.filter(func.upper(Insumo.unidadMedida) == categoria.strip().upper())
+        if has_categoria_col:
+            # Filter by new categoria column; also match legacy unidad_medida for existing records
+            query = query.filter(
+                func.upper(Insumo.categoria) == categoria.strip().upper()
+            )
+        else:
+            query = query.filter(func.upper(Insumo.unidadMedida) == categoria.strip().upper())
+
+    if subcategoria and has_categoria_col and _has_column(db, "insumo", "subcategoria"):
+        query = query.filter(func.upper(Insumo.subcategoria) == subcategoria.strip().upper())
 
     if proveedor_id is not None:
         query = query.filter(Proveedor.idProveedor == int(proveedor_id))
 
     if q:
         term = f"%{q.strip()}%"
-        query = query.filter(
+        q_filter = (
             func.cast(Inventario.idInventario, String).ilike(term)
             | func.cast(Inventario.insumoID, String).ilike(term)
             | Insumo.nombreInsumo.ilike(term)
@@ -321,20 +387,41 @@ def listar_inventario(
             | Proveedor.codigoProveedor.ilike(term)
             | Proveedor.nombreProveedor.ilike(term)
         )
+        if has_categoria_col:
+            q_filter = q_filter | Insumo.categoria.ilike(term)
+        query = query.filter(q_filter)
 
-    rows = query.order_by(Insumo.unidadMedida.asc(), Insumo.nombreInsumo.asc()).all()
-    items = [
-        _to_item(
-            item,
-            codigo=(str(insumo.codigoBarra) if insumo and insumo.codigoBarra else None),
-            nombre=(str(insumo.nombreInsumo) if insumo and insumo.nombreInsumo else None),
-            categoria=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else "Insumos"),
-            proveedor_id=(int(proveedor.idProveedor) if proveedor else None),
-            proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
-            codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
+    rows = query.order_by(Insumo.categoria.asc(), Insumo.nombreInsumo.asc()).all()
+
+    items = []
+    for item, insumo, proveedor in rows:
+        # Resolve category: prefer new `categoria` column, fallback to `unidad_medida`
+        categoria_val = None
+        if insumo:
+            if has_categoria_col and insumo.categoria:
+                categoria_val = str(insumo.categoria)
+            elif insumo.unidadMedida:
+                categoria_val = str(insumo.unidadMedida)
+
+        items.append(
+            _to_item(
+                item,
+                codigo=(str(insumo.codigoBarra) if insumo and insumo.codigoBarra else None),
+                nombre=(str(insumo.nombreInsumo) if insumo and insumo.nombreInsumo else None),
+                categoria=categoria_val,
+                subcategoria=(str(insumo.subcategoria) if insumo and has_categoria_col and insumo.subcategoria else None),
+                color=(str(insumo.color) if insumo and has_categoria_col and insumo.color else None),
+                descripcion=(str(insumo.descripcion) if insumo and has_categoria_col and insumo.descripcion else None),
+                tamano=(str(insumo.tamano) if insumo and has_categoria_col and insumo.tamano else None),
+                unidad_medida=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else None),
+                fecha_vencimiento=(insumo.fechaVencimiento if insumo and has_categoria_col else None),
+                marca=(str(insumo.marca) if insumo and has_categoria_col and insumo.marca else None),
+                precio_venta=(Decimal(insumo.precioVenta) if insumo and has_categoria_col and insumo.precioVenta is not None else None),
+                proveedor_id=(int(proveedor.idProveedor) if proveedor else None),
+                proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
+                codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
+            )
         )
-        for item, insumo, proveedor in rows
-    ]
 
     if solo_criticos:
         items = [item for item in items if item.estadoStock in {"Bajo Stock", "Agotado"}]
@@ -365,73 +452,125 @@ def crear_item_inventario(
     if auth.sucursalID is None:
         raise HTTPException(status_code=400, detail="El usuario autenticado no tiene sucursal asignada")
 
+    has_cat    = _has_column(db, "insumo", "categoria")
+    has_marca  = has_cat and _has_column(db, "insumo", "marca")
     now = datetime.now(timezone.utc)
+
     try:
-        insumo_row = db.execute(
-            text(
-                """
-                INSERT INTO petalops.insumo (
-                    empresa_id,
-                    codigo_barra,
-                    nombre_insumo,
-                    unidad_medida,
-                    activo,
-                    created_at,
-                    updated_at,
-                    proveedor_id
-                ) VALUES (
-                    :empresa_id,
-                    :codigo_barra,
-                    :nombre_insumo,
-                    :unidad_medida,
-                    :activo,
-                    :created_at,
-                    :updated_at,
-                    :proveedor_id
-                )
-                RETURNING id_insumo
-                """
-            ),
-            {
-                "empresa_id": int(payload.empresaID),
-                "codigo_barra": payload.codigo.strip(),
-                "nombre_insumo": payload.nombre.strip(),
-                "unidad_medida": payload.categoria.strip(),
-                "activo": bool(payload.activo),
-                "created_at": now,
-                "updated_at": now,
-                "proveedor_id": (int(payload.proveedorID) if payload.proveedorID is not None else None),
-            },
-        ).first()
+        if has_cat and has_marca:
+            # Todas las migraciones aplicadas: guarda todos los campos
+            insumo_row = db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.insumo (
+                        empresa_id, codigo_barra, nombre_insumo, unidad_medida,
+                        categoria, subcategoria, color, descripcion, tamano,
+                        fecha_vencimiento, marca, precio_venta,
+                        activo, created_at, updated_at, proveedor_id
+                    ) VALUES (
+                        :empresa_id, :codigo_barra, :nombre_insumo, :unidad_medida,
+                        :categoria, :subcategoria, :color, :descripcion, :tamano,
+                        :fecha_vencimiento, :marca, :precio_venta,
+                        :activo, :created_at, :updated_at, :proveedor_id
+                    )
+                    RETURNING id_insumo
+                    """
+                ),
+                {
+                    "empresa_id": int(payload.empresaID),
+                    "codigo_barra": payload.codigo.strip(),
+                    "nombre_insumo": payload.nombre.strip(),
+                    "unidad_medida": (payload.unidadMedida.strip() if payload.unidadMedida else "Unidad"),
+                    "categoria": payload.categoria.strip(),
+                    "subcategoria": (payload.subcategoria.strip() if payload.subcategoria else None),
+                    "color": (payload.color.strip() if payload.color else None),
+                    "descripcion": (payload.descripcion.strip() if payload.descripcion else None),
+                    "tamano": (payload.tamano.strip() if payload.tamano else None),
+                    "fecha_vencimiento": payload.fechaVencimiento,
+                    "marca": (payload.marca.strip() if payload.marca else None),
+                    "precio_venta": payload.precioVenta,
+                    "activo": bool(payload.activo),
+                    "created_at": now,
+                    "updated_at": now,
+                    "proveedor_id": (int(payload.proveedorID) if payload.proveedorID is not None else None),
+                },
+            ).first()
+        elif has_cat:
+            # Primera migración aplicada (categoria, subcategoria, etc.) pero no marca/precio_venta
+            insumo_row = db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.insumo (
+                        empresa_id, codigo_barra, nombre_insumo, unidad_medida,
+                        categoria, subcategoria, color, descripcion, tamano,
+                        fecha_vencimiento, activo, created_at, updated_at, proveedor_id
+                    ) VALUES (
+                        :empresa_id, :codigo_barra, :nombre_insumo, :unidad_medida,
+                        :categoria, :subcategoria, :color, :descripcion, :tamano,
+                        :fecha_vencimiento, :activo, :created_at, :updated_at, :proveedor_id
+                    )
+                    RETURNING id_insumo
+                    """
+                ),
+                {
+                    "empresa_id": int(payload.empresaID),
+                    "codigo_barra": payload.codigo.strip(),
+                    "nombre_insumo": payload.nombre.strip(),
+                    "unidad_medida": (payload.unidadMedida.strip() if payload.unidadMedida else "Unidad"),
+                    "categoria": payload.categoria.strip(),
+                    "subcategoria": (payload.subcategoria.strip() if payload.subcategoria else None),
+                    "color": (payload.color.strip() if payload.color else None),
+                    "descripcion": (payload.descripcion.strip() if payload.descripcion else None),
+                    "tamano": (payload.tamano.strip() if payload.tamano else None),
+                    "fecha_vencimiento": payload.fechaVencimiento,
+                    "activo": bool(payload.activo),
+                    "created_at": now,
+                    "updated_at": now,
+                    "proveedor_id": (int(payload.proveedorID) if payload.proveedorID is not None else None),
+                },
+            ).first()
+        else:
+            # Sin migraciones: solo campos base
+            insumo_row = db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.insumo (
+                        empresa_id, codigo_barra, nombre_insumo,
+                        unidad_medida, activo, created_at, updated_at, proveedor_id
+                    ) VALUES (
+                        :empresa_id, :codigo_barra, :nombre_insumo,
+                        :unidad_medida, :activo, :created_at, :updated_at, :proveedor_id
+                    )
+                    RETURNING id_insumo
+                    """
+                ),
+                {
+                    "empresa_id": int(payload.empresaID),
+                    "codigo_barra": payload.codigo.strip(),
+                    "nombre_insumo": payload.nombre.strip(),
+                    "unidad_medida": payload.categoria.strip(),
+                    "activo": bool(payload.activo),
+                    "created_at": now,
+                    "updated_at": now,
+                    "proveedor_id": (int(payload.proveedorID) if payload.proveedorID is not None else None),
+                },
+            ).first()
+
         insumo_id = int(insumo_row[0])
 
         item_row = db.execute(
             text(
                 """
                 INSERT INTO petalops.inventario (
-                    empresa_id,
-                    sucursal_id,
-                    insumo_id,
-                    stock_actual,
-                    stock_reservado,
-                    stock_minimo,
-                    valor_unitario,
-                    activo,
-                    fechaultimaactualizacion,
-                    created_at,
-                    updated_at
+                    empresa_id, sucursal_id, insumo_id,
+                    stock_actual, stock_reservado, stock_minimo,
+                    valor_unitario, activo, fechaultimaactualizacion,
+                    created_at, updated_at
                 ) VALUES (
-                    :empresa_id,
-                    :sucursal_id,
-                    :insumo_id,
-                    :stock_actual,
-                    :stock_reservado,
-                    :stock_minimo,
-                    :valor_unitario,
-                    :activo,
-                    :fecha_actualizacion,
-                    :created_at,
-                    :updated_at
+                    :empresa_id, :sucursal_id, :insumo_id,
+                    :stock_actual, :stock_reservado, :stock_minimo,
+                    :valor_unitario, :activo, :fecha_actualizacion,
+                    :created_at, :updated_at
                 )
                 RETURNING id_inventario
                 """
@@ -458,23 +597,11 @@ def crear_item_inventario(
                 text(
                     """
                     INSERT INTO petalops.movimiento_inventario (
-                        empresa_id,
-                        inventario_id,
-                        tipo_movimiento_id,
-                        cantidad,
-                        fecha,
-                        motivo,
-                        usuario_id,
-                        created_at
+                        empresa_id, inventario_id, tipo_movimiento_id,
+                        cantidad, fecha, motivo, usuario_id, created_at
                     ) VALUES (
-                        :empresa_id,
-                        :inventario_id,
-                        :tipo_movimiento_id,
-                        :cantidad,
-                        :fecha,
-                        :motivo,
-                        :usuario_id,
-                        :created_at
+                        :empresa_id, :inventario_id, :tipo_movimiento_id,
+                        :cantidad, :fecha, :motivo, :usuario_id, :created_at
                     )
                     """
                 ),
@@ -520,12 +647,31 @@ def actualizar_item_inventario(
         if not proveedor:
             raise HTTPException(status_code=400, detail="Proveedor no valido para la empresa")
 
+    has_cat   = _has_column(db, "insumo", "categoria")
+    has_marca = has_cat and _has_column(db, "insumo", "marca")
     now = datetime.now(timezone.utc)
+
     insumo.nombreInsumo = payload.nombre.strip()
-    insumo.unidadMedida = payload.categoria.strip()
     insumo.proveedorID = (int(payload.proveedorID) if payload.proveedorID is not None else None)
     insumo.updatedAt = now
     insumo.activo = bool(item.activo)
+
+    if has_cat:
+        insumo.categoria = payload.categoria.strip()
+        insumo.subcategoria = (payload.subcategoria.strip() if payload.subcategoria else None)
+        insumo.color = (payload.color.strip() if payload.color else None)
+        insumo.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
+        insumo.tamano = (payload.tamano.strip() if payload.tamano else None)
+        insumo.fechaVencimiento = payload.fechaVencimiento
+        if payload.unidadMedida:
+            insumo.unidadMedida = payload.unidadMedida.strip()
+    else:
+        insumo.unidadMedida = payload.categoria.strip()
+
+    if has_marca:
+        insumo.marca = (payload.marca.strip() if payload.marca else None)
+        insumo.precioVenta = payload.precioVenta
+
     item.stockMinimo = payload.stockMinimo
     item.valorUnitario = payload.valorUnitario
     item.fechaUltimaActualizacion = now
@@ -566,14 +712,14 @@ def ajustar_stock_inventario(
             raise HTTPException(status_code=400, detail="cantidad debe ser mayor a 0 para Entrada")
         nuevo_stock = stock_actual + cantidad
         cantidad_mov = cantidad
-    elif movimiento_tipo == "Salida":
+    elif movimiento_tipo in ("Salida", "Pérdida"):
         if cantidad <= 0:
-            raise HTTPException(status_code=400, detail="cantidad debe ser mayor a 0 para Salida")
+            raise HTTPException(status_code=400, detail=f"cantidad debe ser mayor a 0 para {movimiento_tipo}")
         nuevo_stock = stock_actual - cantidad
         if nuevo_stock < 0:
             raise HTTPException(status_code=400, detail="No se permite stock negativo")
         cantidad_mov = cantidad
-    else:
+    else:  # Ajuste
         if payload.stockObjetivo is None:
             raise HTTPException(status_code=400, detail="stockObjetivo es obligatorio para Ajuste")
         objetivo = Decimal(payload.stockObjetivo)
@@ -690,3 +836,265 @@ def listar_movimientos_inventario(
         for mov, inv, ins in rows
     ]
     return MovimientoInventarioListResponse(items=items, total=len(items))
+
+
+# ---------------------------------------------------------------------------
+# Arreglos / Recetas
+# ---------------------------------------------------------------------------
+
+@router.get("/recetas", response_model=RecetaListResponse)
+def listar_recetas(
+    empresa_id: int = Query(..., alias="empresaID"),
+    q: str | None = Query(None),
+    solo_activos: bool = Query(True, alias="soloActivos"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    query = db.query(Receta).filter(Receta.empresaID == empresa_id)
+    if solo_activos:
+        query = query.filter(Receta.activo == True)  # noqa: E712
+    if q:
+        term = f"%{q.strip()}%"
+        query = query.filter(Receta.nombre.ilike(term) | Receta.descripcion.ilike(term))
+
+    rows = query.order_by(Receta.nombre.asc()).all()
+
+    items = []
+    for rec in rows:
+        total = db.query(RecetaDetalle).filter(RecetaDetalle.recetaID == int(rec.idReceta)).count()
+        items.append(
+            RecetaListItem(
+                idReceta=int(rec.idReceta),
+                empresaID=int(rec.empresaID),
+                nombre=str(rec.nombre),
+                descripcion=(str(rec.descripcion) if rec.descripcion else None),
+                activo=bool(rec.activo),
+                totalIngredientes=total,
+            )
+        )
+    return RecetaListResponse(items=items, total=len(items))
+
+
+@router.post("/recetas", response_model=RecetaItem, dependencies=[Depends(require_module_access("inventario", "puedeCrear"))])
+def crear_receta(
+    payload: RecetaCreateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    now = datetime.now(timezone.utc)
+    try:
+        rec = Receta(
+            empresaID=int(empresa_id),
+            nombre=payload.nombre.strip(),
+            descripcion=(payload.descripcion.strip() if payload.descripcion else None),
+            activo=True,
+            createdAt=now,
+            updatedAt=now,
+        )
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible crear receta (nombre duplicado)")
+
+    return RecetaItem(
+        idReceta=int(rec.idReceta),
+        empresaID=int(rec.empresaID),
+        nombre=str(rec.nombre),
+        descripcion=(str(rec.descripcion) if rec.descripcion else None),
+        activo=bool(rec.activo),
+        detalles=[],
+    )
+
+
+@router.get("/recetas/{receta_id}", response_model=RecetaItem)
+def obtener_receta(
+    receta_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    detalles_rows = (
+        db.query(RecetaDetalle, Inventario, Insumo)
+        .join(Inventario, Inventario.idInventario == RecetaDetalle.inventarioID)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .filter(RecetaDetalle.recetaID == receta_id)
+        .all()
+    )
+
+    has_cat = _has_column(db, "insumo", "categoria")
+    detalles = [
+        RecetaDetalleItem(
+            idRecetaDetalle=int(det.idRecetaDetalle),
+            inventarioID=int(det.inventarioID),
+            codigo=(str(ins.codigoBarra) if ins and ins.codigoBarra else f"INS-{int(inv.insumoID)}"),
+            nombre=(str(ins.nombreInsumo) if ins and ins.nombreInsumo else f"Insumo {int(inv.insumoID)}"),
+            categoria=(str(ins.categoria) if ins and has_cat and ins.categoria else (str(ins.unidadMedida) if ins and ins.unidadMedida else None)),
+            cantidad=Decimal(det.cantidad or 1),
+        )
+        for det, inv, ins in detalles_rows
+    ]
+
+    return RecetaItem(
+        idReceta=int(rec.idReceta),
+        empresaID=int(rec.empresaID),
+        nombre=str(rec.nombre),
+        descripcion=(str(rec.descripcion) if rec.descripcion else None),
+        activo=bool(rec.activo),
+        detalles=detalles,
+    )
+
+
+@router.put("/recetas/{receta_id}", response_model=RecetaItem, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def actualizar_receta(
+    receta_id: int,
+    payload: RecetaUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    rec.nombre = payload.nombre.strip()
+    rec.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
+    rec.activo = bool(payload.activo)
+    rec.updatedAt = datetime.now(timezone.utc)
+
+    try:
+        db.commit()
+        db.refresh(rec)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible actualizar receta")
+
+    return obtener_receta(receta_id, db=db, auth=auth)
+
+
+@router.post("/recetas/{receta_id}/ingredientes", response_model=RecetaItem, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def agregar_ingrediente_receta(
+    receta_id: int,
+    payload: RecetaDetalleAgregarRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    # Verify inventario belongs to same empresa
+    inv = db.query(Inventario).filter(
+        Inventario.idInventario == int(payload.inventarioID),
+        Inventario.empresaID == int(rec.empresaID),
+    ).first()
+    if not inv:
+        raise HTTPException(status_code=400, detail="Item de inventario no válido para esta empresa")
+
+    now = datetime.now(timezone.utc)
+    try:
+        det = RecetaDetalle(
+            empresaID=int(rec.empresaID),
+            recetaID=receta_id,
+            inventarioID=int(payload.inventarioID),
+            cantidad=Decimal(payload.cantidad),
+            createdAt=now,
+        )
+        db.add(det)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible agregar ingrediente (ya existe o datos inválidos)")
+
+    return obtener_receta(receta_id, db=db, auth=auth)
+
+
+@router.put("/recetas/{receta_id}/ingredientes/{detalle_id}", response_model=RecetaItem, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def actualizar_ingrediente_receta(
+    receta_id: int,
+    detalle_id: int,
+    payload: RecetaDetalleActualizarRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    det = db.query(RecetaDetalle).filter(
+        RecetaDetalle.idRecetaDetalle == detalle_id,
+        RecetaDetalle.recetaID == receta_id,
+    ).first()
+    if not det:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+
+    det.cantidad = Decimal(payload.cantidad)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible actualizar cantidad")
+
+    return obtener_receta(receta_id, db=db, auth=auth)
+
+
+@router.delete("/recetas/{receta_id}/ingredientes/{detalle_id}", response_model=RecetaItem, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def eliminar_ingrediente_receta(
+    receta_id: int,
+    detalle_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    det = db.query(RecetaDetalle).filter(
+        RecetaDetalle.idRecetaDetalle == detalle_id,
+        RecetaDetalle.recetaID == receta_id,
+    ).first()
+    if not det:
+        raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+
+    db.delete(det)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible eliminar ingrediente")
+
+    return obtener_receta(receta_id, db=db, auth=auth)
+
+
+@router.delete("/recetas/{receta_id}", dependencies=[Depends(require_module_access("inventario", "puedeEliminar"))])
+def eliminar_receta(
+    receta_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    rec = db.query(Receta).filter(Receta.idReceta == receta_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+    assert_same_empresa(auth, int(rec.empresaID))
+
+    db.delete(rec)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible eliminar receta")
+
+    return {"status": "ok"}

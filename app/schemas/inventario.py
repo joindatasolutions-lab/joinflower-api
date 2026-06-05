@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -29,7 +29,12 @@ class InventarioCreateRequest(BaseModel):
     categoria: str = Field(min_length=2, max_length=80)
     subcategoria: str | None = Field(default=None, max_length=80)
     color: str | None = Field(default=None, max_length=80)
-    descripcion: str | None = Field(default=None, max_length=255)
+    descripcion: str | None = Field(default=None)
+    tamano: str | None = Field(default=None, max_length=50)
+    unidadMedida: str | None = Field(default=None, max_length=50)
+    fechaVencimiento: date | None = Field(default=None)
+    marca: str | None = Field(default=None, max_length=100)
+    precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     proveedorID: int | None = None
     codigoProveedor: str | None = Field(default=None, max_length=80)
     stockActual: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
@@ -43,7 +48,12 @@ class InventarioUpdateRequest(BaseModel):
     categoria: str = Field(min_length=2, max_length=80)
     subcategoria: str | None = Field(default=None, max_length=80)
     color: str | None = Field(default=None, max_length=80)
-    descripcion: str | None = Field(default=None, max_length=255)
+    descripcion: str | None = Field(default=None)
+    tamano: str | None = Field(default=None, max_length=50)
+    unidadMedida: str | None = Field(default=None, max_length=50)
+    fechaVencimiento: date | None = Field(default=None)
+    marca: str | None = Field(default=None, max_length=100)
+    precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     proveedorID: int | None = None
     codigoProveedor: str | None = Field(default=None, max_length=80)
     stockMinimo: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
@@ -70,6 +80,11 @@ class InventarioItem(BaseModel):
     subcategoria: str | None = None
     color: str | None = None
     descripcion: str | None = None
+    tamano: str | None = None
+    unidadMedida: str | None = None
+    fechaVencimiento: date | None = None
+    marca: str | None = None
+    precioVenta: Decimal | None = None
     proveedorID: int | None = None
     proveedor: str | None = None
     codigoProveedor: str | None = None
@@ -106,3 +121,57 @@ class MovimientoInventarioItem(BaseModel):
 class MovimientoInventarioListResponse(BaseModel):
     items: list[MovimientoInventarioItem]
     total: int
+
+
+# Schemas para Arreglos / Recetas
+
+class RecetaCreateRequest(BaseModel):
+    nombre: str = Field(min_length=2, max_length=200)
+    descripcion: str | None = Field(default=None)
+
+
+class RecetaUpdateRequest(BaseModel):
+    nombre: str = Field(min_length=2, max_length=200)
+    descripcion: str | None = Field(default=None)
+    activo: bool = True
+
+
+class RecetaDetalleItem(BaseModel):
+    idRecetaDetalle: int
+    inventarioID: int
+    codigo: str
+    nombre: str
+    categoria: str | None = None
+    cantidad: Decimal
+
+
+class RecetaItem(BaseModel):
+    idReceta: int
+    empresaID: int
+    nombre: str
+    descripcion: str | None = None
+    activo: bool
+    detalles: list[RecetaDetalleItem] = []
+
+
+class RecetaListItem(BaseModel):
+    idReceta: int
+    empresaID: int
+    nombre: str
+    descripcion: str | None = None
+    activo: bool
+    totalIngredientes: int = 0
+
+
+class RecetaListResponse(BaseModel):
+    items: list[RecetaListItem]
+    total: int
+
+
+class RecetaDetalleAgregarRequest(BaseModel):
+    inventarioID: int
+    cantidad: Decimal = Field(default=Decimal("1"), gt=Decimal("0"))
+
+
+class RecetaDetalleActualizarRequest(BaseModel):
+    cantidad: Decimal = Field(gt=Decimal("0"))
