@@ -37,6 +37,7 @@ from app.schemas.pedido import (
     PedidoDetalleProducto,
     RechazarPedidoRequest,
 )
+from app.services import caja_service
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
@@ -1659,11 +1660,13 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
     )
 
     if not _flora_phase2_ready(db):
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
     metodos_pago = list(pago_resumen.get("metodosPago") or [])
     if len(metodos_pago) != 1:
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     metodo_row = db.execute(
@@ -1686,6 +1689,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
         },
     ).first()
     if not metodo_row:
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     db.execute(
@@ -1704,6 +1708,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
             "monto": monto,
         },
     )
+    caja_service.refresh_caja_por_pedido(db, pedido=pedido)
 
 
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -2654,6 +2659,11 @@ def actualizar_detalle_pedido(
                 descuento_monto=ajustes["descuentoMonto"],
                 saldo_favor_monto=ajustes["saldoFavorMonto"],
                 saldo_favor_nota=payload.saldoFavorNota if payload.saldoFavorNota is not None else pago_resumen_actual.get("saldoFavorNota"),
+            )
+            caja_service.refresh_caja_por_pedido(
+                db,
+                pedido=pedido,
+                usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
             )
 
         _audit_pedido_action(
@@ -3707,6 +3717,11 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         estado_origen_id=estado_origen_id,
         estado_destino_id=int(estado_rechazado.idEstadoPedido),
         extra={"motivo": pedido.motivoRechazo},
+    )
+    caja_service.refresh_caja_por_pedido(
+        db,
+        pedido=pedido,
+        usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
     )
     db.commit()
 
