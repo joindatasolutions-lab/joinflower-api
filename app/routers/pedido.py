@@ -33,6 +33,7 @@ from app.schemas.pedido import (
     PedidoCreate,
     PedidoListResponse,
     PedidoListItem,
+    PedidoListProducto,
     PedidoDetalleResponse,
     PedidoDetalleProducto,
     RechazarPedidoRequest,
@@ -672,6 +673,46 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     if descripcion and text.casefold() == descripcion.casefold():
         return None
     return text
+
+
+def _codigo_producto_visible(producto: Producto | None, empresa_id: int) -> str | None:
+    if not producto:
+        return None
+    codigo_producto = _codigo_producto_base(producto)
+    codigo_catalogo = _codigo_catalogo_base(producto)
+    if int(empresa_id) == 3 and codigo_catalogo:
+        return codigo_catalogo
+    return codigo_producto
+
+
+def _codigo_producto_base(producto: Producto | None) -> str | None:
+    if not producto:
+        return None
+    return str(getattr(producto, "codigoProducto", "") or "").strip() or None
+
+
+def _codigo_catalogo_base(producto: Producto | None) -> str | None:
+    if not producto:
+        return None
+    return str(getattr(producto, "codigoCatalogo", "") or "").strip() or None
+
+
+def _producto_listado_texto(producto: Producto | None, empresa_id: int) -> str:
+    nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
+    codigo = _codigo_producto_visible(producto, empresa_id)
+    return f"{codigo} - {nombre}" if codigo else nombre
+
+
+def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, empresa_id: int) -> PedidoListProducto:
+    nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
+    producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
+    return PedidoListProducto(
+        productoID=producto_id,
+        codigoProducto=_codigo_producto_visible(producto, empresa_id),
+        codigoCatalogo=_codigo_catalogo_base(producto),
+        nombreProducto=nombre,
+        cantidad=float(detalle.cantidad or 0),
+    )
 
 
 def _is_custom_producto(producto: Producto | None) -> bool:
@@ -1883,6 +1924,8 @@ def listar_pedidos(
                     func.coalesce(Entrega.observaciones, "").ilike(term),
                     func.coalesce(PedidoDetalle.observacionesPersonalizados, "").ilike(term),
                     func.coalesce(Producto.nombreProducto, "").ilike(term),
+                    func.coalesce(Producto.codigoProducto, "").ilike(term),
+                    func.coalesce(Producto.codigoCatalogo, "").ilike(term),
                     func.coalesce(Sucursal.telefono, "").ilike(term),
                     payment_and_channel_search,
                 )
@@ -1957,7 +2000,7 @@ def listar_pedidos(
     )
 
     detalles_rows = (
-        db.query(PedidoDetalle.pedidoID, Producto.nombreProducto)
+        db.query(PedidoDetalle, Producto)
         .outerjoin(
             Producto,
             and_(
@@ -1970,8 +2013,15 @@ def listar_pedidos(
     )
 
     productos_por_pedido: dict[int, list[str]] = {}
-    for pedido_id, nombre_producto in detalles_rows:
-        productos_por_pedido.setdefault(int(pedido_id), []).append(str(nombre_producto or "Producto"))
+    productos_detalle_por_pedido: dict[int, list[PedidoListProducto]] = {}
+    for detalle, producto in detalles_rows:
+        pedido_id = int(detalle.pedidoID)
+        productos_por_pedido.setdefault(pedido_id, []).append(
+            _producto_listado_texto(producto, int(empresa_id))
+        )
+        productos_detalle_por_pedido.setdefault(pedido_id, []).append(
+            _producto_listado_detalle(detalle, producto, int(empresa_id))
+        )
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
 
@@ -2007,6 +2057,7 @@ def listar_pedidos(
                 fechaEntrega=_scheduled_entrega_datetime(entrega),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
+                productosDetalle=productos_detalle_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
                 metodoPago=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("metodoPago"),
                 canalFlora=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("canalFlora"),
@@ -2089,9 +2140,10 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         productos = [
             PedidoDetalleProducto(
                 detalleID=int(detalle.idPedidoDetalle),
-                productoID=int(producto.idProducto),
-                codigoProducto=(str(producto.codigoProducto).strip() if producto.codigoProducto else None),
-                nombreProducto=str(producto.nombreProducto or "Producto"),
+                productoID=int((producto.idProducto if producto else detalle.productoID) or 0),
+                codigoProducto=_codigo_producto_visible(producto, int(pedido.empresaID)),
+                codigoCatalogo=_codigo_catalogo_base(producto),
+                nombreProducto=str((producto.nombreProducto if producto else None) or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
                 observaciones=_sanitize_producto_observacion(
                     (
@@ -3466,7 +3518,7 @@ def resumen_contabilidad(
         })
 
         for detalle, producto in detalles_por_pedido.get(pedido_id, []):
-            codigo = str(getattr(producto, "codigoProducto", "") or "").strip()
+            codigo = _codigo_producto_visible(producto, int(empresa_id)) or ""
             nombre = str(getattr(producto, "nombreProducto", None) or "Arreglo").strip() or "Arreglo"
             producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
             key = f"{producto_id or 'na'}::{codigo or 'sin-codigo'}::{nombre}"

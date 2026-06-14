@@ -11,6 +11,7 @@ class Producto(Base):
     empresaID = Column("empresa_id", BigInteger)
     categoriaID = Column("categoria_id", BigInteger, ForeignKey("petalops.categoria.idcategoria"))
     codigoProducto = Column("codigo_producto", String(50))
+    codigoCatalogo = Column("codigo_catalogo", String(50))
     nombreProducto = Column("nombre_producto", String(200))
     descripcion = Column("descripcion", Text)
     porcentajeIva = Column("porcentaje_iva", Numeric(5,2))

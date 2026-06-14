@@ -312,6 +312,7 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
             PedidoDetalle.idPedidoDetalle,
             Producto.idProducto,
             Producto.codigoProducto,
+            Producto.codigoCatalogo,
             Producto.nombreProducto,
             Producto.descripcion,
             PedidoDetalle.observacionesPersonalizados,
@@ -334,7 +335,16 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
     )
 
     out: dict[int, dict[str, str | int | None]] = {}
-    for produccion_id, pedido_detalle_id, producto_id, codigo_producto, nombre_producto, descripcion_producto, observaciones_personalizados in rows:
+    for (
+        produccion_id,
+        pedido_detalle_id,
+        producto_id,
+        codigo_producto,
+        codigo_catalogo,
+        nombre_producto,
+        descripcion_producto,
+        observaciones_personalizados,
+    ) in rows:
         key = int(produccion_id)
         observacion_limpia = str(observaciones_personalizados).strip() if observaciones_personalizados else None
         descripcion_limpia = str(descripcion_producto).strip() if descripcion_producto else None
@@ -345,6 +355,7 @@ def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int])
                 "pedidoDetalleID": int(pedido_detalle_id) if pedido_detalle_id is not None else None,
                 "productoID": int(producto_id) if producto_id is not None else None,
                 "codigoProducto": str(codigo_producto or "").strip() or None,
+                "codigoCatalogo": str(codigo_catalogo or "").strip() or None,
                 "nombreProducto": str(nombre_producto or "Producto"),
                 "observacionesPersonalizados": observacion_limpia,
             }
@@ -459,11 +470,13 @@ def _build_items(
         producto_info = producto_map.get(int(produccion.idProduccion), {})
         nombre_arreglo = str(producto_info.get("nombreProducto") or "Producto")
         codigo_producto = str(producto_info.get("codigoProducto") or "").strip() or None
+        codigo_catalogo = str(producto_info.get("codigoCatalogo") or "").strip() or None
         observacion_personalizada = str(producto_info.get("observacionesPersonalizados") or "").strip() or None
         observacion_entrega = str(entrega.observacionGeneral or "").strip() if entrega else ""
         observacion_entrega = observacion_entrega or None
         producto_id = producto_info.get("productoID")
-        codigo_arreglo = codigo_producto or (str(producto_id) if producto_id is not None else None)
+        codigo_base = codigo_catalogo if int(empresa_id) == 3 and codigo_catalogo else codigo_producto
+        codigo_arreglo = codigo_base or (str(producto_id) if producto_id is not None else None)
 
         items.append(
             ProduccionItem(
