@@ -16,7 +16,7 @@ def test_build_pedido_adjustments_uses_fixed_amount_discount_and_saldo_favor():
 
     assert ajustes["descuentoMonto"] == Decimal("5000.00")
     assert ajustes["saldoFavorMonto"] == Decimal("7000.00")
-    assert ajustes["total"] == Decimal("98000.00")
+    assert ajustes["total"] == Decimal("112000.00")
 
 
 def test_payment_metadata_serializes_discount_notes_balance_and_invoice_state():

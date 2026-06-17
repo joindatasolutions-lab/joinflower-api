@@ -1016,9 +1016,7 @@ def _build_pedido_adjustments(
     if descuento_monto > total_con_recargo:
         descuento_monto = total_con_recargo
     total_despues_descuento = _round_money_decimal(total_con_recargo - descuento_monto)
-    if saldo_favor_monto > total_despues_descuento:
-        saldo_favor_monto = total_despues_descuento
-    total = _round_money_decimal(total_despues_descuento - saldo_favor_monto)
+    total = _round_money_decimal(total_despues_descuento + saldo_favor_monto)
 
     return {
         "baseTotal": base_total,
@@ -3203,7 +3201,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         *( [f"Recargo link ({int(round(float(pago_resumen.get('recargoLinkPct') or 0)))}%): {_money_cop(recargo_link_monto)}"] if recargo_link_monto > 0 else [] ),
         *( [f"Descuento: -{_money_cop(descuento_monto)}"] if descuento_monto > 0 else [] ),
         *( [f"Nota descuento: {descuento_nota}"] if descuento_nota else [] ),
-        *( [f"Saldo a favor: -{_money_cop(saldo_favor_monto)}"] if saldo_favor_monto > 0 else [] ),
+        *( [f"Saldo a favor: {_money_cop(saldo_favor_monto)}"] if saldo_favor_monto > 0 else [] ),
         *( [f"Nota saldo a favor: {saldo_favor_nota}"] if saldo_favor_nota else [] ),
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
