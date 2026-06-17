@@ -33,6 +33,7 @@ ALLOWED_ORIGINS = [
     "http://localhost:5500",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://127.0.0.1:5175",
     "http://127.0.0.1:3000",
     "http://localhost:3000",
     "https://petalops.joindata.com.co",
@@ -137,5 +138,5 @@ def db_connection_check():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8001"))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port)
