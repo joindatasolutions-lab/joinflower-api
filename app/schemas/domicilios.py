@@ -122,3 +122,20 @@ class DomicilioActionResponse(BaseModel):
 class FiltroEstadoResponse(BaseModel):
     filtro: str
     fecha: date
+
+
+class OrderItemDetail(BaseModel):
+    """Detalle de un item del pedido con información del producto"""
+    productId: int
+    name: str
+    qty: int
+    imageUrl: str | None = None
+
+
+class DomicilioDetailResponse(BaseModel):
+    """Respuesta GET /domicilios/:id con detalles del pedido"""
+    idEntrega: int
+    numeroPedido: str
+    cliente: str
+    items: list[OrderItemDetail]
+    customerMessage: str | None = None  # Solo para usuarios autorizados

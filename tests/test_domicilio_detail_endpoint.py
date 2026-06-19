@@ -1,0 +1,108 @@
+from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from app.models.cliente import Cliente
+from app.models.entrega import Entrega
+from app.models.pedido import Pedido
+from app.models.pedidodetalle import PedidoDetalle
+from app.models.producto import Producto
+from app.routers import domicilios as domicilios_router
+
+
+class FakeQuery:
+    def __init__(self, first_value=None, all_value=None):
+        self._first_value = first_value
+        self._all_value = all_value or []
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def outerjoin(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self._first_value
+
+    def all(self):
+        return self._all_value
+
+
+class FakeDb:
+    def __init__(self, entrega=None, pedido=None, cliente=None, detalles=None):
+        self.entrega = entrega
+        self.pedido = pedido
+        self.cliente = cliente
+        self.detalles = detalles or []
+
+    def query(self, *entities):
+        if entities == (Entrega,):
+            return FakeQuery(first_value=self.entrega)
+        if entities == (Pedido,):
+            return FakeQuery(first_value=self.pedido)
+        if entities == (Cliente,):
+            return FakeQuery(first_value=self.cliente)
+        if entities == (PedidoDetalle, Producto):
+            return FakeQuery(all_value=self.detalles)
+        raise AssertionError(f"Unexpected query entities: {entities}")
+
+
+def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *args, **kwargs: None)
+
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        mensaje="Feliz cumple",
+        domiciliarioID=48,
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        empresaID=3,
+        clienteID=30,
+        numeroPedido=96412,
+        codigoPedido="FLR-96412",
+    )
+    cliente = SimpleNamespace(idCliente=30, empresaID=3, nombreCompleto="Cliente Demo")
+    detalle = SimpleNamespace(
+        idPedidoDetalle=40,
+        empresaID=3,
+        pedidoID=20,
+        productoID=50,
+        cantidad=Decimal("2"),
+    )
+    producto = SimpleNamespace(
+        idProducto=50,
+        empresaID=3,
+        nombreProducto="Ramo Primavera",
+        imageUrl="https://cdn.example.com/ramo.jpg",
+    )
+    db = FakeDb(entrega=entrega, pedido=pedido, cliente=cliente, detalles=[(detalle, producto)])
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario")
+
+    response = domicilios_router.obtener_detalle_domicilio(10, db=db, auth=auth)
+
+    assert response.idEntrega == 10
+    assert response.numeroPedido == "FLR-96412"
+    assert response.cliente == "Cliente Demo"
+    assert response.customerMessage == "Feliz cumple"
+    assert response.items[0].productId == 50
+    assert response.items[0].name == "Ramo Primavera"
+    assert response.items[0].qty == 2
+    assert response.items[0].imageUrl == "https://cdn.example.com/ramo.jpg"
+
+
+def test_obtener_detalle_domicilio_404_when_entrega_missing():
+    db = FakeDb(entrega=None)
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario")
+
+    with pytest.raises(HTTPException) as exc:
+        domicilios_router.obtener_detalle_domicilio(999, db=db, auth=auth)
+
+    assert exc.value.status_code == 404

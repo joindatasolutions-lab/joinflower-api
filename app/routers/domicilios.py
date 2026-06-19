@@ -24,9 +24,12 @@ from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
 from app.models.pedido import Pedido
+from app.models.pedidodetalle import PedidoDetalle
+from app.models.producto import Producto
 from app.models.produccion import Produccion
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
+    DomicilioDetailResponse,
     DomiciliarioItem,
     DomiciliarioListResponse,
     DomicilioActionResponse,
@@ -41,6 +44,7 @@ from app.schemas.domicilios import (
     ESTADO_PENDIENTE,
     MarcarEnRutaRequest,
     MarcarNoEntregadoRequest,
+    OrderItemDetail,
     TomarEntregaRequest,
 )
 from app.services import domicilio_service, produccion_service
@@ -829,3 +833,123 @@ def listar_mis_entregas_propias(
         priority=lambda item: item.prioridad,
     )
     return DomicilioCourierListResponse(items=items, total=len(items))
+
+
+@router.get(
+    "/{entrega_id}",
+    response_model=DomicilioDetailResponse,
+    responses={
+        200: {"description": "Detalles del pedido con items e imágenes"},
+        401: {"description": "No autorizado"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Entrega no encontrada"},
+    }
+)
+def obtener_detalle_domicilio(
+    entrega_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    """
+    GET /domicilios/:id - Devuelve detalles del pedido con items e imágenes.
+    
+    Requisitos:
+    - Autenticación: Bearer token con acceso al módulo domicilios
+    - Respuesta: JSON con items: [{ productId, name, qty, imageUrl }]
+    - No devolver mensaje del cliente en listados; como customerMessage solo a usuarios autorizados
+    - Errores: 200 / 401 / 403 / 404
+    """
+    try:
+        # Obtener la entrega con validaciones de empresa
+        entrega = (
+            db.query(Entrega)
+            .filter(
+                Entrega.idEntrega == int(entrega_id),
+                Entrega.empresaID == int(auth.empresaID),
+            )
+            .first()
+        )
+        
+        if not entrega:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "DOMICILIO_NOT_FOUND", "message": "Entrega no encontrada"},
+            )
+        
+        assert_same_empresa(auth, int(entrega.empresaID))
+        _assert_entrega_actor_scope(entrega, auth, db)
+        
+        # Obtener el pedido asociado
+        pedido = (
+            db.query(Pedido)
+            .filter(
+                Pedido.idPedido == int(entrega.pedidoID),
+                Pedido.empresaID == int(entrega.empresaID),
+            )
+            .first()
+        )
+        
+        if not pedido:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"},
+            )
+        
+        # Obtener cliente
+        cliente = (
+            db.query(Cliente)
+            .filter(
+                Cliente.idCliente == int(pedido.clienteID),
+                Cliente.empresaID == int(pedido.empresaID),
+            )
+            .first()
+        )
+        cliente_nombre = str((cliente.nombreCompleto if cliente else None) or "Cliente")
+        
+        # Obtener detalles del pedido con JOIN a productos
+        detalles = (
+            db.query(PedidoDetalle, Producto)
+            .outerjoin(
+                Producto,
+                (Producto.idProducto == PedidoDetalle.productoID)
+                & (Producto.empresaID == PedidoDetalle.empresaID),
+            )
+            .filter(
+                PedidoDetalle.pedidoID == int(pedido.idPedido),
+                PedidoDetalle.empresaID == int(pedido.empresaID),
+            )
+            .order_by(PedidoDetalle.idPedidoDetalle.asc())
+            .all()
+        )
+        
+        # Construir lista de items
+        items: list[OrderItemDetail] = []
+        for detalle, producto in detalles:
+            items.append(
+                OrderItemDetail(
+                    productId=int((producto.idProducto if producto else detalle.productoID) or 0),
+                    name=str((producto.nombreProducto if producto else None) or "Producto"),
+                    qty=int(detalle.cantidad or 0),
+                    imageUrl=(str(producto.imageUrl) if producto and producto.imageUrl else None),
+                )
+            )
+        
+        # Construir respuesta con formato correcto
+        numero_pedido_str = str(pedido.codigoPedido or pedido.numeroPedido or pedido.idPedido)
+        
+        return DomicilioDetailResponse(
+            idEntrega=int(entrega.idEntrega),
+            numeroPedido=numero_pedido_str,
+            cliente=cliente_nombre,
+            items=items,
+            customerMessage=(str(entrega.mensaje or "") or None),
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        domicilios_logger.error("Error obteniendo detalle de domicilio %s", entrega_id, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Error interno del servidor"},
+        ) from e
