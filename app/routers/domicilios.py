@@ -227,6 +227,13 @@ def _build_mis_entregas_query(
     end = datetime.combine(fecha, datetime.max.time())
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
+    tipo_entrega_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
 
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion)
@@ -248,6 +255,7 @@ def _build_mis_entregas_query(
                     domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA),
                 ]
             ),
+            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
         .order_by(
             func.coalesce(
@@ -259,7 +267,7 @@ def _build_mis_entregas_query(
     )
 
     if sucursal_id is not None:
-        q = q.filter(entrega_actual.sucursalID == int(sucursal_id))
+        q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
 
     return q
 
@@ -276,6 +284,13 @@ def _build_pedidos_disponibles_query(
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
+    tipo_entrega_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
@@ -299,11 +314,12 @@ def _build_pedidos_disponibles_query(
                 entrega_actual.domiciliarioID == None,
                 entrega_actual.domiciliarioID == int(domiciliario_id),
             ),
+            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
 
     if sucursal_id is not None:
-        q = q.filter(entrega_actual.sucursalID == int(sucursal_id))
+        q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
 
     return q.order_by(
         func.coalesce(
@@ -463,6 +479,13 @@ def asignar_domiciliario(
         entrega.fechaAsignacion = None
         entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     else:
+        if domicilio_service.is_store_pickup_tipo_entrega(entrega.tipoEntrega):
+            raise _err(
+                "DOMICILIO_STORE_PICKUP_ASSIGNMENT_NOT_ALLOWED",
+                "Los pedidos para recoger en tienda no permiten asignar domiciliario",
+                status_code=400,
+            )
+
         domiciliario = db.query(Domiciliario).filter(Domiciliario.idDomiciliario == payload.domiciliarioID).first()
         if not domiciliario or int(domiciliario.empresaID) != int(entrega.empresaID):
             raise _err("DOMICILIO_DOMICILIARIO_INVALID", "Domiciliario inválido para la empresa", status_code=400)
@@ -512,6 +535,13 @@ def tomar_entrega(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
     entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
     assert_same_empresa(auth, int(entrega.empresaID))
+
+    if domicilio_service.is_store_pickup_tipo_entrega(entrega.tipoEntrega):
+        raise _err(
+            "DOMICILIO_STORE_PICKUP_TAKE_NOT_ALLOWED",
+            "Los pedidos para recoger en tienda no permiten asignar domiciliario",
+            status_code=400,
+        )
 
     actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
     if actual not in {ESTADO_PENDIENTE, ESTADO_NO_ENTREGADO}:

@@ -42,6 +42,14 @@ ESTADO_ID_FALLBACK = {
     ESTADO_CANCELADO: 6,
 }
 ESTADO_FROM_ID_FALLBACK = {v: k for k, v in ESTADO_ID_FALLBACK.items()}
+STORE_PICKUP_TIPO_ENTREGA_VALUES = {
+    "recoger",
+    "tienda",
+    "recogida",
+    "recogida_en_tienda",
+    "recoger_en_tienda",
+    "retiro_en_tienda",
+}
 
 
 def estado_norm(value: str | int | None) -> str:
@@ -76,6 +84,11 @@ def estado_id(value: str | int | None) -> int:
         return int(value)
     normalized = estado_norm(value)
     return ESTADO_ID_FALLBACK.get(normalized, ESTADO_ID_FALLBACK[ESTADO_PENDIENTE])
+
+
+def is_store_pickup_tipo_entrega(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in STORE_PICKUP_TIPO_ENTREGA_VALUES
 
 
 def now_utc() -> datetime:
