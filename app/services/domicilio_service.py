@@ -82,7 +82,17 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = int(os.getenv("DOMICILIO_MAX_TAREAS_ACTIVAS", "2"))
+DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = 20
+
+
+def domicilio_max_tareas_activas() -> int:
+    raw = os.getenv("DOMICILIO_MAX_TAREAS_ACTIVAS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS
 
 
 def can_transition(current: str, target: str) -> bool:
@@ -298,7 +308,9 @@ def count_entregas_activas(db, empresa_id: int, sucursal_id: int | None, domicil
 
 
 def assert_domiciliario_capacity(db, empresa_id: int, sucursal_id: int | None, domiciliario_id: int, ignore_entrega_id: int | None = None, limit: int | None = None):
-    limit = int(limit or DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS)
+    limit = domicilio_max_tareas_activas() if limit is None else int(limit)
+    if limit <= 0:
+        return
     total = count_entregas_activas(db, empresa_id, sucursal_id, domiciliario_id, ignore_entrega_id=ignore_entrega_id)
     if total >= limit:
         raise HTTPException(
