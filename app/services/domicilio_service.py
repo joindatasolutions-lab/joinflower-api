@@ -95,7 +95,7 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = 20
+DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = 0
 
 
 def domicilio_max_tareas_activas() -> int:
