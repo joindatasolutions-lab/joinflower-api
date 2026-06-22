@@ -14,6 +14,9 @@ class _ScalarQuery:
     def scalar(self):
         return self.value
 
+    def count(self):
+        return self.value
+
 
 class _FakeDb:
     def __init__(self, scalar_value=0):
@@ -62,6 +65,7 @@ def test_listar_produccion_search_ignores_fecha_y_estado_and_returns_metricas(mo
         fecha=date(2026, 5, 13),
         estado="Pendiente",
         q="95447",
+        todas_fechas=False,
         incluir_cancelado=False,
         auto_asignar_pendientes_hoy=False,
         db=db,

@@ -32,6 +32,7 @@ class PipelinePedidoCard(BaseModel):
     sucursal_id: int | None = None
     domiciliario: str | None = None
     domiciliario_id: int | None = None
+    florista: str | None = None
     florista_id: int | None = None
     prioridad: str | None = None
     urgente: bool = False

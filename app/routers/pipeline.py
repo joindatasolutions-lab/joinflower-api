@@ -116,6 +116,8 @@ def listar_pipeline_pedidos(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     fecha: date | None = Query(None),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
     domiciliario_id: str | None = Query(None, alias="domiciliarioID"),
     florista_id: str | None = Query(None, alias="floristaID"),
     numero_pedido: str | None = Query(None, alias="numeroPedido"),
@@ -153,7 +155,7 @@ def listar_pipeline_pedidos(
         FloristaLast = aliased(Florista)
 
         q = (
-            db.query(Pedido, Cliente, EstadoPedido, EntregaLast, ProduccionLast, Domiciliario)
+            db.query(Pedido, Cliente, EstadoPedido, EntregaLast, ProduccionLast, Domiciliario, FloristaLast)
             .join(Cliente, Cliente.idCliente == Pedido.clienteID)
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .outerjoin(entrega_last_sq, entrega_last_sq.c.pedido_id == Pedido.idPedido)
@@ -208,7 +210,13 @@ def listar_pipeline_pedidos(
                 )
             )
 
-        if fecha:
+        if fecha_desde or fecha_hasta:
+            start_date = fecha_desde or fecha_hasta
+            end_date = fecha_hasta or fecha_desde
+            start = datetime.combine(start_date, datetime.min.time())
+            end = datetime.combine(end_date, datetime.max.time())
+            q = q.filter(Pedido.fechaPedido.between(start, end))
+        elif fecha:
             start = datetime.combine(fecha, datetime.min.time())
             end = datetime.combine(fecha, datetime.max.time())
             q = q.filter(Pedido.fechaPedido.between(start, end))
@@ -263,7 +271,7 @@ def listar_pipeline_pedidos(
             "cancelado": [],
         }
 
-        for pedido, cliente, estado_pedido, entrega, produccion, domiciliario in rows:
+        for pedido, cliente, estado_pedido, entrega, produccion, domiciliario, florista in rows:
             stage = _resolve_stage(
                 (estado_pedido.nombreEstado if estado_pedido else None),
                 (int(produccion.estado) if produccion and produccion.estado is not None else None),
@@ -285,6 +293,16 @@ def listar_pipeline_pedidos(
             urgente = prioridad in {"ALTA", "URGENTE", "CRITICA"}
             resumen = productos_por_pedido.get(int(pedido.idPedido), "")
             tiene_tarjeta = bool(entrega and entrega.mensaje and str(entrega.mensaje).strip())
+            domiciliario_id_value = (
+                int(entrega.domiciliarioID)
+                if entrega and entrega.domiciliarioID is not None
+                else None
+            )
+            florista_id_value = (
+                int(produccion.floristaID)
+                if produccion and produccion.floristaID is not None
+                else None
+            )
 
             card = PipelinePedidoCard(
                 id_pedido=int(pedido.idPedido),
@@ -298,9 +316,18 @@ def listar_pipeline_pedidos(
                 estado=stage,
                 sucursal=sucursal_map.get(int(pedido.sucursalID), f"Sucursal {int(pedido.sucursalID)}"),
                 sucursal_id=(int(pedido.sucursalID) if pedido.sucursalID is not None else None),
-                domiciliario=(str(domiciliario.nombre) if domiciliario and domiciliario.nombre else None),
-                domiciliario_id=(int(entrega.domiciliarioID) if entrega and entrega.domiciliarioID is not None else None),
-                florista_id=(int(produccion.floristaID) if produccion and produccion.floristaID is not None else None),
+                domiciliario=(
+                    str(domiciliario.nombre)
+                    if domiciliario and domiciliario.nombre
+                    else (f"Domiciliario {domiciliario_id_value}" if domiciliario_id_value is not None else None)
+                ),
+                domiciliario_id=domiciliario_id_value,
+                florista=(
+                    str(florista.nombre)
+                    if florista and florista.nombre
+                    else (f"Florista {florista_id_value}" if florista_id_value is not None else None)
+                ),
+                florista_id=florista_id_value,
                 prioridad=prioridad,
                 urgente=urgente,
                 tiempo_estimado_produccion=(int(produccion.tiempoEstimadoMin) if produccion and produccion.tiempoEstimadoMin is not None else None),

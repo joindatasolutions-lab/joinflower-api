@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from fastapi.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import and_, or_, cast, String, func, text
 from datetime import date, datetime, timezone
@@ -1999,6 +1999,16 @@ def listar_pedidos(
 
     detalles_rows = (
         db.query(PedidoDetalle, Producto)
+        .options(
+            load_only(
+                Producto.idProducto,
+                Producto.empresaID,
+                Producto.codigoProducto,
+                Producto.codigoCatalogo,
+                Producto.nombreProducto,
+                Producto.descripcion,
+            )
+        )
         .outerjoin(
             Producto,
             and_(
@@ -2130,6 +2140,16 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         detalles = (
             db.query(PedidoDetalle, Producto)
+            .options(
+                load_only(
+                    Producto.idProducto,
+                    Producto.empresaID,
+                    Producto.codigoProducto,
+                    Producto.codigoCatalogo,
+                    Producto.nombreProducto,
+                    Producto.descripcion,
+                )
+            )
             .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
             .filter(PedidoDetalle.pedidoID == pedido.idPedido)
             .all()
