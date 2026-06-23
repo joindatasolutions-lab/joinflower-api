@@ -82,6 +82,29 @@ class DomicilioCourierListResponse(BaseModel):
     total: int
 
 
+class DomicilioContadoresResponse(BaseModel):
+    asignados: int
+    enCamino: int
+    entregados: int
+    disponibles: int
+
+
+class PedidoDisponibleItem(BaseModel):
+    id: int
+    numeroPedido: str
+    cliente: str
+    direccion: str | None = None
+    estado: str
+    prioridad: str | None = None
+
+
+class PedidoAsignadoResponse(PedidoDisponibleItem):
+    idEntrega: int
+    domiciliarioID: int
+    fechaAsignacion: datetime
+    contadores: DomicilioContadoresResponse | None = None
+
+
 class AsignarDomiciliarioRequest(BaseModel):
     domiciliarioID: int | None = None
     usuarioCambio: str = Field(min_length=2)

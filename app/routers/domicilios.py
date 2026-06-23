@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -7,7 +8,7 @@ import os
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import String, and_, cast, func, or_
+from sqlalchemy import String, and_, cast, func, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
@@ -35,8 +36,11 @@ from app.schemas.domicilios import (
     DomicilioActionResponse,
     DomicilioAdminItem,
     DomicilioAdminListResponse,
+    DomicilioContadoresResponse,
     DomicilioCourierCard,
     DomicilioCourierListResponse,
+    PedidoAsignadoResponse,
+    PedidoDisponibleItem,
     ESTADO_ASIGNADO,
     ESTADO_EN_RUTA,
     ESTADO_ENTREGADO,
@@ -91,6 +95,140 @@ def _assert_auth_domiciliario(db: Session, auth) -> int:
 
 def _actor_can_override_delivery(auth) -> bool:
     return is_super_admin_context(auth) or is_empresa_admin_context(auth)
+
+
+def _assert_role_domiciliario(auth):
+    rol = str(getattr(auth, "rol", "") or "").strip().lower().replace(" ", "_")
+    if rol != "domiciliario":
+        raise _err(
+            "DOMICILIO_ROLE_REQUIRED",
+            "Solo usuarios con rol DOMICILIARIO pueden autoasignarse pedidos",
+            status_code=403,
+        )
+
+
+def _estado_api(entrega: Entrega) -> str:
+    estado = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if estado == ESTADO_PENDIENTE:
+        return "SIN_ASIGNAR"
+    if estado == ESTADO_ASIGNADO:
+        return "ASIGNADO"
+    if estado == ESTADO_EN_RUTA:
+        return "EN_CAMINO"
+    if estado == ESTADO_ENTREGADO:
+        return "ENTREGADO"
+    if estado == ESTADO_NO_ENTREGADO:
+        return "NO_ENTREGADO"
+    return estado.upper()
+
+
+def _numero_pedido_api(pedido: Pedido) -> str:
+    if pedido.codigoPedido:
+        return str(pedido.codigoPedido)
+    if pedido.numeroPedido is not None:
+        return str(pedido.numeroPedido)
+    return str(pedido.idPedido)
+
+
+def _build_pedido_disponible_item(
+    entrega: Entrega,
+    pedido: Pedido,
+    cliente: Cliente | None,
+    produccion: Produccion | None,
+) -> PedidoDisponibleItem:
+    return PedidoDisponibleItem(
+        id=int(pedido.idPedido),
+        numeroPedido=_numero_pedido_api(pedido),
+        cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
+        direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
+        estado=_estado_api(entrega),
+        prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
+    )
+
+
+def _ensure_domicilio_auditoria_table(db: Session):
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS petalops.domicilio_auditoria (
+              id_audit BIGSERIAL PRIMARY KEY,
+              empresa_id BIGINT NOT NULL,
+              sucursal_id BIGINT,
+              pedido_id BIGINT NOT NULL,
+              entrega_id BIGINT NOT NULL,
+              actor_user_id BIGINT,
+              actor_login VARCHAR(120) NOT NULL,
+              domiciliario_id BIGINT,
+              accion VARCHAR(60) NOT NULL,
+              estado_anterior VARCHAR(40),
+              estado_nuevo VARCHAR(40),
+              detalle_json TEXT,
+              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+    )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_domicilio_auditoria_empresa_fecha ON petalops.domicilio_auditoria (empresa_id, created_at DESC);"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_domicilio_auditoria_pedido ON petalops.domicilio_auditoria (empresa_id, pedido_id);"))
+
+
+def _audit_domicilio_action(
+    db: Session,
+    auth,
+    entrega: Entrega,
+    accion: str,
+    estado_anterior: str | None,
+    estado_nuevo: str | None,
+    extra: dict | None = None,
+):
+    _ensure_domicilio_auditoria_table(db)
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.domicilio_auditoria (
+                empresa_id,
+                sucursal_id,
+                pedido_id,
+                entrega_id,
+                actor_user_id,
+                actor_login,
+                domiciliario_id,
+                accion,
+                estado_anterior,
+                estado_nuevo,
+                detalle_json,
+                created_at
+            )
+            VALUES (
+                :empresa_id,
+                :sucursal_id,
+                :pedido_id,
+                :entrega_id,
+                :actor_user_id,
+                :actor_login,
+                :domiciliario_id,
+                :accion,
+                :estado_anterior,
+                :estado_nuevo,
+                :detalle_json,
+                CURRENT_TIMESTAMP
+            )
+            """
+        ),
+        {
+            "empresa_id": int(entrega.empresaID),
+            "sucursal_id": (int(entrega.sucursalID) if entrega.sucursalID is not None else None),
+            "pedido_id": int(entrega.pedidoID),
+            "entrega_id": int(entrega.idEntrega),
+            "actor_user_id": getattr(auth, "userID", None),
+            "actor_login": str(getattr(auth, "login", None) or getattr(auth, "nombre", None) or "system"),
+            "domiciliario_id": (int(entrega.domiciliarioID) if entrega.domiciliarioID is not None else None),
+            "accion": accion,
+            "estado_anterior": estado_anterior,
+            "estado_nuevo": estado_nuevo,
+            "detalle_json": json.dumps(extra or {}, ensure_ascii=True),
+        },
+    )
 
 
 def _latest_entrega_id_subquery(db: Session, empresa_id: int):
@@ -331,6 +469,115 @@ def _build_pedidos_disponibles_query(
             entrega_actual.fechaEntregaProgramada,
             entrega_actual.fechaEntrega,
         ).asc()
+    )
+
+
+def _build_pedidos_sin_asignar_query(
+    db: Session,
+    empresa_id: int,
+    sucursal_id: int | None,
+    fecha_desde: datetime,
+    fecha_hasta: datetime,
+):
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
+    estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
+    latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
+    entrega_actual = aliased(Entrega)
+    tipo_entrega_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
+
+    q = (
+        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
+        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
+        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .filter(
+            entrega_actual.empresaID == int(empresa_id),
+            entrega_actual.domiciliarioID == None,
+            entrega_actual.estadoEntregaID == estado_pendiente_id,
+            Produccion.estado == estado_para_entrega,
+            func.coalesce(
+                entrega_actual.reprogramadaPara,
+                entrega_actual.fechaEntregaProgramada,
+                entrega_actual.fechaEntrega,
+            ).between(fecha_desde, fecha_hasta),
+            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+        )
+    )
+
+    if sucursal_id is not None:
+        q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
+
+    return q.order_by(
+        func.coalesce(
+            entrega_actual.reprogramadaPara,
+            entrega_actual.fechaEntregaProgramada,
+            entrega_actual.fechaEntrega,
+        ).asc(),
+        entrega_actual.idEntrega.asc(),
+    )
+
+
+def _fecha_rango(fecha: date | None, fecha_desde: date | None, fecha_hasta: date | None) -> tuple[datetime, datetime]:
+    if fecha is not None:
+        return datetime.combine(fecha, datetime.min.time()), datetime.combine(fecha, datetime.max.time())
+
+    start_date = fecha_desde or date.today()
+    end_date = fecha_hasta or start_date
+    return datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time())
+
+
+def _domicilio_contadores(
+    db: Session,
+    empresa_id: int,
+    sucursal_id: int | None,
+    domiciliario_id: int,
+    fecha_desde: datetime,
+    fecha_hasta: datetime,
+) -> DomicilioContadoresResponse:
+    latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
+    entrega_actual = aliased(Entrega)
+    base = (
+        db.query(entrega_actual)
+        .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
+        .filter(
+            entrega_actual.empresaID == int(empresa_id),
+            func.coalesce(
+                entrega_actual.reprogramadaPara,
+                entrega_actual.fechaEntregaProgramada,
+                entrega_actual.fechaEntrega,
+            ).between(fecha_desde, fecha_hasta),
+        )
+    )
+    if sucursal_id is not None:
+        base = base.filter(entrega_actual.sucursalID == int(sucursal_id))
+
+    assigned_states = {
+        "asignados": domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO),
+        "en_camino": domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA),
+        "entregados": domicilio_service.resolve_estado_entrega_id(db, ESTADO_ENTREGADO),
+    }
+    own_base = base.filter(entrega_actual.domiciliarioID == int(domiciliario_id))
+
+    disponibles = _build_pedidos_sin_asignar_query(
+        db=db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    ).count()
+
+    return DomicilioContadoresResponse(
+        asignados=int(own_base.filter(entrega_actual.estadoEntregaID == assigned_states["asignados"]).count()),
+        enCamino=int(own_base.filter(entrega_actual.estadoEntregaID == assigned_states["en_camino"]).count()),
+        entregados=int(own_base.filter(entrega_actual.estadoEntregaID == assigned_states["entregados"]).count()),
+        disponibles=int(disponibles),
     )
 
 
@@ -812,6 +1059,187 @@ def listar_pedidos_disponibles(
         )
 
     return DomicilioCourierListResponse(items=items, total=len(items))
+
+
+@router.get("/pedidos/disponibles", response_model=list[PedidoDisponibleItem])
+def listar_pedidos_disponibles_api(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha: date | None = Query(None),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, alias="pageSize", ge=1, le=200),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_role_domiciliario(auth)
+    _assert_auth_domiciliario(db, auth)
+
+    start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
+    rows = (
+        _build_pedidos_sin_asignar_query(
+            db=db,
+            empresa_id=empresa_id,
+            sucursal_id=sucursal_id,
+            fecha_desde=start,
+            fecha_hasta=end,
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return [
+        _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+        for entrega, pedido, cliente, produccion in rows
+    ]
+
+
+@router.get("/contadores", response_model=DomicilioContadoresResponse)
+def obtener_contadores_domicilio(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha: date | None = Query(None),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_role_domiciliario(auth)
+    domiciliario_id = _assert_auth_domiciliario(db, auth)
+    start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
+    return _domicilio_contadores(db, empresa_id, sucursal_id, domiciliario_id, start, end)
+
+
+@router.post("/pedidos/{pedido_id}/asignar", response_model=PedidoAsignadoResponse)
+def autoasignar_pedido(
+    pedido_id: int,
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_role_domiciliario(auth)
+    domiciliario_id = _assert_auth_domiciliario(db, auth)
+
+    pedido = (
+        db.query(Pedido)
+        .filter(Pedido.idPedido == int(pedido_id), Pedido.empresaID == int(empresa_id))
+        .first()
+    )
+    if not pedido:
+        raise _err("PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
+    if sucursal_id is not None and int(pedido.sucursalID) != int(sucursal_id):
+        raise _err("DOMICILIO_SCOPE_INVALID", "Pedido no pertenece a la sucursal indicada", status_code=403)
+
+    entrega = (
+        db.query(Entrega)
+        .filter(Entrega.pedidoID == int(pedido_id), Entrega.empresaID == int(empresa_id))
+        .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+        .with_for_update()
+        .first()
+    )
+    if not entrega:
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada para el pedido", status_code=404)
+
+    if domicilio_service.is_store_pickup_tipo_entrega(entrega.tipoEntrega):
+        raise _err(
+            "DOMICILIO_STORE_PICKUP_TAKE_NOT_ALLOWED",
+            "Los pedidos para recoger en tienda no permiten asignar domiciliario",
+            status_code=400,
+        )
+
+    estado_anterior = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
+    if entrega.domiciliarioID is not None or int(entrega.estadoEntregaID) != int(estado_pendiente_id):
+        raise _err(
+            "DOMICILIO_ALREADY_ASSIGNED",
+            "El pedido ya fue asignado a otro domiciliario.",
+            status_code=409,
+        )
+
+    domicilio_service.assert_domiciliario_capacity(
+        db=db,
+        empresa_id=int(empresa_id),
+        sucursal_id=(int(entrega.sucursalID) if entrega.sucursalID is not None else None),
+        domiciliario_id=domiciliario_id,
+    )
+    domicilio_service.assert_transition_allowed_for_empresa(
+        db=db,
+        empresa_id=int(entrega.empresaID),
+        current=estado_anterior,
+        target=ESTADO_ASIGNADO,
+    )
+
+    assigned_at = datetime.now(timezone.utc)
+    estado_asignado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
+    updated_rows = (
+        db.query(Entrega)
+        .filter(
+            Entrega.idEntrega == int(entrega.idEntrega),
+            Entrega.empresaID == int(empresa_id),
+            Entrega.pedidoID == int(pedido_id),
+            Entrega.domiciliarioID == None,
+            Entrega.estadoEntregaID == estado_pendiente_id,
+        )
+        .update(
+            {
+                Entrega.domiciliarioID: int(domiciliario_id),
+                Entrega.fechaAsignacion: assigned_at,
+                Entrega.updatedAt: assigned_at,
+                Entrega.estadoEntregaID: estado_asignado_id,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated_rows != 1:
+        db.rollback()
+        raise _err(
+            "DOMICILIO_ALREADY_ASSIGNED",
+            "El pedido ya fue asignado a otro domiciliario.",
+            status_code=409,
+        )
+
+    entrega.domiciliarioID = int(domiciliario_id)
+    entrega.fechaAsignacion = assigned_at
+    entrega.updatedAt = assigned_at
+    entrega.estadoEntregaID = estado_asignado_id
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="AUTOASIGNACION",
+        estado_anterior=estado_anterior,
+        estado_nuevo=ESTADO_ASIGNADO,
+        extra={"pedidoID": int(pedido_id), "usuarioTomadorID": int(auth.userID)},
+    )
+    db.commit()
+
+    cliente = (
+        db.query(Cliente)
+        .filter(Cliente.idCliente == int(pedido.clienteID), Cliente.empresaID == int(empresa_id))
+        .first()
+    )
+    produccion = (
+        db.query(Produccion)
+        .filter(
+            Produccion.idProduccion == entrega.produccionID,
+            Produccion.empresaID == int(empresa_id),
+        )
+        .first()
+    )
+    start, end = _fecha_rango(date.today(), None, None)
+    base_item = _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+    return PedidoAsignadoResponse(
+        **base_item.model_dump(),
+        idEntrega=int(entrega.idEntrega),
+        domiciliarioID=int(domiciliario_id),
+        fechaAsignacion=assigned_at,
+        contadores=_domicilio_contadores(db, empresa_id, sucursal_id, domiciliario_id, start, end),
+    )
 
 
 @router.get("/mis-entregas/propias", response_model=DomicilioCourierListResponse)
