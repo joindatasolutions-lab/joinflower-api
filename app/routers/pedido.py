@@ -39,6 +39,7 @@ from app.schemas.pedido import (
     RechazarPedidoRequest,
 )
 from app.services import caja_service
+from app.services import domicilio_service
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
@@ -314,6 +315,82 @@ def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | 
 
 def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
     return _estado_pedido_nombre(db, estado_pedido_id) not in {"ENTREGADO", "CANCELADO", "RECHAZADO"}
+
+
+def _append_operational_cancel_note(current: str | None, note: str) -> str:
+    current_text = str(current or "").strip()
+    if not current_text:
+        return note
+    if note in current_text:
+        return current_text
+    return f"{current_text}\n{note}"
+
+
+def _sincronizar_cancelacion_operativa_desde_pedido(
+    db: Session,
+    pedido: Pedido,
+    *,
+    motivo: str | None = None,
+) -> dict[str, int]:
+    now = datetime.now(timezone.utc)
+    note = f"Cancelado desde pedidos por estado del pedido {int(pedido.idPedido)}."
+    motivo_text = str(motivo or "").strip()
+    if motivo_text:
+        note = f"{note} Motivo: {motivo_text[:300]}"
+
+    producciones_actualizadas = 0
+    entregas_actualizadas = 0
+
+    estado_produccion_cancelado = produccion_service.estado_produccion_id(
+        db,
+        produccion_service.ESTADO_CANCELADO,
+    )
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.pedidoID == int(pedido.idPedido),
+            Produccion.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    for produccion in producciones:
+        if int(produccion.estado or 0) == int(estado_produccion_cancelado):
+            continue
+        produccion.estado = int(estado_produccion_cancelado)
+        produccion.observacionesInternas = _append_operational_cancel_note(
+            produccion.observacionesInternas,
+            note,
+        )
+        produccion.updatedAt = now
+        producciones_actualizadas += 1
+
+    estado_entrega_cancelado = domicilio_service.resolve_estado_entrega_id(
+        db,
+        domicilio_service.ESTADO_CANCELADO,
+    )
+    entregas = (
+        db.query(Entrega)
+        .filter(
+            Entrega.pedidoID == int(pedido.idPedido),
+            Entrega.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    for entrega in entregas:
+        if int(entrega.estadoEntregaID or 0) == int(estado_entrega_cancelado):
+            continue
+        entrega.estadoEntregaID = int(estado_entrega_cancelado)
+        entrega.observaciones = _append_operational_cancel_note(
+            entrega.observaciones,
+            note,
+        )
+        entrega.updatedAt = now
+        entregas_actualizadas += 1
+
+    return {
+        "produccionesCanceladas": producciones_actualizadas,
+        "entregasCanceladas": entregas_actualizadas,
+    }
 
 
 def _is_lock_not_available_error(exc: OperationalError) -> bool:
@@ -3779,6 +3856,11 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     pedido.estadoPedidoID = estado_rechazado.idEstadoPedido
     pedido.motivoRechazo = motivo[:300]
     pedido.updatedAt = datetime.now(timezone.utc)
+    cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(
+        db,
+        pedido,
+        motivo=pedido.motivoRechazo,
+    )
     _audit_pedido_action(
         db=db,
         actor=auth,
@@ -3800,6 +3882,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         "pedidoID": pedido_id,
         "estado": str(estado_rechazado.nombreEstado),
         "motivo": pedido.motivoRechazo,
+        "cancelacionOperativa": cancelacion_operativa,
     }
 
 
@@ -4045,6 +4128,12 @@ def cambiar_estado(
                 "numeroPedido": int(pedido.numeroPedido or 0),
                 "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
             },
+        )
+    elif str(estado_destino.nombreEstado or "").strip().upper() in {"CANCELADO", "RECHAZADO"}:
+        _sincronizar_cancelacion_operativa_desde_pedido(
+            db,
+            pedido,
+            motivo=pedido.motivoRechazo,
         )
 
     db.commit()
