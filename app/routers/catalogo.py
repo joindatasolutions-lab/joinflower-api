@@ -62,6 +62,7 @@ def obtener_catalogo(
                     p.nombre_producto ILIKE :term
                     OR COALESCE(p.descripcion, '') ILIKE :term
                     OR COALESCE(p.codigo_producto, '') ILIKE :term
+                    OR COALESCE(p.codigo_catalogo, '') ILIKE :term
                 )
             """
 
@@ -71,6 +72,7 @@ def obtener_catalogo(
                 SELECT
                     p.id_producto AS id_producto,
                     p.codigo_producto AS codigo_producto,
+                    p.codigo_catalogo AS codigo_catalogo,
                     p.nombre_producto AS nombre_producto,
                     p.descripcion AS descripcion,
                     ps.precio AS precio,
@@ -97,6 +99,7 @@ def obtener_catalogo(
                 {
                     "idProducto": int(row["id_producto"]),
                     "codigoProducto": row["codigo_producto"],
+                    "codigoCatalogo": row["codigo_catalogo"],
                     "nombreProducto": row["nombre_producto"],
                     "descripcion": row["descripcion"],
                     "precio": float(row["precio"] or 0),
