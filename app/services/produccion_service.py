@@ -1,9 +1,10 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import String, func, text
 from sqlalchemy.orm import Session
 
+from app.core.timezone import as_colombia_date, colombia_now_naive, colombia_today
 from app.models.entrega import Entrega
 from app.models.florista import Florista
 from app.models.pedidodetalle import PedidoDetalle
@@ -16,6 +17,7 @@ ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
 ESTADO_PARA_ENTREGA = "ParaEntrega"
 ESTADO_CANCELADO = "Cancelado"
+ESTADO_PRODUCCION_BLOQUEADO_ID = 5
 
 
 def _activo_truthy(column):
@@ -28,6 +30,45 @@ def _as_date(value: date | datetime | None) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     return value
+
+
+def cancelar_producciones_por_pedido_cancelado(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.pedidoID == int(pedido_id),
+            Produccion.empresaID == int(empresa_id),
+            Produccion.estado != ESTADO_PRODUCCION_BLOQUEADO_ID,
+        )
+        .all()
+    )
+    now = colombia_now_naive()
+    note = str(motivo or f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6.").strip()
+
+    for produccion in producciones:
+        anterior = int(produccion.floristaID) if produccion.floristaID is not None else None
+        produccion.estado = ESTADO_PRODUCCION_BLOQUEADO_ID
+        produccion.updatedAt = now
+        if note:
+            current = str(produccion.observacionesInternas or "").strip()
+            produccion.observacionesInternas = f"{current}\n{note}" if current and note not in current else (current or note)
+        log_historial(
+            db=db,
+            produccion=produccion,
+            florista_anterior_id=anterior,
+            florista_nuevo_id=anterior,
+            motivo=note,
+            usuario=usuario,
+        )
+
+    return len(producciones)
 
 
 def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
@@ -171,7 +212,7 @@ def estado_florista_norm(value: str | None) -> str:
 
 
 def calcular_fecha_programada(fecha_entrega: datetime | None, dias_anticipacion: int) -> date:
-    base = fecha_entrega.date() if fecha_entrega else date.today()
+    base = as_colombia_date(fecha_entrega) if fecha_entrega else colombia_today()
     return base - timedelta(days=max(dias_anticipacion, 0))
 
 
@@ -320,7 +361,7 @@ def log_historial(
             produccionID=int(produccion.idProduccion),
             floristaAnteriorID=florista_anterior_id,
             floristaNuevoID=florista_nuevo_id,
-            fechaCambio=datetime.now(timezone.utc),
+            fechaCambio=colombia_now_naive(),
             motivo=(motivo or "Sin motivo").strip(),
             usuarioCambio=(usuario or "system").strip() or "system",
         )
@@ -370,7 +411,7 @@ def asegurar_produccion_desde_pedido_aprobado(
         or 0
     ) + 1
 
-    auto_asignar_hoy = fecha_programada == date.today()
+    auto_asignar_hoy = fecha_programada == colombia_today()
     florista = None
     if auto_asignar_hoy:
         florista = seleccionar_florista_auto(
@@ -380,20 +421,20 @@ def asegurar_produccion_desde_pedido_aprobado(
             fecha_programada=fecha_programada,
         )
 
-    now_utc = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     produccion = Produccion(
         empresaID=int(pedido.empresaID),
         sucursalID=int(pedido.sucursalID),
         pedidoID=int(pedido.idPedido),
         floristaID=(int(florista.idFlorista) if florista else None),
         fechaProgramadaProduccion=fecha_programada,
-        fechaAsignacion=(now_utc if florista else None),
+        fechaAsignacion=(now if florista else None),
         estado=estados["pendiente"],
         prioridad="MEDIA",
         tiempoEstimadoMin=tiempo_estimado,
         ordenProduccion=siguiente_orden,
-        createdAt=now_utc,
-        updatedAt=now_utc,
+        createdAt=now,
+        updatedAt=now,
     )
     db.add(produccion)
     db.flush()
@@ -430,7 +471,7 @@ def asignar_pendientes_hoy(
     return asignar_pendientes_por_fecha(
         db=db,
         empresa_id=empresa_id,
-        fecha_objetivo=date.today(),
+        fecha_objetivo=colombia_today(),
         sucursal_id=sucursal_id,
         incluir_vencidas=False,
         usuario=usuario,
@@ -482,10 +523,10 @@ def asignar_pendientes_por_fecha(
             sin_disponibilidad += 1
             continue
 
-        now_utc = datetime.now(timezone.utc)
+        now = colombia_now_naive()
         prod.floristaID = int(florista.idFlorista)
-        prod.fechaAsignacion = now_utc
-        prod.updatedAt = now_utc
+        prod.fechaAsignacion = now
+        prod.updatedAt = now
         log_historial(
             db=db,
             produccion=prod,
@@ -508,7 +549,7 @@ def reasignar_pendientes_por_indisponibilidad(
     usuario: str,
     motivo: str,
 ) -> dict[str, int]:
-    hoy = date.today()
+    hoy = colombia_today()
     estados = _resolve_estado_produccion_ids(db)
     pendientes = (
         db.query(Produccion)
@@ -542,8 +583,9 @@ def reasignar_pendientes_por_indisponibilidad(
 
         anterior = int(prod.floristaID) if prod.floristaID else None
         prod.floristaID = int(nuevo.idFlorista) if nuevo else None
-        prod.fechaAsignacion = datetime.now(timezone.utc) if nuevo else prod.fechaAsignacion
-        prod.updatedAt = datetime.now(timezone.utc)
+        now = colombia_now_naive()
+        prod.fechaAsignacion = now if nuevo else prod.fechaAsignacion
+        prod.updatedAt = now
         log_historial(
             db=db,
             produccion=prod,
@@ -571,7 +613,7 @@ def sincronizar_incapacidades_y_reasignar(
     sucursal_id: int | None = None,
     usuario: str = "system",
 ) -> dict[str, int]:
-    hoy = date.today()
+    hoy = colombia_today()
 
     q_base = db.query(Florista).filter(Florista.empresaID == empresa_id)
     if sucursal_id is not None:
@@ -600,7 +642,7 @@ def sincronizar_incapacidades_y_reasignar(
                 perfil.fechaInicioIncapacidad = None
                 perfil.fechaFinIncapacidad = None
             florista.activo = 1
-            florista.updatedAt = datetime.now(timezone.utc)
+            florista.updatedAt = colombia_now_naive()
             reactivados += 1
             continue
 
@@ -678,8 +720,8 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
         or 0
     )
 
-    auto_asignar_hoy = fecha_programada == date.today()
-    now_utc = datetime.now(timezone.utc)
+    auto_asignar_hoy = fecha_programada == colombia_today()
+    now = colombia_now_naive()
     created_items: list[dict[str, Any]] = []
     skipped_count = 0
     auto_asignados = 0
@@ -717,13 +759,13 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             pedidoDetalleID=detalle_id,
             floristaID=(int(florista.idFlorista) if florista else None),
             fechaProgramadaProduccion=fecha_programada,
-            fechaAsignacion=(now_utc if florista else None),
+            fechaAsignacion=(now if florista else None),
             estado=estados["pendiente"],
             prioridad="MEDIA",
             tiempoEstimadoMin=calcular_tiempo_estimado_detalle(detalle),
             ordenProduccion=siguiente_orden,
-            createdAt=now_utc,
-            updatedAt=now_utc,
+            createdAt=now,
+            updatedAt=now,
         )
         db.add(produccion)
         db.flush()
