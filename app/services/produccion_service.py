@@ -42,9 +42,15 @@ def cancelar_producciones_por_pedido_cancelado(
 ) -> int:
     producciones = (
         db.query(Produccion)
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.pedidoID == int(pedido_id),
             Produccion.empresaID == int(empresa_id),
+            Pedido.estadoPedidoID == 6,
             Produccion.estado != ESTADO_PRODUCCION_BLOQUEADO_ID,
         )
         .all()

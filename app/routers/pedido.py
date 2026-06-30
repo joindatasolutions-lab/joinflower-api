@@ -318,21 +318,6 @@ def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
     return _estado_pedido_nombre(db, estado_pedido_id) not in {"ENTREGADO", "CANCELADO", "RECHAZADO"}
 
 
-def _sync_produccion_cancelada_si_pedido_estado_6(db: Session, pedido: Pedido) -> int:
-    if int(pedido.estadoPedidoID or 0) != 6:
-        return 0
-    return produccion_service.cancelar_producciones_por_pedido_cancelado(
-        db,
-        pedido_id=int(pedido.idPedido),
-        empresa_id=int(pedido.empresaID),
-        usuario="pedido.estado_6",
-        motivo=(
-            f"Cancelado automaticamente porque el pedido {int(pedido.idPedido)} "
-            "quedo en estado_pedido_id 6."
-        )
-    )
-
-
 def _append_operational_cancel_note(current: str | None, note: str) -> str:
     current_text = str(current or "").strip()
     if not current_text:
@@ -354,31 +339,14 @@ def _sincronizar_cancelacion_operativa_desde_pedido(
     if motivo_text:
         note = f"{note} Motivo: {motivo_text[:300]}"
 
-    producciones_actualizadas = 0
-    entregas_actualizadas = 0
-
-    estado_produccion_cancelado = produccion_service.estado_produccion_id(
+    producciones_actualizadas = produccion_service.cancelar_producciones_por_pedido_cancelado(
         db,
-        produccion_service.ESTADO_CANCELADO,
+        pedido_id=int(pedido.idPedido),
+        empresa_id=int(pedido.empresaID),
+        usuario="pedido.cancelacion_operativa",
+        motivo=note,
     )
-    producciones = (
-        db.query(Produccion)
-        .filter(
-            Produccion.pedidoID == int(pedido.idPedido),
-            Produccion.empresaID == int(pedido.empresaID),
-        )
-        .all()
-    )
-    for produccion in producciones:
-        if int(produccion.estado or 0) in {5, int(estado_produccion_cancelado)}:
-            continue
-        produccion.estado = int(estado_produccion_cancelado)
-        produccion.observacionesInternas = _append_operational_cancel_note(
-            produccion.observacionesInternas,
-            note,
-        )
-        produccion.updatedAt = now
-        producciones_actualizadas += 1
+    entregas_actualizadas = 0
 
     estado_entrega_cancelado = domicilio_service.resolve_estado_entrega_id(
         db,
@@ -3873,14 +3841,11 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     pedido.estadoPedidoID = estado_rechazado.idEstadoPedido
     pedido.motivoRechazo = motivo[:300]
     pedido.updatedAt = datetime.now(timezone.utc)
-    producciones_estado_5 = _sync_produccion_cancelada_si_pedido_estado_6(db, pedido)
     cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(
         db,
         pedido,
         motivo=pedido.motivoRechazo,
     )
-    if producciones_estado_5:
-        cancelacion_operativa["produccionesCanceladas"] = int(producciones_estado_5)
     _audit_pedido_action(
         db=db,
         actor=auth,
@@ -4099,7 +4064,6 @@ def cambiar_estado(
     # 3️⃣ Actualizar estado
     pedido.estadoPedidoID = nuevo_estado_id
     pedido.updatedAt = datetime.now(timezone.utc)
-    producciones_estado_5 = _sync_produccion_cancelada_si_pedido_estado_6(db, pedido)
 
     estado_destino = (
         db.query(EstadoPedido)
@@ -4156,8 +4120,6 @@ def cambiar_estado(
             pedido,
             motivo=pedido.motivoRechazo,
         )
-        if producciones_estado_5:
-            cancelacion_operativa["produccionesCanceladas"] = int(producciones_estado_5)
 
     db.commit()
 
