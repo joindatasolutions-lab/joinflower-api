@@ -4078,6 +4078,8 @@ def cambiar_estado(
         raise HTTPException(status_code=400, detail="Estado destino inválido o inactivo")
 
     produccion = None
+    cancelacion_operativa = None
+    producciones_estado_5 = 0
     if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
         if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
             numero_pedido, codigo_pedido = generar_numeracion_pedido(
@@ -4120,6 +4122,7 @@ def cambiar_estado(
             pedido,
             motivo=pedido.motivoRechazo,
         )
+        producciones_estado_5 = int(cancelacion_operativa.get("produccionesCanceladas", 0))
 
     db.commit()
 
@@ -4128,4 +4131,5 @@ def cambiar_estado(
         "nuevoEstado": nuevo_estado_id,
         "produccion": produccion,
         "produccionesEstado5": int(producciones_estado_5),
+        "cancelacionOperativa": cancelacion_operativa,
     }
