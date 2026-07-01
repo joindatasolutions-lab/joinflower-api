@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from app.models.entrega import Entrega
-from app.models.pedido import Pedido
 from app.models.produccion import Produccion
 from app.routers import pedido as pedido_router
 from app.services import produccion_service
@@ -30,9 +29,14 @@ class FakeSession:
         self.rows_by_model = rows_by_model
         self.queries = {}
         self.flush_count = 0
+        self.execute_calls = []
 
     def flush(self):
         self.flush_count += 1
+
+    def execute(self, statement, params=None):
+        self.execute_calls.append((statement, params or {}))
+        return SimpleNamespace(fetchall=lambda: [(10,)])
 
     def query(self, model):
         query = FakeQuery(self.rows_by_model.get(model, []))
@@ -40,7 +44,7 @@ class FakeSession:
         return query
 
 
-def test_cancelar_producciones_por_pedido_cancelado_uses_pedido_estado_6_join(monkeypatch):
+def test_cancelar_producciones_por_pedido_cancelado_uses_exact_update_rule(monkeypatch):
     row = SimpleNamespace(
         idProduccion=10,
         empresaID=3,
@@ -63,15 +67,17 @@ def test_cancelar_producciones_por_pedido_cancelado_uses_pedido_estado_6_join(mo
     )
 
     query = db.queries[Produccion]
-    filters_sql = " ".join(str(arg) for arg in query.filter_args)
+    statement, params = db.execute_calls[0]
+    sql = str(statement)
 
     assert updated == 1
     assert db.flush_count == 1
-    assert query.join_args[0] is Pedido
-    assert "pedido.estado_pedido_id" in filters_sql
-    assert "produccion.estado_produccion_id" in filters_sql
-    assert row.estado == 5
-    assert row.updatedAt == "now"
+    assert params == {"pedido_id": 20, "empresa_id": 3}
+    assert "WITH target AS" in sql
+    assert "p.estado_pedido_id = 6" in sql
+    assert "pr.estado_produccion_id <> 5" in sql
+    assert "UPDATE petalops.produccion" in sql
+    assert query.filter_args is not None
 
 
 def test_sincronizar_cancelacion_operativa_delegates_produccion_to_service(monkeypatch):

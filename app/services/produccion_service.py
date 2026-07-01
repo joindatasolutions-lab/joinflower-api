@@ -17,7 +17,6 @@ ESTADO_PENDIENTE = "Pendiente"
 ESTADO_EN_PRODUCCION = "EnProduccion"
 ESTADO_PARA_ENTREGA = "ParaEntrega"
 ESTADO_CANCELADO = "Cancelado"
-ESTADO_PRODUCCION_BLOQUEADO_ID = 5
 
 
 def _activo_truthy(column):
@@ -41,28 +40,49 @@ def cancelar_producciones_por_pedido_cancelado(
     motivo: str | None = None,
 ) -> int:
     db.flush()
+    updated_rows = db.execute(
+        text(
+            """
+            WITH target AS (
+              SELECT pr.id_produccion
+              FROM petalops.produccion pr
+              JOIN petalops.pedido p
+                ON p.id_pedido = pr.pedido_id
+               AND p.empresa_id = pr.empresa_id
+              WHERE p.id_pedido = :pedido_id
+                AND p.empresa_id = :empresa_id
+                AND p.estado_pedido_id = 6
+                AND pr.estado_produccion_id <> 5
+            ),
+            updated AS (
+              UPDATE petalops.produccion pr
+              SET estado_produccion_id = 5,
+                  updated_at = CURRENT_TIMESTAMP
+              FROM target
+              WHERE pr.id_produccion = target.id_produccion
+              RETURNING pr.id_produccion
+            )
+            SELECT id_produccion FROM updated
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).fetchall()
+    updated_ids = [int(row[0]) for row in updated_rows if row[0] is not None]
+    if not updated_ids:
+        return 0
+
+    note = str(motivo or f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6.").strip()
     producciones = (
         db.query(Produccion)
-        .join(
-            Pedido,
-            (Pedido.idPedido == Produccion.pedidoID)
-            & (Pedido.empresaID == Produccion.empresaID),
-        )
         .filter(
-            Produccion.pedidoID == int(pedido_id),
             Produccion.empresaID == int(empresa_id),
-            Pedido.estadoPedidoID == 6,
-            Produccion.estado != ESTADO_PRODUCCION_BLOQUEADO_ID,
+            Produccion.idProduccion.in_(updated_ids),
         )
         .all()
     )
-    now = colombia_now_naive()
-    note = str(motivo or f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6.").strip()
 
     for produccion in producciones:
         anterior = int(produccion.floristaID) if produccion.floristaID is not None else None
-        produccion.estado = ESTADO_PRODUCCION_BLOQUEADO_ID
-        produccion.updatedAt = now
         if note:
             current = str(produccion.observacionesInternas or "").strip()
             produccion.observacionesInternas = f"{current}\n{note}" if current and note not in current else (current or note)
@@ -75,7 +95,7 @@ def cancelar_producciones_por_pedido_cancelado(
             usuario=usuario,
         )
 
-    return len(producciones)
+    return len(updated_ids)
 
 
 def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
