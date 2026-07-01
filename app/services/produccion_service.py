@@ -40,6 +40,7 @@ def cancelar_producciones_por_pedido_cancelado(
     usuario: str = "system",
     motivo: str | None = None,
 ) -> int:
+    db.flush()
     producciones = (
         db.query(Produccion)
         .join(

@@ -29,6 +29,10 @@ class FakeSession:
     def __init__(self, rows_by_model):
         self.rows_by_model = rows_by_model
         self.queries = {}
+        self.flush_count = 0
+
+    def flush(self):
+        self.flush_count += 1
 
     def query(self, model):
         query = FakeQuery(self.rows_by_model.get(model, []))
@@ -62,6 +66,7 @@ def test_cancelar_producciones_por_pedido_cancelado_uses_pedido_estado_6_join(mo
     filters_sql = " ".join(str(arg) for arg in query.filter_args)
 
     assert updated == 1
+    assert db.flush_count == 1
     assert query.join_args[0] is Pedido
     assert "pedido.estado_pedido_id" in filters_sql
     assert "produccion.estado_produccion_id" in filters_sql
