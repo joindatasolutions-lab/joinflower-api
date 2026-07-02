@@ -3181,6 +3181,13 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     detalles = (
         db.query(PedidoDetalle, Producto)
+        .options(
+            load_only(
+                Producto.idProducto,
+                Producto.empresaID,
+                Producto.nombreProducto,
+            )
+        )
         .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
         .filter(PedidoDetalle.pedidoID == pedido.idPedido)
         .all()
