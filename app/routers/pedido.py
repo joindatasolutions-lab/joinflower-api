@@ -1096,7 +1096,7 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
     pago_row = db.execute(
         text(
             """
-            SELECT metodo_pago, proveedor, referencia, raw_respuesta
+            SELECT metodo_pago, proveedor, referencia, raw_respuesta, monto
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
@@ -1255,7 +1255,7 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
     pago_rows = db.execute(
         text(
             """
-            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta
+            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta, monto
             FROM petalops.pago
             WHERE empresa_id = :empresa_id
               AND pedido_id = ANY(:pedido_ids)
