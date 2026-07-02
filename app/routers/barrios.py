@@ -95,7 +95,7 @@ def create_barrio(
         zonaID=int(payload.zonaID),
         nombreBarrio=payload.nombreBarrio.strip(),
         costoDomicilio=payload.costoDomicilio,
-        activo=bool(payload.activo),
+        activo=1 if bool(payload.activo) else 0,
         createdAt=datetime.now(timezone.utc),
         updatedAt=datetime.now(timezone.utc),
     )
