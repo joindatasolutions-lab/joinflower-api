@@ -31,11 +31,11 @@ def _as_date(value: date | datetime | None) -> date | None:
     return value
 
 
-def cancelar_producciones_por_pedido_cancelado(
+def _cancelar_producciones_por_pedidos_cancelados_sql(
     db: Session,
     *,
-    pedido_id: int,
     empresa_id: int,
+    pedido_id: int | None = None,
     usuario: str = "system",
     motivo: str | None = None,
 ) -> int:
@@ -49,8 +49,8 @@ def cancelar_producciones_por_pedido_cancelado(
               JOIN petalops.pedido p
                 ON p.id_pedido = pr.pedido_id
                AND p.empresa_id = pr.empresa_id
-              WHERE p.id_pedido = :pedido_id
-                AND p.empresa_id = :empresa_id
+              WHERE p.empresa_id = :empresa_id
+                AND (:pedido_id IS NULL OR p.id_pedido = :pedido_id)
                 AND p.estado_pedido_id = 6
                 AND pr.estado_produccion_id <> 5
             ),
@@ -65,13 +65,20 @@ def cancelar_producciones_por_pedido_cancelado(
             SELECT id_produccion FROM updated
             """
         ),
-        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+        {"pedido_id": (int(pedido_id) if pedido_id is not None else None), "empresa_id": int(empresa_id)},
     ).fetchall()
     updated_ids = [int(row[0]) for row in updated_rows if row[0] is not None]
     if not updated_ids:
         return 0
 
-    note = str(motivo or f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6.").strip()
+    note = str(
+        motivo
+        or (
+            f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6."
+            if pedido_id is not None
+            else "Cancelado automaticamente porque el pedido quedo en estado 6."
+        )
+    ).strip()
     producciones = (
         db.query(Produccion)
         .filter(
@@ -96,6 +103,38 @@ def cancelar_producciones_por_pedido_cancelado(
         )
 
     return len(updated_ids)
+
+
+def cancelar_producciones_por_pedido_cancelado(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    return _cancelar_producciones_por_pedidos_cancelados_sql(
+        db=db,
+        pedido_id=pedido_id,
+        empresa_id=empresa_id,
+        usuario=usuario,
+        motivo=motivo,
+    )
+
+
+def sincronizar_producciones_de_pedidos_cancelados(
+    db: Session,
+    *,
+    empresa_id: int,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    return _cancelar_producciones_por_pedidos_cancelados_sql(
+        db=db,
+        empresa_id=empresa_id,
+        usuario=usuario,
+        motivo=motivo,
+    )
 
 
 def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:

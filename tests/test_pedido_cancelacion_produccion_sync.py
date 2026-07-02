@@ -80,6 +80,36 @@ def test_cancelar_producciones_por_pedido_cancelado_uses_exact_update_rule(monke
     assert query.filter_args is not None
 
 
+def test_sincronizar_producciones_de_pedidos_cancelados_runs_company_scope_rule(monkeypatch):
+    row = SimpleNamespace(
+        idProduccion=10,
+        empresaID=3,
+        sucursalID=3,
+        pedidoID=20,
+        floristaID=None,
+        estado=1,
+        updatedAt=None,
+        observacionesInternas=None,
+    )
+    db = FakeSession({Produccion: [row]})
+
+    monkeypatch.setattr(produccion_service, "log_historial", lambda **kwargs: None)
+
+    updated = produccion_service.sincronizar_producciones_de_pedidos_cancelados(
+        db,
+        empresa_id=3,
+    )
+
+    statement, params = db.execute_calls[0]
+    sql = str(statement)
+
+    assert updated == 1
+    assert params == {"pedido_id": None, "empresa_id": 3}
+    assert "(:pedido_id IS NULL OR p.id_pedido = :pedido_id)" in sql
+    assert "p.estado_pedido_id = 6" in sql
+    assert "UPDATE petalops.produccion" in sql
+
+
 def test_sincronizar_cancelacion_operativa_delegates_produccion_to_service(monkeypatch):
     pedido = SimpleNamespace(idPedido=20, empresaID=3)
     entrega = SimpleNamespace(

@@ -760,6 +760,15 @@ def listar_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    producciones_canceladas = produccion_service.sincronizar_producciones_de_pedidos_cancelados(
+        db=db,
+        empresa_id=empresa_id,
+        usuario="produccion.listar",
+        motivo="Sincronizacion automatica al abrir modulo Produccion para pedidos cancelados.",
+    )
+    if producciones_canceladas:
+        db.commit()
+
     metric_filter = metric_filter if metric_filter in {"pendientesHoy", "sinAsignar", "atrasados", "pendientesFuturos"} else None
     target_fecha = None if (todas_fechas or metric_filter) else (fecha or date.today())
     current_florista = None
