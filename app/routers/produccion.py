@@ -275,6 +275,36 @@ def _log_historial(
     )
 
 
+def _sincronizar_cancelados_para_lectura(db: Session, empresa_id: int, usuario: str) -> int:
+    actualizadas = produccion_service.sincronizar_producciones_de_pedidos_cancelados(
+        db=db,
+        empresa_id=int(empresa_id),
+        usuario=usuario,
+        motivo="Sincronizacion automatica en Produccion para pedidos cancelados.",
+    )
+    if actualizadas:
+        db.commit()
+    return int(actualizadas)
+
+
+def _bloquear_operacion_si_pedido_cancelado(db: Session, produccion: Produccion, usuario: str) -> None:
+    if not produccion_service.produccion_tiene_pedido_cancelado(db, produccion):
+        return
+
+    actualizadas = produccion_service.cancelar_producciones_por_pedido_cancelado(
+        db=db,
+        pedido_id=int(produccion.pedidoID),
+        empresa_id=int(produccion.empresaID),
+        usuario=usuario,
+        motivo="Produccion bloqueada porque el pedido padre esta cancelado.",
+    )
+    if actualizadas:
+        db.commit()
+    raise HTTPException(
+        status_code=409,
+        detail="No se puede modificar Produccion porque el pedido padre esta cancelado.",
+    )
+
 def _is_manual_historial_event(motivo: str | None, usuario: str | None) -> bool:
     motivo_text = str(motivo or "").strip().lower()
     usuario_text = str(usuario or "").strip().lower()
@@ -760,14 +790,7 @@ def listar_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    producciones_canceladas = produccion_service.sincronizar_producciones_de_pedidos_cancelados(
-        db=db,
-        empresa_id=empresa_id,
-        usuario="produccion.listar",
-        motivo="Sincronizacion automatica al abrir modulo Produccion para pedidos cancelados.",
-    )
-    if producciones_canceladas:
-        db.commit()
+    _sincronizar_cancelados_para_lectura(db, empresa_id, "produccion.listar")
 
     metric_filter = metric_filter if metric_filter in {"pendientesHoy", "sinAsignar", "atrasados", "pendientesFuturos"} else None
     target_fecha = None if (todas_fechas or metric_filter) else (fecha or date.today())
@@ -848,6 +871,7 @@ def asignar_pendientes_hoy(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _sincronizar_cancelados_para_lectura(db, empresa_id, "produccion.asignar_pendientes_hoy")
     stats = produccion_service.asignar_pendientes_hoy(
         db=db,
         empresa_id=empresa_id,
@@ -883,6 +907,7 @@ def asignar_pendientes_por_fecha(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _sincronizar_cancelados_para_lectura(db, empresa_id, "produccion.asignar_pendientes_fecha")
     if fecha > date.today():
         raise HTTPException(status_code=400, detail="Solo se permiten fechas de hoy o anteriores")
 
@@ -921,6 +946,7 @@ def resumen_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _sincronizar_cancelados_para_lectura(db, empresa_id, "produccion.resumen")
     items = _build_items(
         db=db,
         empresa_id=empresa_id,
@@ -957,6 +983,7 @@ def kanban_produccion(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _sincronizar_cancelados_para_lectura(db, empresa_id, "produccion.kanban")
     items = _build_items(
         db=db,
         empresa_id=empresa_id,
@@ -989,6 +1016,7 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
         produccion_logger.warning("Producción no encontrada. produccion_id=%s", produccion_id)
         raise _err("PRODUCCION_NOT_FOUND", "Registro de producción no encontrado", status_code=404)
     assert_same_empresa(auth, int(produccion.empresaID))
+    _bloquear_operacion_si_pedido_cancelado(db, produccion, "produccion.asignar")
 
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
     if not fecha_programada:
@@ -1109,6 +1137,21 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     if nuevo_estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Estado inválido. Usa: {', '.join(sorted(ESTADOS_VALIDOS))}")
 
+    if nuevo_estado != ESTADO_CANCELADO and produccion_service.produccion_tiene_pedido_cancelado(db, produccion):
+        actualizadas = produccion_service.cancelar_producciones_por_pedido_cancelado(
+            db=db,
+            pedido_id=int(produccion.pedidoID),
+            empresa_id=int(produccion.empresaID),
+            usuario="produccion.cambiar_estado",
+            motivo="Produccion no puede pasar a un estado activo porque el pedido padre esta cancelado.",
+        )
+        if actualizadas:
+            db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="No se puede activar Produccion porque el pedido padre esta cancelado.",
+        )
+
     if nuevo_estado == estado_actual:
         return {"status": "ok", "idProduccion": produccion_id, "estado": estado_actual}
 
@@ -1189,6 +1232,20 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
         produccion_logger.warning("Pedido no encontrado. pedido_id=%s", pedido_id)
         raise _err("PRODUCCION_PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
     assert_same_empresa(auth, int(pedido.empresaID))
+    if produccion_service.pedido_esta_cancelado(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID)):
+        actualizadas = produccion_service.cancelar_producciones_por_pedido_cancelado(
+            db=db,
+            pedido_id=int(pedido.idPedido),
+            empresa_id=int(pedido.empresaID),
+            usuario="produccion.recalcular",
+            motivo="Recalculo bloqueado porque el pedido padre esta cancelado.",
+        )
+        if actualizadas:
+            db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="No se puede recalcular Produccion porque el pedido padre esta cancelado.",
+        )
 
     producciones = (
         db.query(Produccion)

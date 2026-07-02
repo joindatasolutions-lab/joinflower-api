@@ -137,6 +137,40 @@ def sincronizar_producciones_de_pedidos_cancelados(
     )
 
 
+def pedido_esta_cancelado(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int | None = None,
+) -> bool:
+    params: dict[str, int | None] = {
+        "pedido_id": int(pedido_id),
+        "empresa_id": int(empresa_id) if empresa_id is not None else None,
+    }
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM petalops.pedido p
+            WHERE p.id_pedido = :pedido_id
+              AND (:empresa_id IS NULL OR p.empresa_id = :empresa_id)
+              AND p.estado_pedido_id = 6
+            LIMIT 1
+            """
+        ),
+        params,
+    ).first()
+    return row is not None
+
+
+def produccion_tiene_pedido_cancelado(db: Session, produccion: Produccion) -> bool:
+    return pedido_esta_cancelado(
+        db,
+        pedido_id=int(produccion.pedidoID),
+        empresa_id=int(produccion.empresaID),
+    )
+
+
 def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
     if not entrega:
         return None
@@ -309,12 +343,18 @@ def count_carga_florista(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.fechaProgramadaProduccion == fecha_programada,
             Produccion.estado != estados["cancelado"],
+            Pedido.estadoPedidoID != 6,
         )
     )
     if ignore_produccion_id is not None:
@@ -333,11 +373,17 @@ def count_simultaneos_en_produccion(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.estado == estados["en_proceso"],
+            Pedido.estadoPedidoID != 6,
         )
     )
     if ignore_produccion_id is not None:
@@ -557,10 +603,16 @@ def asignar_pendientes_por_fecha(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(Produccion)
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.estado == estados["pendiente"],
             Produccion.floristaID.is_(None),
+            Pedido.estadoPedidoID != 6,
         )
         .order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.idProduccion.asc())
     )
@@ -619,12 +671,18 @@ def reasignar_pendientes_por_indisponibilidad(
     estados = _resolve_estado_produccion_ids(db)
     pendientes = (
         db.query(Produccion)
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == florista.empresaID,
             Produccion.sucursalID == florista.sucursalID,
             Produccion.floristaID == florista.idFlorista,
             Produccion.fechaProgramadaProduccion >= hoy,
             Produccion.estado == estados["pendiente"],
+            Pedido.estadoPedidoID != 6,
         )
         .all()
     )

@@ -44,6 +44,16 @@ class FakeSession:
         return query
 
 
+class FakeFirstSession:
+    def __init__(self, first_row):
+        self.first_row = first_row
+        self.execute_calls = []
+
+    def execute(self, statement, params=None):
+        self.execute_calls.append((statement, params or {}))
+        return SimpleNamespace(first=lambda: self.first_row)
+
+
 def test_cancelar_producciones_por_pedido_cancelado_uses_exact_update_rule(monkeypatch):
     row = SimpleNamespace(
         idProduccion=10,
@@ -78,6 +88,36 @@ def test_cancelar_producciones_por_pedido_cancelado_uses_exact_update_rule(monke
     assert "pr.estado_produccion_id <> 5" in sql
     assert "UPDATE petalops.produccion" in sql
     assert query.filter_args is not None
+
+
+def test_pedido_esta_cancelado_reads_estado_pedido_6():
+    db = FakeFirstSession((1,))
+
+    result = produccion_service.pedido_esta_cancelado(
+        db,
+        pedido_id=20,
+        empresa_id=3,
+    )
+
+    statement, params = db.execute_calls[0]
+    sql = str(statement)
+
+    assert result is True
+    assert params == {"pedido_id": 20, "empresa_id": 3}
+    assert "FROM petalops.pedido p" in sql
+    assert "p.estado_pedido_id = 6" in sql
+
+
+def test_pedido_esta_cancelado_returns_false_when_not_found():
+    db = FakeFirstSession(None)
+
+    result = produccion_service.pedido_esta_cancelado(
+        db,
+        pedido_id=20,
+        empresa_id=3,
+    )
+
+    assert result is False
 
 
 def test_sincronizar_producciones_de_pedidos_cancelados_runs_company_scope_rule(monkeypatch):
