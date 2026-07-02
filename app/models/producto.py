@@ -18,7 +18,6 @@ class Producto(Base):
     ivaIncluido = Column("iva_incluido", Boolean)
     tiempoBaseMin = Column("tiempo_base_min", BigInteger)
     nivelComplejidad = Column("nivel_complejidad", String(30))
-    imageUrl = Column("image_url", Text, nullable=True)
     activo = Column("activo", Boolean)
     createdAt = Column("created_at", DateTime)
     updatedAt = Column("updated_at", DateTime)

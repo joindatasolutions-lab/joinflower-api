@@ -1358,7 +1358,11 @@ def obtener_detalle_domicilio(
                     productId=int((producto.idProducto if producto else detalle.productoID) or 0),
                     name=str((producto.nombreProducto if producto else None) or "Producto"),
                     qty=int(detalle.cantidad or 0),
-                    imageUrl=(str(producto.imageUrl) if producto and producto.imageUrl else None),
+                    imageUrl=(
+                        str(getattr(producto, "imageUrl", None))
+                        if producto and getattr(producto, "imageUrl", None)
+                        else None
+                    ),
                 )
             )
         
