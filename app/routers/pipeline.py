@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, or_, text
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
+from app.core.timezone import as_colombia_naive_datetime, colombia_now_naive, colombia_today
 from app.database import get_db
 from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
@@ -19,6 +20,7 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.produccion import Produccion
+from app.models.sucursal import Sucursal
 from app.schemas.pipeline import PipelinePedidoCard, PipelinePedidosResponse, PipelineStage
 
 router = APIRouter(
@@ -72,9 +74,10 @@ def _hora_text(dt: datetime | None) -> str | None:
 
 
 def _minutes_left(target: datetime | None) -> int | None:
+    target = as_colombia_naive_datetime(target)
     if not target:
         return None
-    now = datetime.now()
+    now = colombia_now_naive()
     delta = target - now
     return int(delta.total_seconds() // 60)
 
@@ -221,7 +224,7 @@ def listar_pipeline_pedidos(
             end = datetime.combine(fecha, datetime.max.time())
             q = q.filter(Pedido.fechaPedido.between(start, end))
         elif solo_hoy:
-            today = date.today()
+            today = colombia_today()
             start = datetime.combine(today, datetime.min.time())
             end = datetime.combine(today, datetime.max.time())
             q = q.filter(Pedido.fechaPedido.between(start, end))
@@ -247,17 +250,14 @@ def listar_pipeline_pedidos(
         if pedido_ids:
             sucursal_ids = sorted({int(row[0].sucursalID) for row in rows if row[0].sucursalID is not None})
             if sucursal_ids:
-                rows_s = db.execute(
-                    text(
-                        """
-                        SELECT id_sucursal, nombre_sucursal
-                        FROM petalops.sucursal
-                        WHERE empresa_id = :empresa_id
-                          AND id_sucursal = ANY(:ids)
-                        """
-                    ),
-                    {"empresa_id": int(empresa_id), "ids": sucursal_ids},
-                ).all()
+                rows_s = (
+                    db.query(Sucursal.idSucursal, Sucursal.nombreSucursal)
+                    .filter(
+                        Sucursal.empresaID == empresa_id,
+                        Sucursal.idSucursal.in_(sucursal_ids),
+                    )
+                    .all()
+                )
                 sucursal_map = {int(sid): str(name or f"Sucursal {sid}") for sid, name in rows_s}
 
         board: dict[PipelineStage, list[PipelinePedidoCard]] = {
@@ -286,7 +286,8 @@ def listar_pipeline_pedidos(
                 if entrega and entrega.reprogramadaPara
                 else (entrega.fechaEntregaProgramada if entrega else None)
             )
-            if solo_atrasados and (fecha_entrega is None or fecha_entrega >= datetime.now()):
+            fecha_entrega = as_colombia_naive_datetime(fecha_entrega)
+            if solo_atrasados and (fecha_entrega is None or fecha_entrega >= colombia_now_naive()):
                 continue
 
             prioridad = (str(produccion.prioridad or "MEDIA").upper() if produccion else "MEDIA")
