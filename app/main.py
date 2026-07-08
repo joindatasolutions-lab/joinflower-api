@@ -37,6 +37,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3000",
     "https://petalops.joindata.com.co",
+    "https://domiapp.joindata.com.co",
 ]
 
 extra_origins = [
