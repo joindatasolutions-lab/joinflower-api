@@ -102,6 +102,7 @@ class DomicilioContadoresResponse(BaseModel):
 class PedidoDisponibleItem(BaseModel):
     id: int
     numeroPedido: str
+    codigoPedido: str | None = None
     cliente: str
     direccion: str | None = None
     horaEntrega: str | None = None

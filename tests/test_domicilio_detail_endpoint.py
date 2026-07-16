@@ -106,3 +106,28 @@ def test_obtener_detalle_domicilio_404_when_entrega_missing():
         domicilios_router.obtener_detalle_domicilio(999, db=db, auth=auth)
 
     assert exc.value.status_code == 404
+
+
+def test_pedido_disponible_item_uses_codigo_pedido_column():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=None,
+        fechaEntrega=None,
+        rangoHora=None,
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=96412,
+        codigoPedido="FLR-96412",
+    )
+    cliente = SimpleNamespace(nombreCompleto="Cliente Demo")
+    produccion = SimpleNamespace(prioridad="ALTA")
+
+    item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+
+    assert item.codigoPedido == "FLR-96412"
+    assert item.numeroPedido == "FLR-96412"

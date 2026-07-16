@@ -207,6 +207,7 @@ def _build_pedido_disponible_item(
     return PedidoDisponibleItem(
         id=int(pedido.idPedido),
         numeroPedido=_numero_pedido_api(pedido),
+        codigoPedido=(str(pedido.codigoPedido).strip() if pedido.codigoPedido else None),
         cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
         direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
         horaEntrega=_hora_entrega_hhmm(entrega),
