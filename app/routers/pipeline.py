@@ -15,7 +15,6 @@ from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
-from app.models.florista import Florista
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
@@ -155,7 +154,7 @@ def listar_pipeline_pedidos(
 
         EntregaLast = aliased(Entrega)
         ProduccionLast = aliased(Produccion)
-        FloristaLast = aliased(Florista)
+        FloristaLast = aliased(Domiciliario)
 
         q = (
             db.query(Pedido, Cliente, EstadoPedido, EntregaLast, ProduccionLast, Domiciliario, FloristaLast)
@@ -172,7 +171,7 @@ def listar_pipeline_pedidos(
             )
             .outerjoin(
                 FloristaLast,
-                (FloristaLast.idFlorista == ProduccionLast.floristaID)
+                (FloristaLast.idDomiciliario == ProduccionLast.floristaID)
                 & (FloristaLast.empresaID == Pedido.empresaID),
             )
             .filter(Pedido.empresaID == empresa_id)
