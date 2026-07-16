@@ -555,6 +555,7 @@ def _build_pedidos_sin_asignar_query(
     sucursal_id: int | None,
     fecha_desde: datetime,
     fecha_hasta: datetime,
+    include_location: bool = True,
 ):
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
@@ -588,7 +589,8 @@ def _build_pedidos_sin_asignar_query(
         )
     )
 
-    q = _with_location_joins(q, entrega_actual, Pedido)
+    if include_location:
+        q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -650,7 +652,8 @@ def _domicilio_contadores(
         sucursal_id=sucursal_id,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-    ).count()
+        include_location=False,
+    ).order_by(None).count()
 
     return DomicilioContadoresResponse(
         asignados=int(own_base.filter(entrega_actual.estadoEntregaID == assigned_states["asignados"]).count()),
