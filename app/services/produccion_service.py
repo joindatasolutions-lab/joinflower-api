@@ -39,6 +39,9 @@ def _cancelar_producciones_por_pedidos_cancelados_sql(
     usuario: str = "system",
     motivo: str | None = None,
 ) -> int:
+    if not hasattr(db, "flush") or not hasattr(db, "execute"):
+        return 0
+
     db.flush()
     updated_rows = db.execute(
         text(
@@ -164,9 +167,13 @@ def pedido_esta_cancelado(
 
 
 def produccion_tiene_pedido_cancelado(db: Session, produccion: Produccion) -> bool:
+    pedido_id = getattr(produccion, "pedidoID", None)
+    if pedido_id is None:
+        return False
+
     return pedido_esta_cancelado(
         db,
-        pedido_id=int(produccion.pedidoID),
+        pedido_id=int(pedido_id),
         empresa_id=int(produccion.empresaID),
     )
 
