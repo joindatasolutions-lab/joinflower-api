@@ -9,7 +9,7 @@ import os
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import String, and_, cast, func, or_, text
+from sqlalchemy import String, and_, cast, func, null, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
@@ -186,7 +186,7 @@ def _with_location_joins(query, entrega_actual, pedido_model):
         ),
     )
     barrio_match = or_(barrio_by_id, barrio_by_name)
-    return query.outerjoin(Barrio, barrio_match).outerjoin(Zona, Zona.idZona == Barrio.zonaID)
+    return query.outerjoin(Barrio, barrio_match)
 
 
 def _unpack_delivery_row(row):
@@ -451,7 +451,7 @@ def _build_mis_entregas_query(
     )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -512,7 +512,7 @@ def _build_pedidos_disponibles_query(
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -570,7 +570,7 @@ def _build_pedidos_sin_asignar_query(
     )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -708,7 +708,7 @@ def listar_admin(
     entrega_actual = aliased(Entrega)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, Zona)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
