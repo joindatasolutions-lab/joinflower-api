@@ -27,13 +27,18 @@ class DomicilioAdminItem(BaseModel):
     idEntrega: int
     produccionID: int | None = None
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: str
     codigoPedido: str | None = None
     cliente: str
     destinatario: str | None = None
     telefonoDestino: str | None = None
     direccion: str | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
     barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
     observacion: str | None = None
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None
@@ -57,12 +62,17 @@ class DomicilioAdminListResponse(BaseModel):
 class DomicilioCourierCard(BaseModel):
     idEntrega: int
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: str
     codigoPedido: str | None = None
     cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
     barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
     telefonoDestino: str | None = None
     mensaje: str | None = None
     observacion: str | None = None
@@ -94,6 +104,14 @@ class PedidoDisponibleItem(BaseModel):
     numeroPedido: str
     cliente: str
     direccion: str | None = None
+    horaEntrega: str | None = None
+    fechaEntregaProgramada: datetime | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
+    barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
     estado: str
     prioridad: str | None = None
 

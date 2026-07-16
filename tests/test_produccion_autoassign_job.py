@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from app.jobs import produccion_autoassign_job as job_module
@@ -72,7 +72,7 @@ def test_run_autoassign_today_once_aggregates_empresa_sucursal_stats(monkeypatch
         "locked": 0,
     }
     assert len(calls) == 2
-    assert all(call["fecha_objetivo"] == date.today() for call in calls)
+    assert all(call["fecha_objetivo"] == job_module.colombia_today() for call in calls)
     assert fake_db.closed is True
 
 

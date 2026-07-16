@@ -4,10 +4,10 @@ from app.database import Base
 
 
 class UsuarioModulo(Base):
-    __tablename__ = "UsuarioModulo"
+    __tablename__ = "usuario_modulo"
     __table_args__ = {"schema": "petalops"}
 
-    userID = Column(BigInteger, ForeignKey("petalops.Usuario.idusuario"), primary_key=True)
-    modulo = Column(String(80), primary_key=True)
-    activo = Column(Boolean, nullable=False, default=True)
-    updatedAt = Column(DateTime, nullable=False)
+    userID = Column("usuario_id", BigInteger, ForeignKey("petalops.usuario.id_usuario"), primary_key=True)
+    modulo = Column("modulo", String(80), primary_key=True)
+    activo = Column("activo", Boolean, nullable=False, default=True)
+    updatedAt = Column("updated_at", DateTime, nullable=False)

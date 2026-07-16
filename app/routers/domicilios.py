@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -20,7 +21,9 @@ from app.core.security import (
     is_super_admin_context,
     require_module_access,
 )
+from app.core.timezone import colombia_today
 from app.database import get_db
+from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
@@ -28,6 +31,7 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.produccion import Produccion
+from app.models.zona import Zona
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
@@ -70,12 +74,6 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message, "module": "domicilios"},
     )
-
-
-def _numero_pedido_valor(pedido: Pedido) -> int:
-    if pedido.numeroPedido is not None:
-        return int(pedido.numeroPedido)
-    return int(pedido.idPedido)
 
 
 def _domiciliario_id_for_auth(db: Session, auth) -> int | None:
@@ -130,17 +128,90 @@ def _numero_pedido_api(pedido: Pedido) -> str:
     return str(pedido.idPedido)
 
 
+def _fecha_entrega_programada(entrega: Entrega) -> datetime | None:
+    return entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+
+
+def _hora_entrega_hhmm(entrega: Entrega) -> str | None:
+    fecha_programada = _fecha_entrega_programada(entrega)
+    if fecha_programada:
+        return fecha_programada.strftime("%H:%M")
+
+    rango_hora = str(entrega.rangoHora or "").strip()
+    match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", rango_hora)
+    if match:
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+    return rango_hora or None
+
+
+def _location_payload(entrega: Entrega, barrio: Barrio | None = None, zona: Zona | None = None) -> dict:
+    barrio_id = getattr(barrio, "idBarrio", None)
+    if barrio_id is None:
+        barrio_id = getattr(entrega, "barrioID", None)
+
+    nombre_barrio = getattr(barrio, "nombreBarrio", None) or getattr(entrega, "barrioNombre", None)
+    nombre_barrio = str(nombre_barrio).strip() if nombre_barrio else None
+
+    zona_id = getattr(zona, "idZona", None)
+    if zona_id is None:
+        zona_id = getattr(barrio, "zonaID", None)
+
+    nombre_zona = getattr(zona, "nombreZona", None)
+    nombre_zona = str(nombre_zona).strip() if nombre_zona else None
+
+    return {
+        "barrioId": int(barrio_id) if barrio_id is not None else None,
+        "nombreBarrio": nombre_barrio,
+        "barrio": nombre_barrio,
+        "zonaId": int(zona_id) if zona_id is not None else None,
+        "nombreZona": nombre_zona,
+        "zona": nombre_zona,
+    }
+
+
+def _with_location_joins(query, entrega_actual, pedido_model):
+    barrio_by_id = and_(
+        entrega_actual.barrioID != None,
+        Barrio.empresaID == entrega_actual.empresaID,
+        Barrio.idBarrio == entrega_actual.barrioID,
+    )
+    barrio_by_name = and_(
+        entrega_actual.barrioID == None,
+        Barrio.empresaID == entrega_actual.empresaID,
+        func.lower(Barrio.nombreBarrio) == func.lower(entrega_actual.barrioNombre),
+        or_(
+            Barrio.sucursalID == None,
+            Barrio.sucursalID == func.coalesce(entrega_actual.sucursalID, pedido_model.sucursalID),
+        ),
+    )
+    barrio_match = or_(barrio_by_id, barrio_by_name)
+    return query.outerjoin(Barrio, barrio_match).outerjoin(Zona, Zona.idZona == Barrio.zonaID)
+
+
+def _unpack_delivery_row(row):
+    if len(row) == 6:
+        return row
+    entrega, pedido, cliente, produccion = row
+    return entrega, pedido, cliente, produccion, None, None
+
+
 def _build_pedido_disponible_item(
     entrega: Entrega,
     pedido: Pedido,
     cliente: Cliente | None,
     produccion: Produccion | None,
+    barrio: Barrio | None = None,
+    zona: Zona | None = None,
 ) -> PedidoDisponibleItem:
     return PedidoDisponibleItem(
         id=int(pedido.idPedido),
         numeroPedido=_numero_pedido_api(pedido),
         cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
         direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
+        horaEntrega=_hora_entrega_hhmm(entrega),
+        fechaEntregaProgramada=_fecha_entrega_programada(entrega),
+        **_location_payload(entrega, barrio, zona),
         estado=_estado_api(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
     )
@@ -330,6 +401,8 @@ def _build_courier_card(
     pedido: Pedido,
     cliente: Cliente | None,
     produccion: Produccion | None,
+    barrio: Barrio | None = None,
+    zona: Zona | None = None,
     distancia_km: float | None = None,
 ) -> DomicilioCourierCard:
     lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
@@ -337,18 +410,18 @@ def _build_courier_card(
     return DomicilioCourierCard(
         idEntrega=int(entrega.idEntrega),
         pedidoID=int(entrega.pedidoID),
-        numeroPedido=_numero_pedido_valor(pedido),
+        numeroPedido=_numero_pedido_api(pedido),
         codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
         cliente=(str(cliente.nombreCompleto or "Cliente") if cliente else None),
         destinatario=str(entrega.destinatario or "") or None,
         direccion=str(entrega.direccion or "") or None,
-        barrio=str(entrega.barrioNombre or "") or None,
+        **_location_payload(entrega, barrio, zona),
         telefonoDestino=str(entrega.telefonoDestino or "") or None,
         mensaje=str(entrega.mensaje or "") or None,
         observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
         estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
         horaEntrega=str(entrega.rangoHora or "") or None,
-        fechaEntregaProgramada=(entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega),
+        fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
         latitudDestino=lat_destino,
         longitudDestino=lng_destino,
@@ -378,7 +451,7 @@ def _build_mis_entregas_query(
     )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -407,6 +480,8 @@ def _build_mis_entregas_query(
             ).asc()
         )
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -437,7 +512,7 @@ def _build_pedidos_disponibles_query(
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -459,6 +534,8 @@ def _build_pedidos_disponibles_query(
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -492,7 +569,7 @@ def _build_pedidos_sin_asignar_query(
     )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, Zona)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -511,6 +588,8 @@ def _build_pedidos_sin_asignar_query(
         )
     )
 
+    q = _with_location_joins(q, entrega_actual, Pedido)
+
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
 
@@ -528,7 +607,7 @@ def _fecha_rango(fecha: date | None, fecha_desde: date | None, fecha_hasta: date
     if fecha is not None:
         return datetime.combine(fecha, datetime.min.time()), datetime.combine(fecha, datetime.max.time())
 
-    start_date = fecha_desde or date.today()
+    start_date = fecha_desde or colombia_today()
     end_date = fecha_hasta or start_date
     return datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time())
 
@@ -626,7 +705,7 @@ def listar_admin(
     entrega_actual = aliased(Entrega)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, Zona)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -634,6 +713,8 @@ def listar_admin(
         .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
         .filter(entrega_actual.empresaID == int(empresa_id))
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -664,7 +745,7 @@ def listar_admin(
     ).all()
 
     items: list[DomicilioAdminItem] = []
-    for entrega, pedido, cliente, produccion, domiciliario in rows:
+    for entrega, pedido, cliente, produccion, domiciliario, barrio, zona in rows:
         estado = domicilio_service.estado_norm(entrega.estadoEntregaID)
         lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
         lat, lng = domicilio_service.payload_lat_lng(entrega)
@@ -673,13 +754,13 @@ def listar_admin(
                 idEntrega=int(entrega.idEntrega),
                 produccionID=(int(entrega.produccionID) if entrega.produccionID else None),
                 pedidoID=int(pedido.idPedido),
-                numeroPedido=_numero_pedido_valor(pedido),
+                numeroPedido=_numero_pedido_api(pedido),
                 codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 destinatario=str(entrega.destinatario or "") or None,
                 telefonoDestino=str(entrega.telefonoDestino or "") or None,
                 direccion=str(entrega.direccion or "") or None,
-                barrio=str(entrega.barrioNombre or "") or None,
+                **_location_payload(entrega, barrio, zona),
                 observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
                 horaEntrega=str(entrega.rangoHora or "") or None,
                 fechaEntregaProgramada=(entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega),
@@ -986,7 +1067,10 @@ def listar_mis_entregas(
     assert_same_empresa(auth, empresa_id)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = [
+        _build_courier_card(entrega, pedido, cliente, produccion, barrio, zona)
+        for entrega, pedido, cliente, produccion, barrio, zona in (_unpack_delivery_row(row) for row in rows)
+    ]
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,
@@ -1007,7 +1091,10 @@ def listar_mis_pedidos(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = [
+        _build_courier_card(entrega, pedido, cliente, produccion, barrio, zona)
+        for entrega, pedido, cliente, produccion, barrio, zona in (_unpack_delivery_row(row) for row in rows)
+    ]
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,
@@ -1032,7 +1119,7 @@ def listar_pedidos_disponibles(
     rows = _build_pedidos_disponibles_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
 
     items: list[DomicilioCourierCard] = []
-    for entrega, pedido, cliente, produccion in rows:
+    for entrega, pedido, cliente, produccion, barrio, zona in (_unpack_delivery_row(row) for row in rows):
         lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
         items.append(
             _build_courier_card(
@@ -1040,6 +1127,8 @@ def listar_pedidos_disponibles(
                 pedido,
                 cliente,
                 produccion,
+                barrio,
+                zona,
                 distancia_km=domicilio_service.haversine_distance_km(latitud, longitud, lat_destino, lng_destino),
             )
         )
@@ -1074,8 +1163,6 @@ def listar_pedidos_disponibles_api(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    _assert_role_domiciliario(auth)
-    _assert_auth_domiciliario(db, auth)
 
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
     rows = (
@@ -1091,8 +1178,8 @@ def listar_pedidos_disponibles_api(
         .all()
     )
     return [
-        _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
-        for entrega, pedido, cliente, produccion in rows
+        _build_pedido_disponible_item(entrega, pedido, cliente, produccion, barrio, zona)
+        for entrega, pedido, cliente, produccion, barrio, zona in (_unpack_delivery_row(row) for row in rows)
     ]
 
 
@@ -1231,7 +1318,7 @@ def autoasignar_pedido(
         )
         .first()
     )
-    start, end = _fecha_rango(date.today(), None, None)
+    start, end = _fecha_rango(colombia_today(), None, None)
     base_item = _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
     return PedidoAsignadoResponse(
         **base_item.model_dump(),
@@ -1254,7 +1341,10 @@ def listar_mis_entregas_propias(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = [
+        _build_courier_card(entrega, pedido, cliente, produccion, barrio, zona)
+        for entrega, pedido, cliente, produccion, barrio, zona in (_unpack_delivery_row(row) for row in rows)
+    ]
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,
