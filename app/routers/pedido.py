@@ -14,7 +14,7 @@ from io import BytesIO
 import textwrap
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from app.core.timezone import colombia_now_naive
+from app.core.timezone import as_colombia_naive_datetime, colombia_now_naive
 from app.database import get_db
 from app.models.producto import Producto
 from app.models.barrio import Barrio
@@ -141,21 +141,32 @@ def _numero_pedido_valor(pedido: Pedido, estado_nombre: str | None = None) -> in
 
 
 def _fecha_pedido_str(value: datetime | None) -> str | None:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return None
     return value.date().isoformat()
 
 
 def _hora_pedido_str(value: datetime | None) -> str | None:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return None
     return value.strftime("%H:%M:%S")
 
 
 def _fecha_hora_humano(value: datetime | None) -> str:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return "No especificada"
     return value.strftime("%d/%m/%Y %H:%M")
+
+
+def _fecha_filtro_pedido(value: datetime | None) -> datetime | None:
+    return as_colombia_naive_datetime(value)
+
+
+def _fecha_respuesta_pedido(value: datetime | None) -> datetime | None:
+    return as_colombia_naive_datetime(value)
 
 
 def _money_cop(value: float | int | None) -> str:
@@ -471,7 +482,9 @@ def _audit_pedido_action(
 def _scheduled_entrega_datetime(entrega: Entrega | None) -> datetime | None:
     if not entrega:
         return None
-    return entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+    return _fecha_respuesta_pedido(
+        entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+    )
 
 
 def _parse_iso_date(value: str) -> datetime:
@@ -1891,11 +1904,14 @@ def listar_pedidos(
     if estado and not has_search:
         base = base.filter(func.upper(EstadoPedido.nombreEstado) == estado.upper())
 
-    if fecha_desde and not has_search:
-        base = base.filter(Pedido.fechaPedido >= fecha_desde)
+    fecha_desde_filter = _fecha_filtro_pedido(fecha_desde)
+    fecha_hasta_filter = _fecha_filtro_pedido(fecha_hasta)
 
-    if fecha_hasta and not has_search:
-        base = base.filter(Pedido.fechaPedido <= fecha_hasta)
+    if fecha_desde_filter and not has_search:
+        base = base.filter(Pedido.fechaPedido >= fecha_desde_filter)
+
+    if fecha_hasta_filter and not has_search:
+        base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
         base = base.filter(
@@ -2115,7 +2131,7 @@ def listar_pedidos(
                 ),
                 empresaID=int(pedido.empresaID),
                 sucursalID=int(pedido.sucursalID),
-                fecha=pedido.fechaPedido,
+                fecha=_fecha_respuesta_pedido(pedido.fechaPedido),
                 fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
@@ -2250,7 +2266,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 if pedido.codigoPedido and _estado_pedido_tiene_numeracion_visible(estado_nombre)
                 else None
             ),
-            fecha=pedido.fechaPedido,
+            fecha=_fecha_respuesta_pedido(pedido.fechaPedido),
             fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
             horaPedido=_hora_pedido_str(pedido.fechaPedido),
             estado=estado_nombre,
@@ -3938,14 +3954,14 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             telefono=data.cliente.telefono,
             email=data.cliente.email,
             activo=1,
-            createdAt=datetime.now(timezone.utc),
+            createdAt=colombia_now_naive(),
         )
 
         db.add(cliente)
         db.flush()  # obtiene idCliente sin commit
 
         # 4️⃣ Crear pedido
-        fecha_pedido = datetime.now(timezone.utc)
+        fecha_pedido = colombia_now_naive()
 
         pedido = Pedido(
             empresaID=data.empresaId,
@@ -3976,7 +3992,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                     barrio_nombre=None,
                 )
             ).quantize(Decimal("0.01")),
-            createdAt=datetime.now(timezone.utc),
+            createdAt=colombia_now_naive(),
         )
 
         db.add(pedido)
