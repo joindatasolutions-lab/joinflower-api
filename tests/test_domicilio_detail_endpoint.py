@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -131,3 +132,27 @@ def test_pedido_disponible_item_uses_codigo_pedido_column():
 
     assert item.codigoPedido == "FLR-96412"
     assert item.numeroPedido == "FLR-96412"
+
+
+def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=datetime(2026, 7, 16, 0, 0, 0),
+        fechaEntrega=None,
+        rangoHora="10:00",
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=97118,
+        codigoPedido=None,
+    )
+    cliente = SimpleNamespace(nombreCompleto="Laura Tello")
+    produccion = SimpleNamespace(prioridad="MEDIA")
+
+    item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+
+    assert item.horaEntrega == "10:00"

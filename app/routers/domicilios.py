@@ -133,16 +133,18 @@ def _fecha_entrega_programada(entrega: Entrega) -> datetime | None:
 
 
 def _hora_entrega_hhmm(entrega: Entrega) -> str | None:
-    fecha_programada = _fecha_entrega_programada(entrega)
-    if fecha_programada:
-        return fecha_programada.strftime("%H:%M")
-
     rango_hora = str(entrega.rangoHora or "").strip()
     match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", rango_hora)
     if match:
         return f"{int(match.group(1)):02d}:{match.group(2)}"
+    if rango_hora:
+        return rango_hora
 
-    return rango_hora or None
+    fecha_programada = _fecha_entrega_programada(entrega)
+    if fecha_programada:
+        return fecha_programada.strftime("%H:%M")
+
+    return None
 
 
 def _location_payload(entrega: Entrega, barrio: Barrio | None = None, zona: Zona | None = None) -> dict:
