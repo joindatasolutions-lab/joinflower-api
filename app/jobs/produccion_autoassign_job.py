@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import threading
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
+from app.core.timezone import colombia_today
 from app.core.logger import get_logger
 from app.database import SessionLocal
 from app.models.produccion import Produccion
@@ -85,7 +86,7 @@ def run_autoassign_today_once() -> dict[str, int]:
 
         lock_acquired = True
         estados = produccion_service._resolve_estado_produccion_ids(db)
-        today = date.today()
+        today = colombia_today()
 
         scope_rows = (
             db.query(Produccion.empresaID, Produccion.sucursalID)

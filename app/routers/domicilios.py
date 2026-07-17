@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -8,7 +9,8 @@ import os
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import String, and_, cast, func, or_, text
+from sqlalchemy import String, and_, bindparam, cast, func, null, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
@@ -20,7 +22,9 @@ from app.core.security import (
     is_super_admin_context,
     require_module_access,
 )
+from app.core.timezone import colombia_today
 from app.database import get_db
+from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
@@ -28,6 +32,7 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.produccion import Produccion
+from app.models.zona import Zona
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
@@ -70,12 +75,6 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message, "module": "domicilios"},
     )
-
-
-def _numero_pedido_valor(pedido: Pedido) -> int:
-    if pedido.numeroPedido is not None:
-        return int(pedido.numeroPedido)
-    return int(pedido.idPedido)
 
 
 def _domiciliario_id_for_auth(db: Session, auth) -> int | None:
@@ -130,17 +129,113 @@ def _numero_pedido_api(pedido: Pedido) -> str:
     return str(pedido.idPedido)
 
 
+def _fecha_entrega_programada(entrega: Entrega) -> datetime | None:
+    return entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+
+
+def _hora_entrega_hhmm(entrega: Entrega) -> str | None:
+    rango_hora = str(entrega.rangoHora or "").strip()
+    match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", rango_hora)
+    if match:
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
+    if rango_hora:
+        return rango_hora
+
+    fecha_programada = _fecha_entrega_programada(entrega)
+    if fecha_programada:
+        return fecha_programada.strftime("%H:%M")
+
+    return None
+
+
+def _location_payload(entrega: Entrega, barrio: Barrio | None = None, zona: Zona | None = None) -> dict:
+    barrio_id = getattr(barrio, "idBarrio", None)
+    if barrio_id is None:
+        barrio_id = getattr(entrega, "barrioID", None)
+
+    nombre_barrio = getattr(barrio, "nombreBarrio", None) or getattr(entrega, "barrioNombre", None)
+    nombre_barrio = str(nombre_barrio).strip() if nombre_barrio else None
+
+    zona_id = getattr(zona, "idZona", None)
+    if zona_id is None:
+        zona_id = getattr(barrio, "zonaID", None)
+
+    nombre_zona = getattr(zona, "nombreZona", None)
+    nombre_zona = str(nombre_zona).strip() if nombre_zona else None
+
+    return {
+        "barrioId": int(barrio_id) if barrio_id is not None else None,
+        "nombreBarrio": nombre_barrio,
+        "barrio": nombre_barrio,
+        "zonaId": int(zona_id) if zona_id is not None else None,
+        "nombreZona": nombre_zona,
+        "zona": nombre_zona,
+    }
+
+
+def _with_location_joins(query, entrega_actual, pedido_model):
+    barrio_by_id = and_(
+        entrega_actual.barrioID != None,
+        Barrio.empresaID == entrega_actual.empresaID,
+        Barrio.idBarrio == entrega_actual.barrioID,
+    )
+    barrio_by_name = and_(
+        entrega_actual.barrioID == None,
+        Barrio.empresaID == entrega_actual.empresaID,
+        func.lower(Barrio.nombreBarrio) == func.lower(entrega_actual.barrioNombre),
+        or_(
+            Barrio.sucursalID == None,
+            Barrio.sucursalID == func.coalesce(entrega_actual.sucursalID, pedido_model.sucursalID),
+        ),
+    )
+    barrio_match = or_(barrio_by_id, barrio_by_name)
+    return query.outerjoin(Barrio, barrio_match)
+
+
+def _unpack_delivery_row(row):
+    if len(row) == 6:
+        return row
+    entrega, pedido, cliente, produccion = row
+    return entrega, pedido, cliente, produccion, None, None
+
+
+def _clean_product_summary(value: str | None) -> str | None:
+    summary = str(value or "").strip()
+    if not summary:
+        return None
+    if summary.lower().startswith("pedido "):
+        return None
+    return summary
+
+
 def _build_pedido_disponible_item(
     entrega: Entrega,
     pedido: Pedido,
     cliente: Cliente | None,
     produccion: Produccion | None,
+    barrio: Barrio | None = None,
+    zona: Zona | None = None,
+    arreglo: str | None = None,
+    productos: list[str] | None = None,
+    image_url: str | None = None,
 ) -> PedidoDisponibleItem:
+    arreglo = _clean_product_summary(arreglo)
     return PedidoDisponibleItem(
         id=int(pedido.idPedido),
         numeroPedido=_numero_pedido_api(pedido),
+        codigoPedido=(str(pedido.codigoPedido).strip() if pedido.codigoPedido else None),
+        arreglo=arreglo,
+        nombreArreglo=arreglo,
+        producto=arreglo,
+        productos=productos or [],
+        imageUrl=image_url,
+        imagenUrl=image_url,
+        imagenProductoUrl=image_url,
         cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
         direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
+        horaEntrega=_hora_entrega_hhmm(entrega),
+        fechaEntregaProgramada=_fecha_entrega_programada(entrega),
+        **_location_payload(entrega, barrio, zona),
         estado=_estado_api(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
     )
@@ -330,25 +425,38 @@ def _build_courier_card(
     pedido: Pedido,
     cliente: Cliente | None,
     produccion: Produccion | None,
+    barrio: Barrio | None = None,
+    zona: Zona | None = None,
     distancia_km: float | None = None,
+    image_url: str | None = None,
+    arreglo: str | None = None,
+    productos: list[str] | None = None,
 ) -> DomicilioCourierCard:
+    arreglo = _clean_product_summary(arreglo)
     lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
     lat, lng = domicilio_service.payload_lat_lng(entrega)
     return DomicilioCourierCard(
         idEntrega=int(entrega.idEntrega),
         pedidoID=int(entrega.pedidoID),
-        numeroPedido=_numero_pedido_valor(pedido),
+        numeroPedido=_numero_pedido_api(pedido),
         codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
+        arreglo=arreglo,
+        nombreArreglo=arreglo,
+        producto=arreglo,
+        productos=productos or [],
+        imageUrl=image_url,
+        imagenUrl=image_url,
+        imagenProductoUrl=image_url,
         cliente=(str(cliente.nombreCompleto or "Cliente") if cliente else None),
         destinatario=str(entrega.destinatario or "") or None,
         direccion=str(entrega.direccion or "") or None,
-        barrio=str(entrega.barrioNombre or "") or None,
+        **_location_payload(entrega, barrio, zona),
         telefonoDestino=str(entrega.telefonoDestino or "") or None,
         mensaje=str(entrega.mensaje or "") or None,
         observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
         estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
         horaEntrega=str(entrega.rangoHora or "") or None,
-        fechaEntregaProgramada=(entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega),
+        fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
         latitudDestino=lat_destino,
         longitudDestino=lng_destino,
@@ -356,6 +464,191 @@ def _build_courier_card(
         longitudEntrega=lng,
         distanciaKm=distancia_km,
     )
+
+
+def _visible_product_code(codigo_producto: str | None, codigo_catalogo: str | None, empresa_id: int) -> str | None:
+    catalog_code = str(codigo_catalogo or "").strip() or None
+    product_code = str(codigo_producto or "").strip() or None
+    if int(empresa_id) == 3 and catalog_code:
+        return catalog_code
+    return product_code
+
+
+def _product_label(
+    nombre: str | None,
+    cantidad,
+    codigo_producto: str | None = None,
+    codigo_catalogo: str | None = None,
+    empresa_id: int | None = None,
+) -> str | None:
+    nombre_limpio = str(nombre or "").strip()
+    if not nombre_limpio:
+        return None
+
+    codigo = _visible_product_code(codigo_producto, codigo_catalogo, int(empresa_id or 0))
+    product_text = f"{codigo} - {nombre_limpio}" if codigo else nombre_limpio
+
+    try:
+        qty = float(cantidad or 0)
+    except (TypeError, ValueError):
+        qty = 0
+
+    if qty > 1:
+        qty_text = str(int(qty)) if qty.is_integer() else str(qty)
+        return f"{qty_text} x {product_text}"
+    return product_text
+
+
+def _pedido_product_payload_map(
+    db: Session,
+    empresa_id: int,
+    pedido_ids: list[int],
+    detalle_id_to_pedido_id: dict[int, int] | None = None,
+) -> dict[int, dict]:
+    detalle_id_to_pedido_id = detalle_id_to_pedido_id or {}
+    if not pedido_ids and not detalle_id_to_pedido_id:
+        return {}
+
+    query = text(
+        """
+        SELECT
+            pd.id_pedido_detalle,
+            pd.pedido_id,
+            p.codigo_producto,
+            p.codigo_catalogo,
+            p.nombre_producto,
+            pd.cantidad
+        FROM petalops.pedido_detalle pd
+        LEFT JOIN petalops.producto p
+          ON p.id_producto = pd.producto_id
+        WHERE pd.pedido_id IN :pedido_ids
+           OR pd.id_pedido_detalle IN :detalle_ids
+        ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
+        """
+    ).bindparams(
+        bindparam("pedido_ids", expanding=True),
+        bindparam("detalle_ids", expanding=True),
+    )
+    rows = db.execute(
+        query,
+        {
+            "pedido_ids": [int(pedido_id) for pedido_id in pedido_ids] or [-1],
+            "detalle_ids": list(detalle_id_to_pedido_id.keys()) or [-1],
+        },
+    ).all()
+
+    payload_by_pedido: dict[int, dict] = {}
+    for (
+        detalle_id,
+        pedido_id,
+        codigo_producto,
+        codigo_catalogo,
+        nombre_producto,
+        cantidad,
+    ) in rows:
+        pedido_id_value = pedido_id
+        if pedido_id_value is None and detalle_id is not None:
+            pedido_id_value = detalle_id_to_pedido_id.get(int(detalle_id))
+        if pedido_id_value is None:
+            continue
+
+        pedido_id_int = int(pedido_id_value)
+        payload = payload_by_pedido.setdefault(
+            pedido_id_int,
+            {"productos": [], "arreglo": None, "imageUrl": None},
+        )
+        label = _product_label(
+            nombre_producto,
+            cantidad,
+            codigo_producto=codigo_producto,
+            codigo_catalogo=codigo_catalogo,
+            empresa_id=empresa_id,
+        )
+        if label:
+            payload["productos"].append(label)
+
+    try:
+        image_query = text(
+            """
+            SELECT
+                pd.id_pedido_detalle,
+                pd.pedido_id,
+                ps.imagen_url
+            FROM petalops.pedido_detalle pd
+            JOIN petalops.producto_sucursal ps
+              ON ps.producto_id = pd.producto_id
+             AND ps.sucursal_id = pd.sucursal_id
+            WHERE (pd.pedido_id IN :pedido_ids OR pd.id_pedido_detalle IN :detalle_ids)
+              AND ps.imagen_url IS NOT NULL
+            ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
+            """
+        ).bindparams(
+            bindparam("pedido_ids", expanding=True),
+            bindparam("detalle_ids", expanding=True),
+        )
+        image_rows = db.execute(
+            image_query,
+            {
+                "pedido_ids": [int(pedido_id) for pedido_id in pedido_ids] or [-1],
+                "detalle_ids": list(detalle_id_to_pedido_id.keys()) or [-1],
+            },
+        ).all()
+        for detalle_id, pedido_id, image_url in image_rows:
+            pedido_id_value = pedido_id
+            if pedido_id_value is None and detalle_id is not None:
+                pedido_id_value = detalle_id_to_pedido_id.get(int(detalle_id))
+            if pedido_id_value is None or not image_url:
+                continue
+            payload = payload_by_pedido.setdefault(
+                int(pedido_id_value),
+                {"productos": [], "arreglo": None, "imageUrl": None},
+            )
+            if not payload["imageUrl"]:
+                payload["imageUrl"] = str(image_url)
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer domicilios con imagen de producto. empresa_id=%s", empresa_id, exc_info=True)
+
+    for payload in payload_by_pedido.values():
+        payload["arreglo"] = ", ".join(payload["productos"]) if payload["productos"] else None
+    return payload_by_pedido
+
+
+def _build_courier_cards_with_images(
+    db: Session,
+    empresa_id: int,
+    rows,
+) -> list[DomicilioCourierCard]:
+    unpacked_rows = [_unpack_delivery_row(row) for row in rows]
+    detalle_id_to_pedido_id = {
+        int(produccion.pedidoDetalleID): int(pedido.idPedido)
+        for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
+        if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
+    }
+    try:
+        product_by_pedido = _pedido_product_payload_map(
+            db,
+            empresa_id,
+            [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
+            detalle_id_to_pedido_id=detalle_id_to_pedido_id,
+        )
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer domicilios con productos. empresa_id=%s", empresa_id, exc_info=True)
+        product_by_pedido = {}
+    items: list[DomicilioCourierCard] = []
+    for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
+        product_payload = product_by_pedido.get(int(pedido.idPedido), {})
+        items.append(_build_courier_card(
+            entrega,
+            pedido,
+            cliente,
+            produccion,
+            barrio,
+            zona,
+            image_url=product_payload.get("imageUrl"),
+            arreglo=product_payload.get("arreglo"),
+            productos=product_payload.get("productos") or [],
+        ))
+    return items
 
 
 def _build_mis_entregas_query(
@@ -376,9 +669,16 @@ def _build_mis_entregas_query(
             "_",
         )
     )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -407,6 +707,8 @@ def _build_mis_entregas_query(
             ).asc()
         )
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -437,7 +739,7 @@ def _build_pedidos_disponibles_query(
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -457,8 +759,11 @@ def _build_pedidos_disponibles_query(
                 entrega_actual.domiciliarioID == int(domiciliario_id),
             ),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -478,6 +783,7 @@ def _build_pedidos_sin_asignar_query(
     sucursal_id: int | None,
     fecha_desde: datetime,
     fecha_hasta: datetime,
+    include_location: bool = True,
 ):
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
@@ -490,9 +796,16 @@ def _build_pedidos_sin_asignar_query(
             "_",
         )
     )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -508,8 +821,12 @@ def _build_pedidos_sin_asignar_query(
                 entrega_actual.fechaEntrega,
             ).between(fecha_desde, fecha_hasta),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
+
+    if include_location:
+        q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -528,9 +845,222 @@ def _fecha_rango(fecha: date | None, fecha_desde: date | None, fecha_hasta: date
     if fecha is not None:
         return datetime.combine(fecha, datetime.min.time()), datetime.combine(fecha, datetime.max.time())
 
-    start_date = fecha_desde or date.today()
+    start_date = fecha_desde or colombia_today()
     end_date = fecha_hasta or start_date
     return datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time())
+
+
+def _listar_pedidos_disponibles_api_rows(
+    db: Session,
+    empresa_id: int,
+    sucursal_id: int | None,
+    fecha_desde: datetime,
+    fecha_hasta: datetime,
+    page: int,
+    page_size: int,
+) -> list[PedidoDisponibleItem]:
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
+    estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
+
+    query = text(
+        """
+        WITH latest_attempt AS (
+            SELECT pedido_id, MAX(intentonumero) AS max_intento
+            FROM petalops.entrega
+            WHERE empresa_id = :empresa_id
+            GROUP BY pedido_id
+        ),
+        latest_entrega AS (
+            SELECT e.pedido_id, MAX(e.id_entrega) AS entrega_id
+            FROM petalops.entrega e
+            JOIN latest_attempt la
+              ON la.pedido_id = e.pedido_id
+             AND la.max_intento = e.intentonumero
+            WHERE e.empresa_id = :empresa_id
+            GROUP BY e.pedido_id
+        ),
+        base AS (
+            SELECT
+                e.id_entrega,
+                e.produccionid,
+                e.pedido_id,
+                e.empresa_id,
+                COALESCE(e.sucursalid, p.sucursal_id) AS sucursal_id,
+                e.destinatario,
+                e.telefonodestino,
+                e.direccion,
+                e.barrioid,
+                e.barrionombre,
+                e.rangohora,
+                e.mensaje,
+                COALESCE(e.observaciongeneral, e.observaciones) AS observacion,
+                e.latituddestino,
+                e.longituddestino,
+                COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega) AS fecha_programada,
+                p.numero_pedido,
+                p.codigo_pedido,
+                c.nombre_completo AS cliente,
+                pr.pedido_detalle_id,
+                pr.prioridad,
+                b.id_barrio,
+                b.nombre_barrio,
+                b.zona_id,
+                z.nombre_zona
+            FROM petalops.entrega e
+            JOIN latest_entrega le ON le.entrega_id = e.id_entrega
+            JOIN petalops.pedido p ON p.id_pedido = e.pedido_id
+            JOIN petalops.cliente c ON c.cliente_id = p.cliente_id
+            JOIN petalops.produccion pr ON pr.id_produccion = e.produccionid
+            LEFT JOIN petalops.barrio b
+              ON (
+                    e.barrioid IS NOT NULL
+                AND b.empresa_id = e.empresa_id
+                AND b.id_barrio = e.barrioid
+              )
+              OR (
+                    e.barrioid IS NULL
+                AND b.empresa_id = e.empresa_id
+                AND lower(b.nombre_barrio) = lower(e.barrionombre)
+                AND (b.sucursal_id IS NULL OR b.sucursal_id = COALESCE(e.sucursalid, p.sucursal_id))
+              )
+            LEFT JOIN petalops.zona z ON z.id_zona = b.zona_id
+            WHERE e.empresa_id = :empresa_id
+              AND e.domiciliarioid IS NULL
+              AND e.estadoentregaid = :estado_pendiente_id
+              AND pr.estado_produccion_id = :estado_para_entrega
+              AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega)
+                  BETWEEN :fecha_desde AND :fecha_hasta
+              AND lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_'))
+                  NOT IN :store_pickup_values
+              AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
+        ),
+        productos AS (
+            SELECT
+                b.pedido_id,
+                string_agg(
+                    (
+                        CASE
+                            WHEN COALESCE(pd.cantidad, 0) > 1
+                                THEN (
+                                    CASE
+                                        WHEN pd.cantidad = trunc(pd.cantidad)
+                                            THEN trunc(pd.cantidad)::text
+                                        ELSE pd.cantidad::text
+                                    END
+                                ) || ' x '
+                            ELSE ''
+                        END
+                    ) ||
+                    (
+                        CASE
+                            WHEN COALESCE(
+                                CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                NULLIF(prod.codigo_producto, '')
+                            ) IS NOT NULL
+                                THEN COALESCE(
+                                    CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                    NULLIF(prod.codigo_producto, '')
+                                ) || ' - '
+                            ELSE ''
+                        END
+                    ) ||
+                    COALESCE(NULLIF(prod.nombre_producto, ''), 'Producto'),
+                    ', '
+                    ORDER BY pd.id_pedido_detalle
+                ) AS arreglo,
+                (
+                    array_agg(
+                        ps.imagen_url
+                        ORDER BY pd.id_pedido_detalle
+                    )
+                    FILTER (WHERE ps.imagen_url IS NOT NULL)
+                )[1] AS image_url
+            FROM base b
+            JOIN petalops.pedido_detalle pd
+              ON pd.pedido_id = b.pedido_id
+              OR pd.id_pedido_detalle = b.pedido_detalle_id
+            LEFT JOIN petalops.producto prod ON prod.id_producto = pd.producto_id
+            LEFT JOIN petalops.producto_sucursal ps
+              ON ps.producto_id = pd.producto_id
+             AND ps.sucursal_id = b.sucursal_id
+            GROUP BY b.pedido_id
+        )
+        SELECT
+            b.*,
+            productos.arreglo,
+            productos.image_url
+        FROM base b
+        LEFT JOIN productos ON productos.pedido_id = b.pedido_id
+        ORDER BY b.fecha_programada ASC, b.id_entrega ASC
+        OFFSET :offset_rows
+        LIMIT :limit_rows
+        """
+    ).bindparams(bindparam("store_pickup_values", expanding=True))
+
+    rows = db.execute(
+        query,
+        {
+            "empresa_id": int(empresa_id),
+            "sucursal_id": int(sucursal_id) if sucursal_id is not None else None,
+            "estado_pendiente_id": int(estado_pendiente_id),
+            "estado_para_entrega": int(estado_para_entrega),
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta,
+            "store_pickup_values": tuple(sorted(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES)),
+            "offset_rows": int((page - 1) * page_size),
+            "limit_rows": int(page_size),
+        },
+    ).mappings().all()
+
+    items: list[PedidoDisponibleItem] = []
+    for row in rows:
+        arreglo = _clean_product_summary(row.get("arreglo"))
+        productos = [arreglo] if arreglo else []
+        codigo_pedido = str(row.get("codigo_pedido") or "").strip() or None
+        numero_pedido = codigo_pedido or str(row.get("numero_pedido") or row.get("pedido_id"))
+        barrio_id = row.get("id_barrio") or row.get("barrioid")
+        nombre_barrio = str(row.get("nombre_barrio") or row.get("barrionombre") or "").strip() or None
+        zona_id = row.get("zona_id")
+        nombre_zona = str(row.get("nombre_zona") or "").strip() or None
+
+        items.append(
+            PedidoDisponibleItem(
+                id=int(row["pedido_id"]),
+                idEntrega=int(row["id_entrega"]),
+                pedidoID=int(row["pedido_id"]),
+                produccionID=(int(row["produccionid"]) if row.get("produccionid") is not None else None),
+                numeroPedido=numero_pedido,
+                codigoPedido=codigo_pedido,
+                arreglo=arreglo,
+                nombreArreglo=arreglo,
+                producto=arreglo,
+                productos=productos,
+                imageUrl=(str(row.get("image_url")) if row.get("image_url") else None),
+                imagenUrl=(str(row.get("image_url")) if row.get("image_url") else None),
+                imagenProductoUrl=(str(row.get("image_url")) if row.get("image_url") else None),
+                cliente=str(row.get("cliente") or "Cliente"),
+                destinatario=str(row.get("destinatario") or "") or None,
+                telefonoDestino=str(row.get("telefonodestino") or "") or None,
+                telefonoDestinatario=str(row.get("telefonodestino") or "") or None,
+                celularDestinatario=str(row.get("telefonodestino") or "") or None,
+                direccion=str(row.get("direccion") or "") or None,
+                mensaje=str(row.get("mensaje") or "") or None,
+                observacion=str(row.get("observacion") or "") or None,
+                horaEntrega=str(row.get("rangohora") or "") or None,
+                fechaEntregaProgramada=row.get("fecha_programada"),
+                barrioId=(int(barrio_id) if barrio_id is not None else None),
+                nombreBarrio=nombre_barrio,
+                barrio=nombre_barrio,
+                zonaId=(int(zona_id) if zona_id is not None else None),
+                nombreZona=nombre_zona,
+                zona=nombre_zona,
+                estado="SIN_ASIGNAR",
+                prioridad=(str(row.get("prioridad") or "") or None),
+                latitudDestino=(float(row["latituddestino"]) if row.get("latituddestino") is not None else None),
+                longitudDestino=(float(row["longituddestino"]) if row.get("longituddestino") is not None else None),
+            )
+        )
+    return items
 
 
 def _domicilio_contadores(
@@ -571,7 +1101,8 @@ def _domicilio_contadores(
         sucursal_id=sucursal_id,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-    ).count()
+        include_location=False,
+    ).order_by(None).count()
 
     return DomicilioContadoresResponse(
         asignados=int(own_base.filter(entrega_actual.estadoEntregaID == assigned_states["asignados"]).count()),
@@ -626,7 +1157,7 @@ def listar_admin(
     entrega_actual = aliased(Entrega)
 
     q = (
-        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario)
+        db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
@@ -634,6 +1165,8 @@ def listar_admin(
         .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
         .filter(entrega_actual.empresaID == int(empresa_id))
     )
+
+    q = _with_location_joins(q, entrega_actual, Pedido)
 
     if sucursal_id is not None:
         q = q.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
@@ -664,7 +1197,7 @@ def listar_admin(
     ).all()
 
     items: list[DomicilioAdminItem] = []
-    for entrega, pedido, cliente, produccion, domiciliario in rows:
+    for entrega, pedido, cliente, produccion, domiciliario, barrio, zona in rows:
         estado = domicilio_service.estado_norm(entrega.estadoEntregaID)
         lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
         lat, lng = domicilio_service.payload_lat_lng(entrega)
@@ -673,13 +1206,13 @@ def listar_admin(
                 idEntrega=int(entrega.idEntrega),
                 produccionID=(int(entrega.produccionID) if entrega.produccionID else None),
                 pedidoID=int(pedido.idPedido),
-                numeroPedido=_numero_pedido_valor(pedido),
+                numeroPedido=_numero_pedido_api(pedido),
                 codigoPedido=(str(pedido.codigoPedido) if pedido.codigoPedido else None),
                 cliente=str(cliente.nombreCompleto or "Cliente"),
                 destinatario=str(entrega.destinatario or "") or None,
                 telefonoDestino=str(entrega.telefonoDestino or "") or None,
                 direccion=str(entrega.direccion or "") or None,
-                barrio=str(entrega.barrioNombre or "") or None,
+                **_location_payload(entrega, barrio, zona),
                 observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
                 horaEntrega=str(entrega.rangoHora or "") or None,
                 fechaEntregaProgramada=(entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega),
@@ -858,6 +1391,39 @@ def tomar_entrega(
 
 
 @router.put(
+    "/{entrega_id}/devolver",
+    response_model=DomicilioActionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def devolver_entrega(
+    entrega_id: int,
+    payload: TomarEntregaRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
+    assert_same_empresa(auth, int(entrega.empresaID))
+    _assert_entrega_actor_scope(entrega, auth, db)
+
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if actual not in {ESTADO_ASIGNADO, ESTADO_NO_ENTREGADO}:
+        raise _err(
+            "DOMICILIO_DEVOLVER_INVALID",
+            f"No se puede devolver entrega desde estado {actual}",
+            status_code=400,
+        )
+
+    entrega.domiciliarioID = None
+    entrega.fechaAsignacion = None
+    entrega.fechaSalida = None
+    entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
+    entrega.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+
+    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_PENDIENTE)
+
+
+@router.put(
     "/{entrega_id}/en-ruta",
     response_model=DomicilioActionResponse,
     dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
@@ -986,7 +1552,7 @@ def listar_mis_entregas(
     assert_same_empresa(auth, empresa_id)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = _build_courier_cards_with_images(db, empresa_id, rows)
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,
@@ -1007,7 +1573,7 @@ def listar_mis_pedidos(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = _build_courier_cards_with_images(db, empresa_id, rows)
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,
@@ -1032,7 +1598,24 @@ def listar_pedidos_disponibles(
     rows = _build_pedidos_disponibles_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
 
     items: list[DomicilioCourierCard] = []
-    for entrega, pedido, cliente, produccion in rows:
+    unpacked_rows = [_unpack_delivery_row(row) for row in rows]
+    detalle_id_to_pedido_id = {
+        int(produccion.pedidoDetalleID): int(pedido.idPedido)
+        for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
+        if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
+    }
+    try:
+        product_by_pedido = _pedido_product_payload_map(
+            db,
+            empresa_id,
+            [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
+            detalle_id_to_pedido_id=detalle_id_to_pedido_id,
+        )
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer pedidos disponibles con productos. empresa_id=%s", empresa_id, exc_info=True)
+        product_by_pedido = {}
+    for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
+        product_payload = product_by_pedido.get(int(pedido.idPedido), {})
         lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
         items.append(
             _build_courier_card(
@@ -1040,7 +1623,12 @@ def listar_pedidos_disponibles(
                 pedido,
                 cliente,
                 produccion,
+                barrio,
+                zona,
                 distancia_km=domicilio_service.haversine_distance_km(latitud, longitud, lat_destino, lng_destino),
+                image_url=product_payload.get("imageUrl"),
+                arreglo=product_payload.get("arreglo"),
+                productos=product_payload.get("productos") or [],
             )
         )
 
@@ -1074,8 +1662,6 @@ def listar_pedidos_disponibles_api(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-    _assert_role_domiciliario(auth)
-    _assert_auth_domiciliario(db, auth)
 
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
     rows = (
@@ -1090,10 +1676,68 @@ def listar_pedidos_disponibles_api(
         .limit(page_size)
         .all()
     )
-    return [
-        _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
-        for entrega, pedido, cliente, produccion in rows
-    ]
+    unpacked_rows = [_unpack_delivery_row(row) for row in rows]
+    detalle_id_to_pedido_id = {
+        int(produccion.pedidoDetalleID): int(pedido.idPedido)
+        for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
+        if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
+    }
+    try:
+        product_by_pedido = _pedido_product_payload_map(
+            db,
+            empresa_id,
+            [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
+            detalle_id_to_pedido_id=detalle_id_to_pedido_id,
+        )
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer pedidos disponibles API con productos. empresa_id=%s", empresa_id, exc_info=True)
+        product_by_pedido = {}
+    items: list[PedidoDisponibleItem] = []
+    for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
+        product_payload = product_by_pedido.get(int(pedido.idPedido), {})
+        image_url = product_payload.get("imageUrl")
+        arreglo = product_payload.get("arreglo")
+        productos = product_payload.get("productos") or []
+        lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
+        location = _location_payload(entrega, barrio, zona)
+        items.append(
+            PedidoDisponibleItem(
+                id=int(pedido.idPedido),
+                idEntrega=int(entrega.idEntrega),
+                pedidoID=int(pedido.idPedido),
+                produccionID=(int(entrega.produccionID) if entrega.produccionID is not None else None),
+                numeroPedido=_numero_pedido_api(pedido),
+                codigoPedido=(str(pedido.codigoPedido).strip() if pedido.codigoPedido else None),
+                arreglo=arreglo,
+                nombreArreglo=arreglo,
+                producto=arreglo,
+                productos=productos,
+                imageUrl=image_url,
+                imagenUrl=image_url,
+                imagenProductoUrl=image_url,
+                cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
+                destinatario=str(entrega.destinatario or "") or None,
+                telefonoDestino=str(entrega.telefonoDestino or "") or None,
+                telefonoDestinatario=str(entrega.telefonoDestino or "") or None,
+                celularDestinatario=str(entrega.telefonoDestino or "") or None,
+                direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
+                mensaje=str(entrega.mensaje or "") or None,
+                observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
+                horaEntrega=_hora_entrega_hhmm(entrega),
+                fechaEntregaProgramada=_fecha_entrega_programada(entrega),
+                barrioId=location["barrioId"],
+                nombreBarrio=location["nombreBarrio"],
+                barrio=location["barrio"],
+                zonaId=location["zonaId"],
+                nombreZona=location["nombreZona"],
+                zona=location["zona"],
+                estado=_estado_api(entrega),
+                prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
+                latitudDestino=lat_destino,
+                longitudDestino=lng_destino,
+            )
+        )
+    return items
 
 
 @router.get("/contadores", response_model=DomicilioContadoresResponse)
@@ -1231,8 +1875,29 @@ def autoasignar_pedido(
         )
         .first()
     )
-    start, end = _fecha_rango(date.today(), None, None)
-    base_item = _build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+    start, end = _fecha_rango(colombia_today(), None, None)
+    detalle_id_to_pedido_id = {}
+    if produccion and getattr(produccion, "pedidoDetalleID", None) is not None:
+        detalle_id_to_pedido_id[int(produccion.pedidoDetalleID)] = int(pedido.idPedido)
+    try:
+        product_payload = _pedido_product_payload_map(
+            db,
+            empresa_id,
+            [int(pedido.idPedido)],
+            detalle_id_to_pedido_id=detalle_id_to_pedido_id,
+        ).get(int(pedido.idPedido), {})
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer pedido asignado con productos. pedido_id=%s", pedido.idPedido, exc_info=True)
+        product_payload = {}
+    base_item = _build_pedido_disponible_item(
+        entrega,
+        pedido,
+        cliente,
+        produccion,
+        arreglo=product_payload.get("arreglo"),
+        productos=product_payload.get("productos") or [],
+        image_url=product_payload.get("imageUrl"),
+    )
     return PedidoAsignadoResponse(
         **base_item.model_dump(),
         idEntrega=int(entrega.idEntrega),
@@ -1254,7 +1919,7 @@ def listar_mis_entregas_propias(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
-    items = [_build_courier_card(entrega, pedido, cliente, produccion) for entrega, pedido, cliente, produccion in rows]
+    items = _build_courier_cards_with_images(db, empresa_id, rows)
     items = sort_operativo(
         items,
         due_at=lambda item: item.fechaEntregaProgramada,

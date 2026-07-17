@@ -18,6 +18,7 @@ from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.sucursal import Sucursal
 from app.schemas.pedido import PedidoCheckoutRequest
+from app.core.timezone import colombia_now_naive
 
 
 def _activo_truthy(column):
@@ -409,7 +410,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             )
             cliente.email = payload.cliente.email if payload.cliente.email is not None else cliente.email
 
-        fecha_pedido = datetime.now(timezone.utc)
+        fecha_pedido = colombia_now_naive()
 
         costo_domicilio = _resolve_costo_domicilio(
             db,

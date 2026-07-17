@@ -234,7 +234,7 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND usuario_id = :user_id "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "user_id": int(user_id)},
@@ -248,7 +248,7 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND user_id = :user_id "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "user_id": int(user_id)},
@@ -260,13 +260,19 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
 
 
 def _find_domiciliario_id_for_login_or_email(db, empresa_id: int, login: str | None, email: str | None) -> int | None:
+    login_column = None
     if login and _empleado_has_column(db, "login"):
+        login_column = "login"
+    elif login and _empleado_has_column(db, "usuario"):
+        login_column = "usuario"
+
+    if login and login_column:
         row = db.execute(
             text(
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
-                "AND lower(login) = lower(:login) "
-                "AND lower(cargo) = 'domiciliario' "
+                f"AND lower({login_column}) = lower(:login) "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "login": login},
@@ -280,7 +286,7 @@ def _find_domiciliario_id_for_login_or_email(db, empresa_id: int, login: str | N
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND lower(email) = lower(:email) "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "email": email},

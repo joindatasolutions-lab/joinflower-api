@@ -3,6 +3,7 @@ from decimal import Decimal
 from app.routers.pedido import (
     _build_pedido_adjustments,
     _extract_payment_adjustments,
+    _flora_phase2_ready,
     _load_pago_resumen,
     _serialize_pago_metadata,
 )
@@ -38,6 +39,32 @@ class _FakePagoDb:
                 }
             )
         return _FakeScalarResult()
+
+
+class _FakePhase2SchemaDb:
+    def __init__(self, missing_column: tuple[str, str] | None = None):
+        self.missing_column = missing_column
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+        if "information_schema.tables" in sql:
+            return _FakeScalarRowResult((1,))
+        if "information_schema.columns" in sql:
+            table_name = str(params.get("table_name") or "")
+            column_name = str(params.get("column_name") or "")
+            if self.missing_column == (table_name, column_name):
+                return _FakeScalarResult()
+            return _FakeScalarRowResult((1,))
+        return _FakeScalarResult()
+
+
+class _FakeScalarRowResult:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
 
 
 def test_build_pedido_adjustments_uses_fixed_amount_discount_and_saldo_favor():
@@ -85,3 +112,8 @@ def test_load_pago_resumen_legacy_payment_includes_amount_for_cash_breakdown():
     assert resumen["metodoPago"] == "Efectivo"
     assert resumen["metodosPago"] == ["Efectivo"]
     assert resumen["montoEfectivo"] == 125000.0
+
+
+def test_flora_phase2_requires_expected_columns():
+    assert _flora_phase2_ready(_FakePhase2SchemaDb()) is True
+    assert _flora_phase2_ready(_FakePhase2SchemaDb(("pago_metodo", "monto"))) is False

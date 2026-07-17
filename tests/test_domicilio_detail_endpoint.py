@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -106,3 +107,156 @@ def test_obtener_detalle_domicilio_404_when_entrega_missing():
         domicilios_router.obtener_detalle_domicilio(999, db=db, auth=auth)
 
     assert exc.value.status_code == 404
+
+
+def test_pedido_disponible_item_uses_codigo_pedido_column():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=None,
+        fechaEntrega=None,
+        rangoHora=None,
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=96412,
+        codigoPedido="FLR-96412",
+    )
+    cliente = SimpleNamespace(nombreCompleto="Cliente Demo")
+    produccion = SimpleNamespace(prioridad="ALTA")
+
+    item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+
+    assert item.codigoPedido == "FLR-96412"
+    assert item.numeroPedido == "FLR-96412"
+
+
+def test_pedido_disponible_item_can_include_product_names():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=None,
+        fechaEntrega=None,
+        rangoHora=None,
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=97143,
+        codigoPedido="FLR-97143",
+    )
+    cliente = SimpleNamespace(nombreCompleto="Rashidd bojanini Yance")
+    produccion = SimpleNamespace(prioridad="ALTA")
+
+    item = domicilios_router._build_pedido_disponible_item(
+        entrega,
+        pedido,
+        cliente,
+        produccion,
+        arreglo="Ramo Primavera, 2 x Caja de Rosas",
+        productos=["Ramo Primavera", "2 x Caja de Rosas"],
+        image_url="https://cdn.example.com/ramo.jpg",
+    )
+
+    assert item.numeroPedido == "FLR-97143"
+    assert item.arreglo == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.nombreArreglo == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.producto == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.productos == ["Ramo Primavera", "2 x Caja de Rosas"]
+    assert item.imageUrl == "https://cdn.example.com/ramo.jpg"
+
+
+def test_product_label_prefers_catalog_code_for_flora_empresa():
+    label = domicilios_router._product_label(
+        "Bouquet 12 Rosas Rojas",
+        Decimal("1"),
+        codigo_producto="PROD-0052",
+        codigo_catalogo="0052",
+        empresa_id=3,
+    )
+
+    assert label == "0052 - Bouquet 12 Rosas Rojas"
+
+
+def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=datetime(2026, 7, 16, 0, 0, 0),
+        fechaEntrega=None,
+        rangoHora="10:00",
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=97118,
+        codigoPedido=None,
+    )
+    cliente = SimpleNamespace(nombreCompleto="Laura Tello")
+    produccion = SimpleNamespace(prioridad="MEDIA")
+
+    item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
+
+    assert item.horaEntrega == "10:00"
+
+
+def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        domiciliarioID=48,
+        fechaAsignacion=datetime(2026, 7, 16, 9, 0, 0),
+        fechaSalida=None,
+        estadoEntregaID=2,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100)
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_ASIGNADO)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+
+    response = domicilios_router.devolver_entrega(
+        10,
+        domicilios_router.TomarEntregaRequest(usuarioCambio="domiciliario"),
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_PENDIENTE
+    assert entrega.domiciliarioID is None
+    assert entrega.fechaAsignacion is None
+    assert entrega.fechaSalida is None
+    assert entrega.estadoEntregaID == 1
+    assert db.committed is True
+
+
+def test_devolver_entrega_rejects_en_ruta(monkeypatch):
+    entrega = SimpleNamespace(idEntrega=10, empresaID=3, domiciliarioID=48, estadoEntregaID=3)
+    db = SimpleNamespace(commit=lambda: None)
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100)
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+
+    with pytest.raises(HTTPException) as exc:
+        domicilios_router.devolver_entrega(
+            10,
+            domicilios_router.TomarEntregaRequest(usuarioCambio="domiciliario"),
+            db=db,
+            auth=auth,
+        )
+
+    assert exc.value.status_code == 400
