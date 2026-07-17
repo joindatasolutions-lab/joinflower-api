@@ -69,6 +69,11 @@ class DomicilioCourierCard(BaseModel):
     producto: str | None = None
     productos: list[str] = Field(default_factory=list)
     imageUrl: str | None = None
+<<<<<<< HEAD
+=======
+    imagenUrl: str | None = None
+    imagenProductoUrl: str | None = None
+>>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
@@ -106,6 +111,9 @@ class DomicilioContadoresResponse(BaseModel):
 
 class PedidoDisponibleItem(BaseModel):
     id: int
+    idEntrega: int | None = None
+    pedidoID: int | None = None
+    produccionID: int | None = None
     numeroPedido: str
     codigoPedido: str | None = None
     arreglo: str | None = None
@@ -113,8 +121,19 @@ class PedidoDisponibleItem(BaseModel):
     producto: str | None = None
     productos: list[str] = Field(default_factory=list)
     imageUrl: str | None = None
+<<<<<<< HEAD
+=======
+    imagenUrl: str | None = None
+    imagenProductoUrl: str | None = None
+>>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     cliente: str
+    destinatario: str | None = None
+    telefonoDestino: str | None = None
+    telefonoDestinatario: str | None = None
+    celularDestinatario: str | None = None
     direccion: str | None = None
+    mensaje: str | None = None
+    observacion: str | None = None
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None
     barrioId: int | None = None
@@ -125,6 +144,8 @@ class PedidoDisponibleItem(BaseModel):
     zona: str | None = None
     estado: str
     prioridad: str | None = None
+    latitudDestino: float | None = None
+    longitudDestino: float | None = None
 
 
 class PedidoAsignadoResponse(PedidoDisponibleItem):
