@@ -2,11 +2,45 @@
 
 Endpoint para la vista **Disponibles** de DomiApp. Devuelve pedidos sin asignar a domiciliario, listos para que el domiciliario pueda tomarlos.
 
+No incluye pedidos de recogida en tienda. El backend excluye esos pedidos por `tipoEntrega` y tambien cuando la direccion viene como `Recoger En Tienda`.
+
 ## Endpoint
 
 ```http
 GET /api/domicilios/pedidos/disponibles
 ```
+
+## Endpoint Alterno Usado Por La Vista Mobile
+
+Algunas pantallas de DomiApp consumen la ruta con guion:
+
+```http
+GET /api/domicilios/pedidos-disponibles
+```
+
+Esa ruta devuelve un objeto con `items` y `total`:
+
+```json
+{
+  "items": [
+    {
+      "idEntrega": 123,
+      "pedidoID": 97143,
+      "numeroPedido": "FLR-97143",
+      "arreglo": "0052 - Bouquet 12 Rosas Rojas",
+      "imageUrl": "https://cdn.example.com/producto.jpg",
+      "destinatario": "Rashidd",
+      "direccion": "Calle 47 # 19-141",
+      "barrio": "Cevillar",
+      "zona": "Zona 2",
+      "horaEntrega": "09:00"
+    }
+  ],
+  "total": 1
+}
+```
+
+Para esta ruta, el front debe leer `response.items`.
 
 ## Autenticacion
 

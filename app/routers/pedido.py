@@ -660,11 +660,70 @@ def _table_exists(db: Session, table_name: str) -> bool:
     return bool(row)
 
 
+def _column_exists(db: Session, table_name: str, column_name: str) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'petalops'
+              AND table_name = :table_name
+              AND column_name = :column_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name, "column_name": column_name},
+    ).first()
+    return bool(row)
+
+
 def _flora_phase2_ready(db: Session) -> bool:
-    return all(
-        _table_exists(db, table_name)
-        for table_name in ("metodo_pago_catalogo", "pago_metodo", "canal_venta", "pedido_canal_venta")
-    )
+    required_columns = {
+        "metodo_pago_catalogo": (
+            "id_metodo_pago",
+            "empresa_id",
+            "codigo",
+            "nombre",
+            "orden",
+            "activo",
+            "created_at",
+            "updated_at",
+        ),
+        "pago_metodo": (
+            "id_pago_metodo",
+            "empresa_id",
+            "pago_id",
+            "pedido_id",
+            "metodo_pago_id",
+            "monto",
+            "orden",
+            "created_at",
+            "updated_at",
+        ),
+        "canal_venta": (
+            "id_canal_venta",
+            "empresa_id",
+            "codigo",
+            "nombre",
+            "orden",
+            "activo",
+            "created_at",
+            "updated_at",
+        ),
+        "pedido_canal_venta": (
+            "empresa_id",
+            "pedido_id",
+            "canal_venta_id",
+            "created_at",
+            "updated_at",
+        ),
+    }
+    for table_name, columns in required_columns.items():
+        if not _table_exists(db, table_name):
+            return False
+        if not all(_column_exists(db, table_name, column_name) for column_name in columns):
+            return False
+    return True
 
 
 def _empresa_menu_ready(db: Session) -> bool:

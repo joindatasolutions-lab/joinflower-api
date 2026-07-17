@@ -69,11 +69,8 @@ class DomicilioCourierCard(BaseModel):
     producto: str | None = None
     productos: list[str] = Field(default_factory=list)
     imageUrl: str | None = None
-<<<<<<< HEAD
-=======
     imagenUrl: str | None = None
     imagenProductoUrl: str | None = None
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
@@ -121,11 +118,8 @@ class PedidoDisponibleItem(BaseModel):
     producto: str | None = None
     productos: list[str] = Field(default_factory=list)
     imageUrl: str | None = None
-<<<<<<< HEAD
-=======
     imagenUrl: str | None = None
     imagenProductoUrl: str | None = None
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     cliente: str
     destinatario: str | None = None
     telefonoDestino: str | None = None

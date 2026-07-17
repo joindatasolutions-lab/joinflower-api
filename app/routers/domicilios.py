@@ -229,11 +229,8 @@ def _build_pedido_disponible_item(
         producto=arreglo,
         productos=productos or [],
         imageUrl=image_url,
-<<<<<<< HEAD
-=======
         imagenUrl=image_url,
         imagenProductoUrl=image_url,
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
         cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
         direccion=(str(entrega.direccion).strip() if entrega.direccion else None),
         horaEntrega=_hora_entrega_hhmm(entrega),
@@ -448,11 +445,8 @@ def _build_courier_card(
         producto=arreglo,
         productos=productos or [],
         imageUrl=image_url,
-<<<<<<< HEAD
-=======
         imagenUrl=image_url,
         imagenProductoUrl=image_url,
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
         cliente=(str(cliente.nombreCompleto or "Cliente") if cliente else None),
         destinatario=str(entrega.destinatario or "") or None,
         direccion=str(entrega.direccion or "") or None,
@@ -515,41 +509,6 @@ def _pedido_product_payload_map(
     if not pedido_ids and not detalle_id_to_pedido_id:
         return {}
 
-<<<<<<< HEAD
-    rows = (
-        db.query(
-            PedidoDetalle.idPedidoDetalle,
-            PedidoDetalle.pedidoID,
-            Producto.codigoProducto,
-            Producto.codigoCatalogo,
-            Producto.nombreProducto,
-            PedidoDetalle.cantidad,
-            Producto.imageUrl,
-        )
-        .outerjoin(
-            Producto,
-            Producto.idProducto == PedidoDetalle.productoID,
-        )
-        .filter(
-            PedidoDetalle.empresaID == int(empresa_id),
-            or_(
-                PedidoDetalle.pedidoID.in_([int(pedido_id) for pedido_id in pedido_ids]),
-                PedidoDetalle.idPedidoDetalle.in_(list(detalle_id_to_pedido_id.keys())),
-            ),
-            or_(
-                Producto.idProducto == None,
-                Producto.empresaID == None,
-                Producto.empresaID == PedidoDetalle.empresaID,
-                Producto.empresaID == int(empresa_id),
-            ),
-        )
-        .order_by(PedidoDetalle.pedidoID.asc(), PedidoDetalle.idPedidoDetalle.asc())
-        .all()
-    )
-
-    payload_by_pedido: dict[int, dict] = {}
-    for detalle_id, pedido_id, codigo_producto, codigo_catalogo, nombre_producto, cantidad, image_url in rows:
-=======
     query = text(
         """
         SELECT
@@ -558,14 +517,10 @@ def _pedido_product_payload_map(
             p.codigo_producto,
             p.codigo_catalogo,
             p.nombre_producto,
-            pd.cantidad,
-            ps.imagen_url AS image_url
+            pd.cantidad
         FROM petalops.pedido_detalle pd
         LEFT JOIN petalops.producto p
           ON p.id_producto = pd.producto_id
-        LEFT JOIN petalops.producto_sucursal ps
-          ON ps.producto_id = pd.producto_id
-         AND ps.sucursal_id = pd.sucursal_id
         WHERE pd.pedido_id IN :pedido_ids
            OR pd.id_pedido_detalle IN :detalle_ids
         ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
@@ -590,9 +545,7 @@ def _pedido_product_payload_map(
         codigo_catalogo,
         nombre_producto,
         cantidad,
-        image_url,
     ) in rows:
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
         pedido_id_value = pedido_id
         if pedido_id_value is None and detalle_id is not None:
             pedido_id_value = detalle_id_to_pedido_id.get(int(detalle_id))
@@ -613,8 +566,47 @@ def _pedido_product_payload_map(
         )
         if label:
             payload["productos"].append(label)
-        if not payload["imageUrl"] and image_url:
-            payload["imageUrl"] = str(image_url)
+
+    try:
+        image_query = text(
+            """
+            SELECT
+                pd.id_pedido_detalle,
+                pd.pedido_id,
+                ps.imagen_url
+            FROM petalops.pedido_detalle pd
+            JOIN petalops.producto_sucursal ps
+              ON ps.producto_id = pd.producto_id
+             AND ps.sucursal_id = pd.sucursal_id
+            WHERE (pd.pedido_id IN :pedido_ids OR pd.id_pedido_detalle IN :detalle_ids)
+              AND ps.imagen_url IS NOT NULL
+            ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
+            """
+        ).bindparams(
+            bindparam("pedido_ids", expanding=True),
+            bindparam("detalle_ids", expanding=True),
+        )
+        image_rows = db.execute(
+            image_query,
+            {
+                "pedido_ids": [int(pedido_id) for pedido_id in pedido_ids] or [-1],
+                "detalle_ids": list(detalle_id_to_pedido_id.keys()) or [-1],
+            },
+        ).all()
+        for detalle_id, pedido_id, image_url in image_rows:
+            pedido_id_value = pedido_id
+            if pedido_id_value is None and detalle_id is not None:
+                pedido_id_value = detalle_id_to_pedido_id.get(int(detalle_id))
+            if pedido_id_value is None or not image_url:
+                continue
+            payload = payload_by_pedido.setdefault(
+                int(pedido_id_value),
+                {"productos": [], "arreglo": None, "imageUrl": None},
+            )
+            if not payload["imageUrl"]:
+                payload["imageUrl"] = str(image_url)
+    except SQLAlchemyError:
+        domicilios_logger.error("No fue posible enriquecer domicilios con imagen de producto. empresa_id=%s", empresa_id, exc_info=True)
 
     for payload in payload_by_pedido.values():
         payload["arreglo"] = ", ".join(payload["productos"]) if payload["productos"] else None
@@ -632,14 +624,6 @@ def _build_courier_cards_with_images(
         for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
         if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
     }
-<<<<<<< HEAD
-    product_by_pedido = _pedido_product_payload_map(
-        db,
-        empresa_id,
-        [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
-        detalle_id_to_pedido_id=detalle_id_to_pedido_id,
-    )
-=======
     try:
         product_by_pedido = _pedido_product_payload_map(
             db,
@@ -650,7 +634,6 @@ def _build_courier_cards_with_images(
     except SQLAlchemyError:
         domicilios_logger.error("No fue posible enriquecer domicilios con productos. empresa_id=%s", empresa_id, exc_info=True)
         product_by_pedido = {}
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     items: list[DomicilioCourierCard] = []
     for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
         product_payload = product_by_pedido.get(int(pedido.idPedido), {})
@@ -682,6 +665,13 @@ def _build_mis_entregas_query(
     tipo_entrega_norm = func.lower(
         func.replace(
             func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
             " ",
             "_",
         )
@@ -769,6 +759,7 @@ def _build_pedidos_disponibles_query(
                 entrega_actual.domiciliarioID == int(domiciliario_id),
             ),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
 
@@ -805,6 +796,13 @@ def _build_pedidos_sin_asignar_query(
             "_",
         )
     )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
 
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
@@ -823,6 +821,7 @@ def _build_pedidos_sin_asignar_query(
                 entrega_actual.fechaEntrega,
             ).between(fecha_desde, fecha_hasta),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
 
@@ -1605,14 +1604,6 @@ def listar_pedidos_disponibles(
         for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
         if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
     }
-<<<<<<< HEAD
-    product_by_pedido = _pedido_product_payload_map(
-        db,
-        empresa_id,
-        [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
-        detalle_id_to_pedido_id=detalle_id_to_pedido_id,
-    )
-=======
     try:
         product_by_pedido = _pedido_product_payload_map(
             db,
@@ -1623,7 +1614,6 @@ def listar_pedidos_disponibles(
     except SQLAlchemyError:
         domicilios_logger.error("No fue posible enriquecer pedidos disponibles con productos. empresa_id=%s", empresa_id, exc_info=True)
         product_by_pedido = {}
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
         product_payload = product_by_pedido.get(int(pedido.idPedido), {})
         lat_destino, lng_destino = domicilio_service.payload_destino_lat_lng(entrega)
@@ -1692,28 +1682,6 @@ def listar_pedidos_disponibles_api(
         for _entrega, pedido, _cliente, produccion, _barrio, _zona in unpacked_rows
         if produccion and getattr(produccion, "pedidoDetalleID", None) is not None
     }
-<<<<<<< HEAD
-    product_by_pedido = _pedido_product_payload_map(
-        db,
-        empresa_id,
-        [int(pedido.idPedido) for _entrega, pedido, _cliente, _produccion, _barrio, _zona in unpacked_rows],
-        detalle_id_to_pedido_id=detalle_id_to_pedido_id,
-    )
-    items: list[PedidoDisponibleItem] = []
-    for entrega, pedido, cliente, produccion, barrio, zona in unpacked_rows:
-        product_payload = product_by_pedido.get(int(pedido.idPedido), {})
-        items.append(
-            _build_pedido_disponible_item(
-                entrega,
-                pedido,
-                cliente,
-                produccion,
-                barrio,
-                zona,
-                arreglo=product_payload.get("arreglo"),
-                productos=product_payload.get("productos") or [],
-                image_url=product_payload.get("imageUrl"),
-=======
     try:
         product_by_pedido = _pedido_product_payload_map(
             db,
@@ -1767,7 +1735,6 @@ def listar_pedidos_disponibles_api(
                 prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
                 latitudDestino=lat_destino,
                 longitudDestino=lng_destino,
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
             )
         )
     return items
@@ -1912,14 +1879,6 @@ def autoasignar_pedido(
     detalle_id_to_pedido_id = {}
     if produccion and getattr(produccion, "pedidoDetalleID", None) is not None:
         detalle_id_to_pedido_id[int(produccion.pedidoDetalleID)] = int(pedido.idPedido)
-<<<<<<< HEAD
-    product_payload = _pedido_product_payload_map(
-        db,
-        empresa_id,
-        [int(pedido.idPedido)],
-        detalle_id_to_pedido_id=detalle_id_to_pedido_id,
-    ).get(int(pedido.idPedido), {})
-=======
     try:
         product_payload = _pedido_product_payload_map(
             db,
@@ -1930,7 +1889,6 @@ def autoasignar_pedido(
     except SQLAlchemyError:
         domicilios_logger.error("No fue posible enriquecer pedido asignado con productos. pedido_id=%s", pedido.idPedido, exc_info=True)
         product_payload = {}
->>>>>>> 19f14f6 (Expose delivery product names for DomiApp)
     base_item = _build_pedido_disponible_item(
         entrega,
         pedido,
