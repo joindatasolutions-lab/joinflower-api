@@ -945,6 +945,39 @@ def tomar_entrega(
 
 
 @router.put(
+    "/{entrega_id}/devolver",
+    response_model=DomicilioActionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def devolver_entrega(
+    entrega_id: int,
+    payload: TomarEntregaRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
+    assert_same_empresa(auth, int(entrega.empresaID))
+    _assert_entrega_actor_scope(entrega, auth, db)
+
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if actual not in {ESTADO_ASIGNADO, ESTADO_NO_ENTREGADO}:
+        raise _err(
+            "DOMICILIO_DEVOLVER_INVALID",
+            f"No se puede devolver entrega desde estado {actual}",
+            status_code=400,
+        )
+
+    entrega.domiciliarioID = None
+    entrega.fechaAsignacion = None
+    entrega.fechaSalida = None
+    entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
+    entrega.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+
+    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_PENDIENTE)
+
+
+@router.put(
     "/{entrega_id}/en-ruta",
     response_model=DomicilioActionResponse,
     dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],

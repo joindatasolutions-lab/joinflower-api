@@ -156,3 +156,58 @@ def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
     item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
 
     assert item.horaEntrega == "10:00"
+
+
+def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        domiciliarioID=48,
+        fechaAsignacion=datetime(2026, 7, 16, 9, 0, 0),
+        fechaSalida=None,
+        estadoEntregaID=2,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100)
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_ASIGNADO)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+
+    response = domicilios_router.devolver_entrega(
+        10,
+        domicilios_router.TomarEntregaRequest(usuarioCambio="domiciliario"),
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_PENDIENTE
+    assert entrega.domiciliarioID is None
+    assert entrega.fechaAsignacion is None
+    assert entrega.fechaSalida is None
+    assert entrega.estadoEntregaID == 1
+    assert db.committed is True
+
+
+def test_devolver_entrega_rejects_en_ruta(monkeypatch):
+    entrega = SimpleNamespace(idEntrega=10, empresaID=3, domiciliarioID=48, estadoEntregaID=3)
+    db = SimpleNamespace(commit=lambda: None)
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100)
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+
+    with pytest.raises(HTTPException) as exc:
+        domicilios_router.devolver_entrega(
+            10,
+            domicilios_router.TomarEntregaRequest(usuarioCambio="domiciliario"),
+            db=db,
+            auth=auth,
+        )
+
+    assert exc.value.status_code == 400
