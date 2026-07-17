@@ -134,6 +134,55 @@ def test_pedido_disponible_item_uses_codigo_pedido_column():
     assert item.numeroPedido == "FLR-96412"
 
 
+def test_pedido_disponible_item_can_include_product_names():
+    entrega = SimpleNamespace(
+        direccion="Calle 123",
+        estadoEntregaID=1,
+        barrioID=None,
+        barrioNombre=None,
+        reprogramadaPara=None,
+        fechaEntregaProgramada=None,
+        fechaEntrega=None,
+        rangoHora=None,
+    )
+    pedido = SimpleNamespace(
+        idPedido=20,
+        numeroPedido=97143,
+        codigoPedido="FLR-97143",
+    )
+    cliente = SimpleNamespace(nombreCompleto="Rashidd bojanini Yance")
+    produccion = SimpleNamespace(prioridad="ALTA")
+
+    item = domicilios_router._build_pedido_disponible_item(
+        entrega,
+        pedido,
+        cliente,
+        produccion,
+        arreglo="Ramo Primavera, 2 x Caja de Rosas",
+        productos=["Ramo Primavera", "2 x Caja de Rosas"],
+        image_url="https://cdn.example.com/ramo.jpg",
+    )
+
+    assert item.numeroPedido == "FLR-97143"
+    assert item.arreglo == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.nombreArreglo == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.producto == "Ramo Primavera, 2 x Caja de Rosas"
+    assert item.productos == ["Ramo Primavera", "2 x Caja de Rosas"]
+    assert item.imageUrl == "https://cdn.example.com/ramo.jpg"
+
+
+def test_product_label_prefers_catalog_code_for_flora_empresa():
+    label = domicilios_router._product_label(
+        "Bouquet 12 Rosas Rojas",
+        Decimal("1"),
+        codigo_producto="PROD-0052",
+        codigo_catalogo="0052",
+        empresa_id=3,
+    )
+
+    assert label == "0052 - Bouquet 12 Rosas Rojas"
+
+
 def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
     entrega = SimpleNamespace(
         direccion="Calle 123",

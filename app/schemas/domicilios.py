@@ -64,6 +64,11 @@ class DomicilioCourierCard(BaseModel):
     pedidoID: int
     numeroPedido: str
     codigoPedido: str | None = None
+    arreglo: str | None = None
+    nombreArreglo: str | None = None
+    producto: str | None = None
+    productos: list[str] = Field(default_factory=list)
+    imageUrl: str | None = None
     cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
@@ -103,6 +108,11 @@ class PedidoDisponibleItem(BaseModel):
     id: int
     numeroPedido: str
     codigoPedido: str | None = None
+    arreglo: str | None = None
+    nombreArreglo: str | None = None
+    producto: str | None = None
+    productos: list[str] = Field(default_factory=list)
+    imageUrl: str | None = None
     cliente: str
     direccion: str | None = None
     horaEntrega: str | None = None
