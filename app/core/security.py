@@ -610,7 +610,15 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         user_overrides = load_usuario_module_overrides(db, user_id)
         if user_overrides is not None:
             modulos_usuario = {modulo for modulo, activo in user_overrides.items() if activo}
-            modulos_plan = modulos_plan.intersection(modulos_usuario)
+
+            # Eleccion libre por usuario: el administrador puede asignar a un
+            # usuario cualquier modulo, sin quedar limitado a los permisos por
+            # defecto de su rol. El unico techo real es que la empresa no haya
+            # desactivado ese modulo explicitamente a nivel comercial.
+            modulos_desactivados_empresa = {
+                modulo for modulo, activo in (overrides or {}).items() if not activo
+            }
+            modulos_plan = modulos_usuario - modulos_desactivados_empresa
 
             for modulo in modulos_plan:
                 permisos[modulo] = {
