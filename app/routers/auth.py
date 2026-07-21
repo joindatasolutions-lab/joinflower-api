@@ -1473,6 +1473,20 @@ def crear_empresa(
         )
         sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_metodos_pago")
 
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.canal_venta (
+                    empresa_id, codigo, nombre, orden, activo, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, 'presencial', 'Presencial', 1, TRUE, NOW(), NOW()
+                )
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        )
+        sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_canal_venta")
+
         db.commit()
 
         return EmpresaCreateResponse(
