@@ -41,6 +41,7 @@ from app.schemas.pedido import (
 )
 from app.services import caja_service
 from app.services import domicilio_service
+from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
@@ -1714,6 +1715,13 @@ def _upsert_pago_flora(
         ).first()
         if inserted and inserted[0] is not None:
             metodo_by_name[str(metodo).strip().lower()] = int(inserted[0])
+
+    if missing_methods:
+        # Sin esto, el metodo nuevo queda en metodo_pago_catalogo pero nunca
+        # aparece en el formulario de pedido — empresa_menu.opciones_json
+        # (la fuente real de las opciones que muestra el front) no se toca
+        # aqui arriba, solo el catalogo.
+        sync_empresa_menu_opciones(db, empresa_id=int(empresa_id), campo="pedido_metodos_pago")
 
     db.execute(
         text(
