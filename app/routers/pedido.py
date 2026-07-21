@@ -1544,7 +1544,11 @@ def _upsert_pago_flora(
         {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
     ).mappings().first()
 
-    metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+    # petalops.pago.metodo_pago es NOT NULL: cuando no hay metodos capturados
+    # (empresas sin metodo_pago_catalogo configurado, ver /configuracion) se
+    # usa '' en vez de None — _parse_payment_methods('') resuelve a lista
+    # vacia igual que None, asi que no cambia como se lee este dato despues.
+    metodo_pago = " | ".join(metodos_pago) if metodos_pago else ""
     raw_respuesta = _serialize_pago_metadata(
         row.get("raw_respuesta") if row else None,
         canal_flora=canal_flora,
