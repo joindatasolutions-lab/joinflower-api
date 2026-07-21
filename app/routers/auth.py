@@ -34,6 +34,7 @@ from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
 from app.services.cache import get_cache, set_cache
+from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.schemas.auth import (
     AuthMeResponse,
     EmpresaCreateRequest,
@@ -1454,6 +1455,24 @@ def crear_empresa(
                 "plan_id": plan_id,
             },
         )
+
+        # Sin esto el formulario de pedidos arranca sin ninguna opcion de
+        # metodo de pago para la empresa nueva hasta que un admin agregue la
+        # primera a mano desde /configuracion (ver empresa 2 en produccion).
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.metodo_pago_catalogo (
+                    empresa_id, codigo, nombre, orden, activo, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, 'efectivo', 'Efectivo', 1, TRUE, NOW(), NOW()
+                )
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        )
+        sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_metodos_pago")
+
         db.commit()
 
         return EmpresaCreateResponse(
