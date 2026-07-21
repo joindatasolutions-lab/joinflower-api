@@ -26,6 +26,7 @@ from app.core.security import (
     normalize_role_name,
     is_empresa_activa,
     require_global_join_user,
+    resolve_empresa_module_candidates,
     verify_password,
 )
 from app.database import get_db
@@ -76,19 +77,6 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
 
 
 STRUCTURAL_ROLES = {"super_admin", "join_superadmin", "empresa_admin", "admin"}
-DEFAULT_MODULES = {
-    "pipeline",
-    "pedidos",
-    "produccion",
-    "domicilios",
-    "inventario",
-    "contabilidad",
-    "trazabilidad",
-    "clientes",
-    "usuarios",
-    "catalogo",
-    "reportes",
-}
 
 DEFAULT_ROLE_MODULE_POLICY = {
     "Admin": {
@@ -277,73 +265,12 @@ def _load_empresa_columns(db: Session) -> set[str]:
 
 
 def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaModuloItem]:
-    empresa_meta = load_empresa_auth_meta(db, empresa_id)
-    effective_plan_id = empresa_meta.get("planID")
-
-    module_candidates = set(DEFAULT_MODULES)
-    has_plan_rows = False
-
-    if effective_plan_id is not None:
-        try:
-            plan_rows = db.execute(
-                text("SELECT modulo, activo FROM petalops.plan_modulo WHERE plan_id = :plan_id"),
-                {"plan_id": int(effective_plan_id)},
-            ).all()
-            has_plan_rows = len(plan_rows) > 0
-            for modulo, _activo in plan_rows:
-                module_candidates.add(normalize_module_name(modulo))
-        except SQLAlchemyError:
-            plan_rows = []
-
-    try:
-        permiso_rows = db.execute(
-            text(
-                """
-                SELECT DISTINCT pm.modulo
-                FROM petalops.permiso_modulo pm
-                JOIN petalops.rol r ON r.id_rol = pm.rol_id
-                WHERE r.empresa_id = :empresa_id
-                """
-            ),
-            {"empresa_id": int(empresa_id)},
-        ).all()
-        for (modulo,) in permiso_rows:
-            module_candidates.add(normalize_module_name(modulo))
-    except SQLAlchemyError:
-        permiso_rows = []
-
     _ensure_empresa_modulo_table(db)
-    override_rows = db.execute(
-        text("SELECT modulo, activo FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
-        {"empresa_id": int(empresa_id)},
-    ).all()
-    overrides = {}
-    for modulo, activo in override_rows:
-        key = normalize_module_name(modulo)
-        if not key:
-            continue
-        overrides[key] = bool(activo)
-        module_candidates.add(key)
-
-    active_from_plan = set()
-    if effective_plan_id is not None:
-        try:
-            active_rows = db.execute(
-                text("SELECT modulo FROM petalops.plan_modulo WHERE plan_id = :plan_id AND activo = TRUE"),
-                {"plan_id": int(effective_plan_id)},
-            ).all()
-            active_from_plan = {normalize_module_name(modulo) for (modulo,) in active_rows}
-        except SQLAlchemyError:
-            active_rows = []
-
-    if not has_plan_rows:
-        active_from_plan = set(DEFAULT_MODULES)
-
-    items = []
-    for modulo in sorted({m for m in module_candidates if m}):
-        activo = overrides.get(modulo, modulo in active_from_plan)
-        items.append(EmpresaModuloItem(modulo=modulo, activo=bool(activo)))
-    return items
+    candidates = resolve_empresa_module_candidates(db, empresa_id)
+    return [
+        EmpresaModuloItem(modulo=modulo, activo=bool(activo))
+        for modulo, activo in candidates.items()
+    ]
 
 
 def _normalize_module_list(values: list[str] | None) -> list[str]:

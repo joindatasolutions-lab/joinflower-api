@@ -98,6 +98,99 @@ def normalize_module_name(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+DEFAULT_MODULES = {
+    "pipeline",
+    "pedidos",
+    "produccion",
+    "domicilios",
+    "inventario",
+    "contabilidad",
+    "trazabilidad",
+    "clientes",
+    "usuarios",
+    "catalogo",
+    "reportes",
+}
+
+
+def resolve_empresa_module_candidates(db: Session, empresa_id: int) -> dict[str, bool]:
+    """Todos los modulos que la empresa podria tener activos, con su estado
+    real (empresa_id, modulo) -> activo. Es el techo real de la empresa:
+    DEFAULT_MODULES + lo que traiga su plan + lo que cualquiera de sus roles
+    tenga en permiso_modulo (no solo un rol puntual), filtrado por los
+    overrides de petalops.empresa_modulo (o el plan si no hay override).
+
+    Usada tanto para listar los modulos configurables de una empresa (ver
+    _build_empresa_module_items en app/routers/auth.py) como para calcular
+    modulosActivosPlan al iniciar sesion (_build_auth_context abajo) — antes
+    este segundo caso solo miraba el rol puntual del usuario, asi que un
+    admin no podia darle a un usuario mas modulos de los que su rol ya
+    traia de fabrica, aunque la empresa si los tuviera activos.
+    """
+    empresa_meta = load_empresa_auth_meta(db, empresa_id)
+    effective_plan_id = empresa_meta.get("planID")
+
+    module_candidates = set(DEFAULT_MODULES)
+    has_plan_rows = False
+
+    if effective_plan_id is not None:
+        try:
+            plan_rows = db.execute(
+                text("SELECT modulo, activo FROM petalops.plan_modulo WHERE plan_id = :plan_id"),
+                {"plan_id": int(effective_plan_id)},
+            ).all()
+            has_plan_rows = len(plan_rows) > 0
+            for modulo, _activo in plan_rows:
+                module_candidates.add(normalize_module_name(modulo))
+        except SQLAlchemyError:
+            plan_rows = []
+
+    try:
+        permiso_rows = db.execute(
+            text(
+                """
+                SELECT DISTINCT pm.modulo
+                FROM petalops.permiso_modulo pm
+                JOIN petalops.rol r ON r.id_rol = pm.rol_id
+                WHERE r.empresa_id = :empresa_id
+                """
+            ),
+            {"empresa_id": int(empresa_id)},
+        ).all()
+        for (modulo,) in permiso_rows:
+            module_candidates.add(normalize_module_name(modulo))
+    except SQLAlchemyError:
+        permiso_rows = []
+
+    overrides_raw = load_empresa_module_overrides(db, empresa_id) or {}
+    overrides = {}
+    for modulo, activo in overrides_raw.items():
+        key = normalize_module_name(modulo)
+        if not key:
+            continue
+        overrides[key] = bool(activo)
+        module_candidates.add(key)
+
+    active_from_plan = set()
+    if effective_plan_id is not None:
+        try:
+            active_rows = db.execute(
+                text("SELECT modulo FROM petalops.plan_modulo WHERE plan_id = :plan_id AND activo = TRUE"),
+                {"plan_id": int(effective_plan_id)},
+            ).all()
+            active_from_plan = {normalize_module_name(modulo) for (modulo,) in active_rows}
+        except SQLAlchemyError:
+            active_rows = []
+
+    if not has_plan_rows:
+        active_from_plan = set(DEFAULT_MODULES)
+
+    return {
+        modulo: overrides.get(modulo, modulo in active_from_plan)
+        for modulo in sorted({m for m in module_candidates if m})
+    }
+
+
 def normalize_role_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
 
@@ -566,46 +659,18 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             if empresa_meta["planID"] is not None
             else _safe_int(plan_id)
         )
-        plan_modules_rows = []
-        if effective_plan_id is not None:
-            plan_table, plan_columns = _resolve_table_spec(
-                db,
-                ["plan_modulo", "planmodulo", "PlanModulo"],
-                {
-                    "plan_id": ["plan_id", "planid", "planID"],
-                    "modulo": ["modulo"],
-                    "activo": ["activo"],
-                },
-            )
-            if plan_table and plan_columns:
-                plan_modules_rows = db.execute(
-                    text(
-                        f"""
-                        SELECT {_quote_ident(plan_columns["modulo"])} AS modulo,
-                               {_quote_ident(plan_columns["activo"])} AS activo
-                        FROM petalops.{_quote_ident(plan_table)}
-                        WHERE {_quote_ident(plan_columns["plan_id"])} = :plan_id
-                        """
-                    ),
-                    {"plan_id": int(effective_plan_id)},
-                ).mappings().all()
 
-        if plan_modules_rows:
-            modulos_plan = {
-                normalize_module_name(row.get("modulo"))
-                for row in plan_modules_rows
-                if bool(row.get("activo"))
-            }
-        else:
-            modulos_plan = set(permisos.keys())
-
-        overrides = load_empresa_module_overrides(db, empresa_id)
-        if overrides is not None:
-            for modulo, activo in overrides.items():
-                if bool(activo):
-                    modulos_plan.add(modulo)
-                else:
-                    modulos_plan.discard(modulo)
+        # El techo real de modulos disponibles para la empresa (plan + lo que
+        # cualquier rol de la empresa tenga en permiso_modulo + overrides de
+        # empresa_modulo) — no solo lo del rol puntual de este usuario. Antes
+        # se usaba unicamente permisos.keys() (el rol puntual) como base, asi
+        # que un admin no podia darle a un usuario mas modulos de los que su
+        # rol trajera de fabrica aunque la empresa si los tuviera activos.
+        modulos_plan = {
+            modulo
+            for modulo, activo in resolve_empresa_module_candidates(db, empresa_id).items()
+            if activo
+        }
 
         user_overrides = load_usuario_module_overrides(db, user_id)
         if user_overrides is not None:
