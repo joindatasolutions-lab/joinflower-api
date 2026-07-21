@@ -7,6 +7,18 @@ from pydantic import BaseModel, Field
 class ProveedorCreateRequest(BaseModel):
     nombre: str = Field(min_length=2, max_length=150)
     codigoProveedor: str | None = Field(default=None, max_length=80)
+    telefono: str | None = Field(default=None, max_length=30)
+    email: str | None = Field(default=None, max_length=150)
+    direccion: str | None = Field(default=None, max_length=255)
+    activo: bool = True
+
+
+class ProveedorUpdateRequest(BaseModel):
+    nombre: str = Field(min_length=2, max_length=150)
+    codigoProveedor: str | None = Field(default=None, max_length=80)
+    telefono: str | None = Field(default=None, max_length=30)
+    email: str | None = Field(default=None, max_length=150)
+    direccion: str | None = Field(default=None, max_length=255)
     activo: bool = True
 
 
@@ -14,6 +26,9 @@ class ProveedorItem(BaseModel):
     idProveedor: int
     nombre: str
     codigoProveedor: str | None = None
+    telefono: str | None = None
+    email: str | None = None
+    direccion: str | None = None
     activo: bool
 
 

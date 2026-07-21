@@ -28,6 +28,7 @@ from app.schemas.inventario import (
     ProveedorCreateRequest,
     ProveedorItem,
     ProveedorListResponse,
+    ProveedorUpdateRequest,
     RecetaCreateRequest,
     RecetaDetalleAgregarRequest,
     RecetaDetalleActualizarRequest,
@@ -269,6 +270,9 @@ def listar_proveedores(
             idProveedor=int(row.idProveedor),
             nombre=str(row.nombreProveedor or ""),
             codigoProveedor=(str(row.codigoProveedor) if row.codigoProveedor is not None else None),
+            telefono=(str(row.telefono) if row.telefono is not None else None),
+            email=(str(row.email) if row.email is not None else None),
+            direccion=(str(row.direccion) if row.direccion is not None else None),
             activo=bool(row.activo),
         )
         for row in rows
@@ -295,6 +299,9 @@ def crear_proveedor(
                     empresa_id,
                     nombre_proveedor,
                     codigo_proveedor,
+                    telefono,
+                    email,
+                    direccion,
                     activo,
                     created_at,
                     updated_at
@@ -303,6 +310,9 @@ def crear_proveedor(
                     :empresa_id,
                     :nombre,
                     :codigo_proveedor,
+                    :telefono,
+                    :email,
+                    :direccion,
                     :activo,
                     :created_at,
                     :updated_at
@@ -314,6 +324,9 @@ def crear_proveedor(
                 "empresa_id": empresa_scope,
                 "nombre": payload.nombre.strip(),
                 "codigo_proveedor": (payload.codigoProveedor.strip() if payload.codigoProveedor else None),
+                "telefono": (payload.telefono.strip() if payload.telefono else None),
+                "email": (payload.email.strip() if payload.email else None),
+                "direccion": (payload.direccion.strip() if payload.direccion else None),
                 "activo": 1 if bool(payload.activo) else 0,
                 "created_at": now,
                 "updated_at": now,
@@ -332,6 +345,49 @@ def crear_proveedor(
         idProveedor=int(proveedor.idProveedor),
         nombre=str(proveedor.nombreProveedor),
         codigoProveedor=(str(proveedor.codigoProveedor) if proveedor.codigoProveedor is not None else None),
+        telefono=(str(proveedor.telefono) if proveedor.telefono is not None else None),
+        email=(str(proveedor.email) if proveedor.email is not None else None),
+        direccion=(str(proveedor.direccion) if proveedor.direccion is not None else None),
+        activo=bool(proveedor.activo),
+    )
+
+
+@router.put("/proveedores/{proveedor_id}", response_model=ProveedorItem, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def actualizar_proveedor(
+    proveedor_id: int,
+    payload: ProveedorUpdateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    proveedor = _get_proveedor_for_empresa(db, empresa_id, proveedor_id)
+    if not proveedor:
+        raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+
+    proveedor.nombreProveedor = payload.nombre.strip()
+    proveedor.codigoProveedor = (payload.codigoProveedor.strip() if payload.codigoProveedor else None)
+    proveedor.telefono = (payload.telefono.strip() if payload.telefono else None)
+    proveedor.email = (payload.email.strip() if payload.email else None)
+    proveedor.direccion = (payload.direccion.strip() if payload.direccion else None)
+    proveedor.activo = bool(payload.activo)
+    proveedor.updatedAt = datetime.now(timezone.utc)
+
+    try:
+        db.commit()
+        db.refresh(proveedor)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible actualizar proveedor (codigo duplicado o datos invalidos)")
+
+    return ProveedorItem(
+        idProveedor=int(proveedor.idProveedor),
+        nombre=str(proveedor.nombreProveedor),
+        codigoProveedor=(str(proveedor.codigoProveedor) if proveedor.codigoProveedor is not None else None),
+        telefono=(str(proveedor.telefono) if proveedor.telefono is not None else None),
+        email=(str(proveedor.email) if proveedor.email is not None else None),
+        direccion=(str(proveedor.direccion) if proveedor.direccion is not None else None),
         activo=bool(proveedor.activo),
     )
 
