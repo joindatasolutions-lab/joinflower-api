@@ -20,6 +20,8 @@ class APIError(Exception):
 
 def _module_from_path(path: str) -> str:
     p = (path or "").lower()
+    if p.startswith("/api/"):
+        p = p[4:]
     if p.startswith("/pedido") or p.startswith("/pedidos"):
         return "pedido"
     if p.startswith("/produccion"):

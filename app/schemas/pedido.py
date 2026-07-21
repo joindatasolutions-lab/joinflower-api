@@ -80,6 +80,14 @@ class PedidoCheckoutResponse(BaseModel):
     estado: str
 
 
+class PedidoListProducto(BaseModel):
+    productoID: int
+    codigoProducto: Optional[str] = None
+    codigoCatalogo: Optional[str] = None
+    nombreProducto: str
+    cantidad: float
+
+
 class PedidoListItem(BaseModel):
     pedidoID: int
     numeroPedido: Optional[int] = None
@@ -97,6 +105,7 @@ class PedidoListItem(BaseModel):
     fechaEntrega: Optional[datetime] = None
     horaEntrega: Optional[str] = None
     productos: List[str]
+    productosDetalle: Optional[List[PedidoListProducto]] = None
     total: float
     metodoPago: Optional[str] = None
     canalFlora: Optional[str] = None
@@ -122,6 +131,7 @@ class PedidoDetalleProducto(BaseModel):
     detalleID: Optional[int] = None
     productoID: int
     codigoProducto: Optional[str] = None
+    codigoCatalogo: Optional[str] = None
     nombreProducto: str
     cantidad: float
     observaciones: Optional[str] = None

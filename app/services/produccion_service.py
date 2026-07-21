@@ -1,9 +1,10 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import String, func, text
 from sqlalchemy.orm import Session
 
+from app.core.timezone import as_colombia_date, colombia_now_naive, colombia_today
 from app.models.entrega import Entrega
 from app.models.florista import Florista
 from app.models.pedidodetalle import PedidoDetalle
@@ -28,6 +29,153 @@ def _as_date(value: date | datetime | None) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     return value
+
+
+def _cancelar_producciones_por_pedidos_cancelados_sql(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_id: int | None = None,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    if not hasattr(db, "flush") or not hasattr(db, "execute"):
+        return 0
+
+    db.flush()
+    updated_rows = db.execute(
+        text(
+            """
+            WITH target AS (
+              SELECT pr.id_produccion
+              FROM petalops.produccion pr
+              JOIN petalops.pedido p
+                ON p.id_pedido = pr.pedido_id
+               AND p.empresa_id = pr.empresa_id
+              WHERE p.empresa_id = :empresa_id
+                AND (:pedido_id IS NULL OR p.id_pedido = :pedido_id)
+                AND p.estado_pedido_id = 6
+                AND pr.estado_produccion_id <> 5
+            ),
+            updated AS (
+              UPDATE petalops.produccion pr
+              SET estado_produccion_id = 5,
+                  updated_at = CURRENT_TIMESTAMP
+              FROM target
+              WHERE pr.id_produccion = target.id_produccion
+              RETURNING pr.id_produccion
+            )
+            SELECT id_produccion FROM updated
+            """
+        ),
+        {"pedido_id": (int(pedido_id) if pedido_id is not None else None), "empresa_id": int(empresa_id)},
+    ).fetchall()
+    updated_ids = [int(row[0]) for row in updated_rows if row[0] is not None]
+    if not updated_ids:
+        return 0
+
+    note = str(
+        motivo
+        or (
+            f"Cancelado automaticamente porque el pedido {int(pedido_id)} quedo en estado 6."
+            if pedido_id is not None
+            else "Cancelado automaticamente porque el pedido quedo en estado 6."
+        )
+    ).strip()
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.empresaID == int(empresa_id),
+            Produccion.idProduccion.in_(updated_ids),
+        )
+        .all()
+    )
+
+    for produccion in producciones:
+        anterior = int(produccion.floristaID) if produccion.floristaID is not None else None
+        if note:
+            current = str(produccion.observacionesInternas or "").strip()
+            produccion.observacionesInternas = f"{current}\n{note}" if current and note not in current else (current or note)
+        log_historial(
+            db=db,
+            produccion=produccion,
+            florista_anterior_id=anterior,
+            florista_nuevo_id=anterior,
+            motivo=note,
+            usuario=usuario,
+        )
+
+    return len(updated_ids)
+
+
+def cancelar_producciones_por_pedido_cancelado(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    return _cancelar_producciones_por_pedidos_cancelados_sql(
+        db=db,
+        pedido_id=pedido_id,
+        empresa_id=empresa_id,
+        usuario=usuario,
+        motivo=motivo,
+    )
+
+
+def sincronizar_producciones_de_pedidos_cancelados(
+    db: Session,
+    *,
+    empresa_id: int,
+    usuario: str = "system",
+    motivo: str | None = None,
+) -> int:
+    return _cancelar_producciones_por_pedidos_cancelados_sql(
+        db=db,
+        empresa_id=empresa_id,
+        usuario=usuario,
+        motivo=motivo,
+    )
+
+
+def pedido_esta_cancelado(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int | None = None,
+) -> bool:
+    params: dict[str, int | None] = {
+        "pedido_id": int(pedido_id),
+        "empresa_id": int(empresa_id) if empresa_id is not None else None,
+    }
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM petalops.pedido p
+            WHERE p.id_pedido = :pedido_id
+              AND (:empresa_id IS NULL OR p.empresa_id = :empresa_id)
+              AND p.estado_pedido_id = 6
+            LIMIT 1
+            """
+        ),
+        params,
+    ).first()
+    return row is not None
+
+
+def produccion_tiene_pedido_cancelado(db: Session, produccion: Produccion) -> bool:
+    pedido_id = getattr(produccion, "pedidoID", None)
+    if pedido_id is None:
+        return False
+
+    return pedido_esta_cancelado(
+        db,
+        pedido_id=int(pedido_id),
+        empresa_id=int(produccion.empresaID),
+    )
 
 
 def entrega_fecha_programada(entrega: Entrega | None) -> datetime | None:
@@ -171,7 +319,7 @@ def estado_florista_norm(value: str | None) -> str:
 
 
 def calcular_fecha_programada(fecha_entrega: datetime | None, dias_anticipacion: int) -> date:
-    base = fecha_entrega.date() if fecha_entrega else date.today()
+    base = as_colombia_date(fecha_entrega) if fecha_entrega else colombia_today()
     return base - timedelta(days=max(dias_anticipacion, 0))
 
 
@@ -202,12 +350,18 @@ def count_carga_florista(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.fechaProgramadaProduccion == fecha_programada,
             Produccion.estado != estados["cancelado"],
+            Pedido.estadoPedidoID != 6,
         )
     )
     if ignore_produccion_id is not None:
@@ -226,11 +380,17 @@ def count_simultaneos_en_produccion(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(func.count(Produccion.idProduccion))
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.sucursalID == sucursal_id,
             Produccion.floristaID == florista_id,
             Produccion.estado == estados["en_proceso"],
+            Pedido.estadoPedidoID != 6,
         )
     )
     if ignore_produccion_id is not None:
@@ -320,7 +480,7 @@ def log_historial(
             produccionID=int(produccion.idProduccion),
             floristaAnteriorID=florista_anterior_id,
             floristaNuevoID=florista_nuevo_id,
-            fechaCambio=datetime.now(timezone.utc),
+            fechaCambio=colombia_now_naive(),
             motivo=(motivo or "Sin motivo").strip(),
             usuarioCambio=(usuario or "system").strip() or "system",
         )
@@ -370,7 +530,7 @@ def asegurar_produccion_desde_pedido_aprobado(
         or 0
     ) + 1
 
-    auto_asignar_hoy = fecha_programada == date.today()
+    auto_asignar_hoy = fecha_programada == colombia_today()
     florista = None
     if auto_asignar_hoy:
         florista = seleccionar_florista_auto(
@@ -380,20 +540,20 @@ def asegurar_produccion_desde_pedido_aprobado(
             fecha_programada=fecha_programada,
         )
 
-    now_utc = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     produccion = Produccion(
         empresaID=int(pedido.empresaID),
         sucursalID=int(pedido.sucursalID),
         pedidoID=int(pedido.idPedido),
         floristaID=(int(florista.idFlorista) if florista else None),
         fechaProgramadaProduccion=fecha_programada,
-        fechaAsignacion=(now_utc if florista else None),
+        fechaAsignacion=(now if florista else None),
         estado=estados["pendiente"],
         prioridad="MEDIA",
         tiempoEstimadoMin=tiempo_estimado,
         ordenProduccion=siguiente_orden,
-        createdAt=now_utc,
-        updatedAt=now_utc,
+        createdAt=now,
+        updatedAt=now,
     )
     db.add(produccion)
     db.flush()
@@ -430,7 +590,7 @@ def asignar_pendientes_hoy(
     return asignar_pendientes_por_fecha(
         db=db,
         empresa_id=empresa_id,
-        fecha_objetivo=date.today(),
+        fecha_objetivo=colombia_today(),
         sucursal_id=sucursal_id,
         incluir_vencidas=False,
         usuario=usuario,
@@ -450,10 +610,16 @@ def asignar_pendientes_por_fecha(
     estados = _resolve_estado_produccion_ids(db)
     q = (
         db.query(Produccion)
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == empresa_id,
             Produccion.estado == estados["pendiente"],
             Produccion.floristaID.is_(None),
+            Pedido.estadoPedidoID != 6,
         )
         .order_by(Produccion.fechaProgramadaProduccion.asc(), Produccion.idProduccion.asc())
     )
@@ -482,10 +648,10 @@ def asignar_pendientes_por_fecha(
             sin_disponibilidad += 1
             continue
 
-        now_utc = datetime.now(timezone.utc)
+        now = colombia_now_naive()
         prod.floristaID = int(florista.idFlorista)
-        prod.fechaAsignacion = now_utc
-        prod.updatedAt = now_utc
+        prod.fechaAsignacion = now
+        prod.updatedAt = now
         log_historial(
             db=db,
             produccion=prod,
@@ -508,16 +674,22 @@ def reasignar_pendientes_por_indisponibilidad(
     usuario: str,
     motivo: str,
 ) -> dict[str, int]:
-    hoy = date.today()
+    hoy = colombia_today()
     estados = _resolve_estado_produccion_ids(db)
     pendientes = (
         db.query(Produccion)
+        .join(
+            Pedido,
+            (Pedido.idPedido == Produccion.pedidoID)
+            & (Pedido.empresaID == Produccion.empresaID),
+        )
         .filter(
             Produccion.empresaID == florista.empresaID,
             Produccion.sucursalID == florista.sucursalID,
             Produccion.floristaID == florista.idFlorista,
             Produccion.fechaProgramadaProduccion >= hoy,
             Produccion.estado == estados["pendiente"],
+            Pedido.estadoPedidoID != 6,
         )
         .all()
     )
@@ -542,8 +714,9 @@ def reasignar_pendientes_por_indisponibilidad(
 
         anterior = int(prod.floristaID) if prod.floristaID else None
         prod.floristaID = int(nuevo.idFlorista) if nuevo else None
-        prod.fechaAsignacion = datetime.now(timezone.utc) if nuevo else prod.fechaAsignacion
-        prod.updatedAt = datetime.now(timezone.utc)
+        now = colombia_now_naive()
+        prod.fechaAsignacion = now if nuevo else prod.fechaAsignacion
+        prod.updatedAt = now
         log_historial(
             db=db,
             produccion=prod,
@@ -571,7 +744,7 @@ def sincronizar_incapacidades_y_reasignar(
     sucursal_id: int | None = None,
     usuario: str = "system",
 ) -> dict[str, int]:
-    hoy = date.today()
+    hoy = colombia_today()
 
     q_base = db.query(Florista).filter(Florista.empresaID == empresa_id)
     if sucursal_id is not None:
@@ -600,7 +773,7 @@ def sincronizar_incapacidades_y_reasignar(
                 perfil.fechaInicioIncapacidad = None
                 perfil.fechaFinIncapacidad = None
             florista.activo = 1
-            florista.updatedAt = datetime.now(timezone.utc)
+            florista.updatedAt = colombia_now_naive()
             reactivados += 1
             continue
 
@@ -678,8 +851,8 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
         or 0
     )
 
-    auto_asignar_hoy = fecha_programada == date.today()
-    now_utc = datetime.now(timezone.utc)
+    auto_asignar_hoy = fecha_programada == colombia_today()
+    now = colombia_now_naive()
     created_items: list[dict[str, Any]] = []
     skipped_count = 0
     auto_asignados = 0
@@ -717,13 +890,13 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             pedidoDetalleID=detalle_id,
             floristaID=(int(florista.idFlorista) if florista else None),
             fechaProgramadaProduccion=fecha_programada,
-            fechaAsignacion=(now_utc if florista else None),
+            fechaAsignacion=(now if florista else None),
             estado=estados["pendiente"],
             prioridad="MEDIA",
             tiempoEstimadoMin=calcular_tiempo_estimado_detalle(detalle),
             ordenProduccion=siguiente_orden,
-            createdAt=now_utc,
-            updatedAt=now_utc,
+            createdAt=now,
+            updatedAt=now,
         )
         db.add(produccion)
         db.flush()

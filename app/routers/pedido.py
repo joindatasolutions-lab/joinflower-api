@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from fastapi.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import and_, or_, cast, String, func, text
 from datetime import date, datetime, timezone
@@ -14,6 +14,7 @@ from io import BytesIO
 import textwrap
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
+from app.core.timezone import as_colombia_naive_datetime, colombia_now_naive
 from app.database import get_db
 from app.models.producto import Producto
 from app.models.barrio import Barrio
@@ -33,10 +34,13 @@ from app.schemas.pedido import (
     PedidoCreate,
     PedidoListResponse,
     PedidoListItem,
+    PedidoListProducto,
     PedidoDetalleResponse,
     PedidoDetalleProducto,
     RechazarPedidoRequest,
 )
+from app.services import caja_service
+from app.services import domicilio_service
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
@@ -137,21 +141,32 @@ def _numero_pedido_valor(pedido: Pedido, estado_nombre: str | None = None) -> in
 
 
 def _fecha_pedido_str(value: datetime | None) -> str | None:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return None
     return value.date().isoformat()
 
 
 def _hora_pedido_str(value: datetime | None) -> str | None:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return None
     return value.strftime("%H:%M:%S")
 
 
 def _fecha_hora_humano(value: datetime | None) -> str:
+    value = as_colombia_naive_datetime(value)
     if not value:
         return "No especificada"
     return value.strftime("%d/%m/%Y %H:%M")
+
+
+def _fecha_filtro_pedido(value: datetime | None) -> datetime | None:
+    return as_colombia_naive_datetime(value)
+
+
+def _fecha_respuesta_pedido(value: datetime | None) -> datetime | None:
+    return as_colombia_naive_datetime(value)
 
 
 def _money_cop(value: float | int | None) -> str:
@@ -314,6 +329,65 @@ def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
     return _estado_pedido_nombre(db, estado_pedido_id) not in {"ENTREGADO", "CANCELADO", "RECHAZADO"}
 
 
+def _append_operational_cancel_note(current: str | None, note: str) -> str:
+    current_text = str(current or "").strip()
+    if not current_text:
+        return note
+    if note in current_text:
+        return current_text
+    return f"{current_text}\n{note}"
+
+
+def _sincronizar_cancelacion_operativa_desde_pedido(
+    db: Session,
+    pedido: Pedido,
+    *,
+    motivo: str | None = None,
+) -> dict[str, int]:
+    now = datetime.now(timezone.utc)
+    note = f"Cancelado desde pedidos por estado del pedido {int(pedido.idPedido)}."
+    motivo_text = str(motivo or "").strip()
+    if motivo_text:
+        note = f"{note} Motivo: {motivo_text[:300]}"
+
+    producciones_actualizadas = produccion_service.cancelar_producciones_por_pedido_cancelado(
+        db,
+        pedido_id=int(pedido.idPedido),
+        empresa_id=int(pedido.empresaID),
+        usuario="pedido.cancelacion_operativa",
+        motivo=note,
+    )
+    entregas_actualizadas = 0
+
+    estado_entrega_cancelado = domicilio_service.resolve_estado_entrega_id(
+        db,
+        domicilio_service.ESTADO_CANCELADO,
+    )
+    entregas = (
+        db.query(Entrega)
+        .filter(
+            Entrega.pedidoID == int(pedido.idPedido),
+            Entrega.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    for entrega in entregas:
+        if int(entrega.estadoEntregaID or 0) == int(estado_entrega_cancelado):
+            continue
+        entrega.estadoEntregaID = int(estado_entrega_cancelado)
+        entrega.observaciones = _append_operational_cancel_note(
+            entrega.observaciones,
+            note,
+        )
+        entrega.updatedAt = now
+        entregas_actualizadas += 1
+
+    return {
+        "produccionesCanceladas": producciones_actualizadas,
+        "entregasCanceladas": entregas_actualizadas,
+    }
+
+
 def _is_lock_not_available_error(exc: OperationalError) -> bool:
     original = getattr(exc, "orig", None)
     return getattr(original, "pgcode", None) == "55P03"
@@ -408,7 +482,9 @@ def _audit_pedido_action(
 def _scheduled_entrega_datetime(entrega: Entrega | None) -> datetime | None:
     if not entrega:
         return None
-    return entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+    return _fecha_respuesta_pedido(
+        entrega.reprogramadaPara or entrega.fechaEntregaProgramada or entrega.fechaEntrega
+    )
 
 
 def _parse_iso_date(value: str) -> datetime:
@@ -584,11 +660,70 @@ def _table_exists(db: Session, table_name: str) -> bool:
     return bool(row)
 
 
+def _column_exists(db: Session, table_name: str, column_name: str) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'petalops'
+              AND table_name = :table_name
+              AND column_name = :column_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name, "column_name": column_name},
+    ).first()
+    return bool(row)
+
+
 def _flora_phase2_ready(db: Session) -> bool:
-    return all(
-        _table_exists(db, table_name)
-        for table_name in ("metodo_pago_catalogo", "pago_metodo", "canal_venta", "pedido_canal_venta")
-    )
+    required_columns = {
+        "metodo_pago_catalogo": (
+            "id_metodo_pago",
+            "empresa_id",
+            "codigo",
+            "nombre",
+            "orden",
+            "activo",
+            "created_at",
+            "updated_at",
+        ),
+        "pago_metodo": (
+            "id_pago_metodo",
+            "empresa_id",
+            "pago_id",
+            "pedido_id",
+            "metodo_pago_id",
+            "monto",
+            "orden",
+            "created_at",
+            "updated_at",
+        ),
+        "canal_venta": (
+            "id_canal_venta",
+            "empresa_id",
+            "codigo",
+            "nombre",
+            "orden",
+            "activo",
+            "created_at",
+            "updated_at",
+        ),
+        "pedido_canal_venta": (
+            "empresa_id",
+            "pedido_id",
+            "canal_venta_id",
+            "created_at",
+            "updated_at",
+        ),
+    }
+    for table_name, columns in required_columns.items():
+        if not _table_exists(db, table_name):
+            return False
+        if not all(_column_exists(db, table_name, column_name) for column_name in columns):
+            return False
+    return True
 
 
 def _empresa_menu_ready(db: Session) -> bool:
@@ -671,6 +806,46 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     if descripcion and text.casefold() == descripcion.casefold():
         return None
     return text
+
+
+def _codigo_producto_visible(producto: Producto | None, empresa_id: int) -> str | None:
+    if not producto:
+        return None
+    codigo_producto = _codigo_producto_base(producto)
+    codigo_catalogo = _codigo_catalogo_base(producto)
+    if int(empresa_id) == 3 and codigo_catalogo:
+        return codigo_catalogo
+    return codigo_producto
+
+
+def _codigo_producto_base(producto: Producto | None) -> str | None:
+    if not producto:
+        return None
+    return str(getattr(producto, "codigoProducto", "") or "").strip() or None
+
+
+def _codigo_catalogo_base(producto: Producto | None) -> str | None:
+    if not producto:
+        return None
+    return str(getattr(producto, "codigoCatalogo", "") or "").strip() or None
+
+
+def _producto_listado_texto(producto: Producto | None, empresa_id: int) -> str:
+    nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
+    codigo = _codigo_producto_visible(producto, empresa_id)
+    return f"{codigo} - {nombre}" if codigo else nombre
+
+
+def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, empresa_id: int) -> PedidoListProducto:
+    nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
+    producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
+    return PedidoListProducto(
+        productoID=producto_id,
+        codigoProducto=_codigo_producto_visible(producto, empresa_id),
+        codigoCatalogo=_codigo_catalogo_base(producto),
+        nombreProducto=nombre,
+        cantidad=float(detalle.cantidad or 0),
+    )
 
 
 def _is_custom_producto(producto: Producto | None) -> bool:
@@ -974,9 +1149,7 @@ def _build_pedido_adjustments(
     if descuento_monto > total_con_recargo:
         descuento_monto = total_con_recargo
     total_despues_descuento = _round_money_decimal(total_con_recargo - descuento_monto)
-    if saldo_favor_monto > total_despues_descuento:
-        saldo_favor_monto = total_despues_descuento
-    total = _round_money_decimal(total_despues_descuento - saldo_favor_monto)
+    total = _round_money_decimal(total_despues_descuento + saldo_favor_monto)
 
     return {
         "baseTotal": base_total,
@@ -995,7 +1168,7 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
     pago_row = db.execute(
         text(
             """
-            SELECT metodo_pago, proveedor, referencia, raw_respuesta
+            SELECT metodo_pago, proveedor, referencia, raw_respuesta, monto
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
@@ -1179,7 +1352,7 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
     pago_rows = db.execute(
         text(
             """
-            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta
+            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta, monto
             FROM petalops.pago
             WHERE empresa_id = :empresa_id
               AND pedido_id = ANY(:pedido_ids)
@@ -1696,11 +1869,13 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
     )
 
     if not _flora_phase2_ready(db):
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
     metodos_pago = list(pago_resumen.get("metodosPago") or [])
     if len(metodos_pago) != 1:
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     metodo_row = db.execute(
@@ -1723,6 +1898,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
         },
     ).first()
     if not metodo_row:
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
         return
 
     db.execute(
@@ -1741,6 +1917,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
             "monto": monto,
         },
     )
+    caja_service.refresh_caja_por_pedido(db, pedido=pedido)
 
 
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -1823,11 +2000,14 @@ def listar_pedidos(
     if estado and not has_search:
         base = base.filter(func.upper(EstadoPedido.nombreEstado) == estado.upper())
 
-    if fecha_desde and not has_search:
-        base = base.filter(Pedido.fechaPedido >= fecha_desde)
+    fecha_desde_filter = _fecha_filtro_pedido(fecha_desde)
+    fecha_hasta_filter = _fecha_filtro_pedido(fecha_hasta)
 
-    if fecha_hasta and not has_search:
-        base = base.filter(Pedido.fechaPedido <= fecha_hasta)
+    if fecha_desde_filter and not has_search:
+        base = base.filter(Pedido.fechaPedido >= fecha_desde_filter)
+
+    if fecha_hasta_filter and not has_search:
+        base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
         base = base.filter(
@@ -1915,6 +2095,8 @@ def listar_pedidos(
                     func.coalesce(Entrega.observaciones, "").ilike(term),
                     func.coalesce(PedidoDetalle.observacionesPersonalizados, "").ilike(term),
                     func.coalesce(Producto.nombreProducto, "").ilike(term),
+                    func.coalesce(Producto.codigoProducto, "").ilike(term),
+                    func.coalesce(Producto.codigoCatalogo, "").ilike(term),
                     func.coalesce(Sucursal.telefono, "").ilike(term),
                     payment_and_channel_search,
                 )
@@ -1990,7 +2172,17 @@ def listar_pedidos(
     )
 
     detalles_rows = (
-        db.query(PedidoDetalle.pedidoID, Producto.nombreProducto)
+        db.query(PedidoDetalle, Producto)
+        .options(
+            load_only(
+                Producto.idProducto,
+                Producto.empresaID,
+                Producto.codigoProducto,
+                Producto.codigoCatalogo,
+                Producto.nombreProducto,
+                Producto.descripcion,
+            )
+        )
         .outerjoin(
             Producto,
             and_(
@@ -2003,8 +2195,15 @@ def listar_pedidos(
     )
 
     productos_por_pedido: dict[int, list[str]] = {}
-    for pedido_id, nombre_producto in detalles_rows:
-        productos_por_pedido.setdefault(int(pedido_id), []).append(str(nombre_producto or "Producto"))
+    productos_detalle_por_pedido: dict[int, list[PedidoListProducto]] = {}
+    for detalle, producto in detalles_rows:
+        pedido_id = int(detalle.pedidoID)
+        productos_por_pedido.setdefault(pedido_id, []).append(
+            _producto_listado_texto(producto, int(empresa_id))
+        )
+        productos_detalle_por_pedido.setdefault(pedido_id, []).append(
+            _producto_listado_detalle(detalle, producto, int(empresa_id))
+        )
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
 
@@ -2031,7 +2230,7 @@ def listar_pedidos(
                 ),
                 empresaID=int(pedido.empresaID),
                 sucursalID=int(pedido.sucursalID),
-                fecha=pedido.fechaPedido,
+                fecha=_fecha_respuesta_pedido(pedido.fechaPedido),
                 fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
                 horaPedido=_hora_pedido_str(pedido.fechaPedido),
                 cliente=str((cliente.nombreCompleto if cliente else None) or "Cliente"),
@@ -2042,6 +2241,7 @@ def listar_pedidos(
                 fechaEntrega=_scheduled_entrega_datetime(entrega),
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 productos=productos_por_pedido.get(pedido_id, []),
+                productosDetalle=productos_detalle_por_pedido.get(pedido_id, []),
                 total=float(pedido.totalNeto or 0),
                 metodoPago=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("metodoPago"),
                 canalFlora=(pago_resumen_page.get(pedido_id) or approval_gate["pagoResumen"]).get("canalFlora"),
@@ -2116,6 +2316,16 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         detalles = (
             db.query(PedidoDetalle, Producto)
+            .options(
+                load_only(
+                    Producto.idProducto,
+                    Producto.empresaID,
+                    Producto.codigoProducto,
+                    Producto.codigoCatalogo,
+                    Producto.nombreProducto,
+                    Producto.descripcion,
+                )
+            )
             .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
             .filter(PedidoDetalle.pedidoID == pedido.idPedido)
             .all()
@@ -2124,9 +2334,10 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         productos = [
             PedidoDetalleProducto(
                 detalleID=int(detalle.idPedidoDetalle),
-                productoID=int(producto.idProducto),
-                codigoProducto=(str(producto.codigoProducto).strip() if producto.codigoProducto else None),
-                nombreProducto=str(producto.nombreProducto or "Producto"),
+                productoID=int((producto.idProducto if producto else detalle.productoID) or 0),
+                codigoProducto=_codigo_producto_visible(producto, int(pedido.empresaID)),
+                codigoCatalogo=_codigo_catalogo_base(producto),
+                nombreProducto=str((producto.nombreProducto if producto else None) or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
                 observaciones=_sanitize_producto_observacion(
                     (
@@ -2154,7 +2365,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 if pedido.codigoPedido and _estado_pedido_tiene_numeracion_visible(estado_nombre)
                 else None
             ),
-            fecha=pedido.fechaPedido,
+            fecha=_fecha_respuesta_pedido(pedido.fechaPedido),
             fechaPedido=_fecha_pedido_str(pedido.fechaPedido),
             horaPedido=_hora_pedido_str(pedido.fechaPedido),
             estado=estado_nombre,
@@ -2550,7 +2761,7 @@ def actualizar_detalle_pedido(
                         if int(produccion.estado or 0) == int(estado_cancelado_id):
                             continue
                         produccion.fechaProgramadaProduccion = fecha_programada
-                        produccion.updatedAt = datetime.now(timezone.utc)
+                        produccion.updatedAt = colombia_now_naive()
 
         if needs_totals_recalc:
             _recalculate_pedido_financials(
@@ -2694,6 +2905,11 @@ def actualizar_detalle_pedido(
                 descuento_monto=ajustes["descuentoMonto"],
                 saldo_favor_monto=ajustes["saldoFavorMonto"],
                 saldo_favor_nota=payload.saldoFavorNota if payload.saldoFavorNota is not None else pago_resumen_actual.get("saldoFavorNota"),
+            )
+            caja_service.refresh_caja_por_pedido(
+                db,
+                pedido=pedido,
+                usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
             )
 
         _audit_pedido_action(
@@ -2918,6 +3134,7 @@ def eliminar_detalle_pedido(
         )
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
+        assert_same_empresa(auth, int(pedido.empresaID))
 
         estado_nombre = _estado_pedido_nombre(db, pedido.estadoPedidoID)
         es_admin = is_empresa_admin_context(auth) or is_super_admin_context(auth)
@@ -3079,6 +3296,13 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     detalles = (
         db.query(PedidoDetalle, Producto)
+        .options(
+            load_only(
+                Producto.idProducto,
+                Producto.empresaID,
+                Producto.nombreProducto,
+            )
+        )
         .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
         .filter(PedidoDetalle.pedidoID == pedido.idPedido)
         .all()
@@ -3181,7 +3405,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         *( [f"Recargo link ({int(round(float(pago_resumen.get('recargoLinkPct') or 0)))}%): {_money_cop(recargo_link_monto)}"] if recargo_link_monto > 0 else [] ),
         *( [f"Descuento: -{_money_cop(descuento_monto)}"] if descuento_monto > 0 else [] ),
         *( [f"Nota descuento: {descuento_nota}"] if descuento_nota else [] ),
-        *( [f"Saldo a favor: -{_money_cop(saldo_favor_monto)}"] if saldo_favor_monto > 0 else [] ),
+        *( [f"Saldo a favor: {_money_cop(saldo_favor_monto)}"] if saldo_favor_monto > 0 else [] ),
         *( [f"Nota saldo a favor: {saldo_favor_nota}"] if saldo_favor_nota else [] ),
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
@@ -3500,7 +3724,7 @@ def resumen_contabilidad(
         })
 
         for detalle, producto in detalles_por_pedido.get(pedido_id, []):
-            codigo = str(getattr(producto, "codigoProducto", "") or "").strip()
+            codigo = _codigo_producto_visible(producto, int(empresa_id)) or ""
             nombre = str(getattr(producto, "nombreProducto", None) or "Arreglo").strip() or "Arreglo"
             producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
             key = f"{producto_id or 'na'}::{codigo or 'sin-codigo'}::{nombre}"
@@ -3743,6 +3967,11 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     pedido.estadoPedidoID = estado_rechazado.idEstadoPedido
     pedido.motivoRechazo = motivo[:300]
     pedido.updatedAt = datetime.now(timezone.utc)
+    cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(
+        db,
+        pedido,
+        motivo=pedido.motivoRechazo,
+    )
     _audit_pedido_action(
         db=db,
         actor=auth,
@@ -3752,6 +3981,11 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         estado_destino_id=int(estado_rechazado.idEstadoPedido),
         extra={"motivo": pedido.motivoRechazo},
     )
+    caja_service.refresh_caja_por_pedido(
+        db,
+        pedido=pedido,
+        usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
+    )
     db.commit()
 
     return {
@@ -3759,6 +3993,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         "pedidoID": pedido_id,
         "estado": str(estado_rechazado.nombreEstado),
         "motivo": pedido.motivoRechazo,
+        "cancelacionOperativa": cancelacion_operativa,
     }
 
 
@@ -3822,14 +4057,14 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             telefono=data.cliente.telefono,
             email=data.cliente.email,
             activo=1,
-            createdAt=datetime.now(timezone.utc),
+            createdAt=colombia_now_naive(),
         )
 
         db.add(cliente)
         db.flush()  # obtiene idCliente sin commit
 
         # 4️⃣ Crear pedido
-        fecha_pedido = datetime.now(timezone.utc)
+        fecha_pedido = colombia_now_naive()
 
         pedido = Pedido(
             empresaID=data.empresaId,
@@ -3860,7 +4095,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                     barrio_nombre=None,
                 )
             ).quantize(Decimal("0.01")),
-            createdAt=datetime.now(timezone.utc),
+            createdAt=colombia_now_naive(),
         )
 
         db.add(pedido)
@@ -3969,6 +4204,8 @@ def cambiar_estado(
         raise HTTPException(status_code=400, detail="Estado destino inválido o inactivo")
 
     produccion = None
+    cancelacion_operativa = None
+    producciones_estado_5 = 0
     if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
         if int(pedido.numeroPedido or 0) <= 0 or not str(pedido.codigoPedido or "").strip():
             numero_pedido, codigo_pedido = generar_numeracion_pedido(
@@ -4005,7 +4242,20 @@ def cambiar_estado(
                 "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
             },
         )
+    elif str(estado_destino.nombreEstado or "").strip().upper() in {"CANCELADO", "RECHAZADO"}:
+        cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(
+            db,
+            pedido,
+            motivo=pedido.motivoRechazo,
+        )
+        producciones_estado_5 = int(cancelacion_operativa.get("produccionesCanceladas", 0))
 
     db.commit()
 
-    return {"status": "ok", "nuevoEstado": nuevo_estado_id, "produccion": produccion}
+    return {
+        "status": "ok",
+        "nuevoEstado": nuevo_estado_id,
+        "produccion": produccion,
+        "produccionesEstado5": int(producciones_estado_5),
+        "cancelacionOperativa": cancelacion_operativa,
+    }

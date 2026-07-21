@@ -8,13 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      RUN_INTEGRATION_TESTS_SECRET: ${{ secrets.RUN_INTEGRATION_TESTS }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -27,7 +29,7 @@ jobs:
         run: pytest -q
 
       - name: Run integration guards
-        if: ${{ secrets.RUN_INTEGRATION_TESTS == '1' }}
+        if: ${{ env.RUN_INTEGRATION_TESTS_SECRET == '1' }}
         env:
           RUN_INTEGRATION_TESTS: "1"
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

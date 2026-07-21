@@ -19,6 +19,7 @@ from app.routers import barrios
 from app.routers import catalogo
 from app.routers import cliente
 from app.routers import configuracion
+from app.routers import contabilidad
 from app.routers import domicilios
 from app.routers import entregas
 from app.routers import inventario
@@ -33,9 +34,11 @@ ALLOWED_ORIGINS = [
     "http://localhost:5500",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://127.0.0.1:5175",
     "http://127.0.0.1:3000",
     "http://localhost:3000",
     "https://petalops.joindata.com.co",
+    "https://domiapp.joindata.com.co",
 ]
 
 extra_origins = [
@@ -89,10 +92,12 @@ app.include_router(catalogo.router)
 app.include_router(pedido.router)
 app.include_router(cliente.router)
 app.include_router(configuracion.router)
+app.include_router(contabilidad.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
 app.include_router(auth.router)
 app.include_router(domicilios.router)
+app.include_router(domicilios.router, prefix="/api")
 app.include_router(inventario.router)
 app.include_router(entregas.router)
 app.include_router(pipeline.router)
@@ -137,5 +142,5 @@ def db_connection_check():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8001"))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port)

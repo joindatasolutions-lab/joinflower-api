@@ -360,6 +360,25 @@ def _normalize_module_list(values: list[str] | None) -> list[str]:
     return normalized
 
 
+def _validate_user_modules(db: Session, empresa_id: int, values: list[str] | None) -> list[str]:
+    requested_modules = _normalize_module_list(values)
+    available_modules = {
+        item.modulo
+        for item in _build_empresa_module_items(db, int(empresa_id))
+        if bool(item.activo)
+    }
+    invalid_modules = sorted(set(requested_modules) - available_modules)
+    if invalid_modules:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Modulos invalidos o no disponibles para la empresa",
+                "modulosInvalidos": invalid_modules,
+            },
+        )
+    return requested_modules
+
+
 def _user_email_or_default(raw_email: str | None, login: str, user_id: int | None = None) -> str:
     email = str(raw_email or "").strip().lower()
     if email:
@@ -862,13 +881,7 @@ def crear_usuario(
         if not sucursal:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
 
-        available_modules = {
-            item.modulo
-            for item in _build_empresa_module_items(db, target_empresa_id)
-            if bool(item.activo)
-        }
-        requested_user_modules = _normalize_module_list(payload.modulosAcceso)
-        selected_user_modules = [module for module in requested_user_modules if module in available_modules]
+        selected_user_modules = _validate_user_modules(db, target_empresa_id, payload.modulosAcceso)
 
         usuario = Usuario(
             empresaID=target_empresa_id,
@@ -1055,13 +1068,7 @@ def actualizar_usuario(
         if not sucursal:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
 
-        available_modules = {
-            item.modulo
-            for item in _build_empresa_module_items(db, target_empresa_id)
-            if bool(item.activo)
-        }
-        requested_user_modules = _normalize_module_list(payload.modulosAcceso)
-        selected_user_modules = [module for module in requested_user_modules if module in available_modules]
+        selected_user_modules = _validate_user_modules(db, target_empresa_id, payload.modulosAcceso)
 
         usuario.nombre = payload.nombre.strip()
         usuario.login = login
@@ -1262,6 +1269,7 @@ def eliminar_usuario(
         )
 
 
+@router.get("/usuarios/tipos", response_model=RoleListResponse)
 @router.get("/usuarios/roles", response_model=RoleListResponse)
 def listar_roles(
     empresa_id: int = Query(..., alias="empresaID"),

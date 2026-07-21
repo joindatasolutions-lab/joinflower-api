@@ -27,13 +27,18 @@ class DomicilioAdminItem(BaseModel):
     idEntrega: int
     produccionID: int | None = None
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: str
     codigoPedido: str | None = None
     cliente: str
     destinatario: str | None = None
     telefonoDestino: str | None = None
     direccion: str | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
     barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
     observacion: str | None = None
     horaEntrega: str | None = None
     fechaEntregaProgramada: datetime | None = None
@@ -57,12 +62,24 @@ class DomicilioAdminListResponse(BaseModel):
 class DomicilioCourierCard(BaseModel):
     idEntrega: int
     pedidoID: int
-    numeroPedido: int
+    numeroPedido: str
     codigoPedido: str | None = None
+    arreglo: str | None = None
+    nombreArreglo: str | None = None
+    producto: str | None = None
+    productos: list[str] = Field(default_factory=list)
+    imageUrl: str | None = None
+    imagenUrl: str | None = None
+    imagenProductoUrl: str | None = None
     cliente: str | None = None
     destinatario: str | None = None
     direccion: str | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
     barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
     telefonoDestino: str | None = None
     mensaje: str | None = None
     observacion: str | None = None
@@ -80,6 +97,56 @@ class DomicilioCourierCard(BaseModel):
 class DomicilioCourierListResponse(BaseModel):
     items: list[DomicilioCourierCard]
     total: int
+
+
+class DomicilioContadoresResponse(BaseModel):
+    asignados: int
+    enCamino: int
+    entregados: int
+    disponibles: int
+
+
+class PedidoDisponibleItem(BaseModel):
+    id: int
+    idEntrega: int | None = None
+    pedidoID: int | None = None
+    produccionID: int | None = None
+    numeroPedido: str
+    codigoPedido: str | None = None
+    arreglo: str | None = None
+    nombreArreglo: str | None = None
+    producto: str | None = None
+    productos: list[str] = Field(default_factory=list)
+    imageUrl: str | None = None
+    imagenUrl: str | None = None
+    imagenProductoUrl: str | None = None
+    cliente: str
+    destinatario: str | None = None
+    telefonoDestino: str | None = None
+    telefonoDestinatario: str | None = None
+    celularDestinatario: str | None = None
+    direccion: str | None = None
+    mensaje: str | None = None
+    observacion: str | None = None
+    horaEntrega: str | None = None
+    fechaEntregaProgramada: datetime | None = None
+    barrioId: int | None = None
+    nombreBarrio: str | None = None
+    barrio: str | None = None
+    zonaId: int | None = None
+    nombreZona: str | None = None
+    zona: str | None = None
+    estado: str
+    prioridad: str | None = None
+    latitudDestino: float | None = None
+    longitudDestino: float | None = None
+
+
+class PedidoAsignadoResponse(PedidoDisponibleItem):
+    idEntrega: int
+    domiciliarioID: int
+    fechaAsignacion: datetime
+    contadores: DomicilioContadoresResponse | None = None
 
 
 class AsignarDomiciliarioRequest(BaseModel):
@@ -122,3 +189,20 @@ class DomicilioActionResponse(BaseModel):
 class FiltroEstadoResponse(BaseModel):
     filtro: str
     fecha: date
+
+
+class OrderItemDetail(BaseModel):
+    """Detalle de un item del pedido con información del producto"""
+    productId: int
+    name: str
+    qty: int
+    imageUrl: str | None = None
+
+
+class DomicilioDetailResponse(BaseModel):
+    """Respuesta GET /domicilios/:id con detalles del pedido"""
+    idEntrega: int
+    numeroPedido: str
+    cliente: str
+    items: list[OrderItemDetail]
+    customerMessage: str | None = None  # Solo para usuarios autorizados

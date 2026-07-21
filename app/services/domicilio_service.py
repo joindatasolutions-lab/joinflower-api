@@ -42,6 +42,14 @@ ESTADO_ID_FALLBACK = {
     ESTADO_CANCELADO: 6,
 }
 ESTADO_FROM_ID_FALLBACK = {v: k for k, v in ESTADO_ID_FALLBACK.items()}
+STORE_PICKUP_TIPO_ENTREGA_VALUES = {
+    "recoger",
+    "tienda",
+    "recogida",
+    "recogida_en_tienda",
+    "recoger_en_tienda",
+    "retiro_en_tienda",
+}
 
 
 def estado_norm(value: str | int | None) -> str:
@@ -78,11 +86,26 @@ def estado_id(value: str | int | None) -> int:
     return ESTADO_ID_FALLBACK.get(normalized, ESTADO_ID_FALLBACK[ESTADO_PENDIENTE])
 
 
+def is_store_pickup_tipo_entrega(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in STORE_PICKUP_TIPO_ENTREGA_VALUES
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = int(os.getenv("DOMICILIO_MAX_TAREAS_ACTIVAS", "2"))
+DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = 0
+
+
+def domicilio_max_tareas_activas() -> int:
+    raw = os.getenv("DOMICILIO_MAX_TAREAS_ACTIVAS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS
 
 
 def can_transition(current: str, target: str) -> bool:
@@ -211,7 +234,7 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND usuario_id = :user_id "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "user_id": int(user_id)},
@@ -225,7 +248,7 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND user_id = :user_id "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "user_id": int(user_id)},
@@ -237,13 +260,19 @@ def _find_domiciliario_id_for_usuario_id(db, empresa_id: int, user_id: int) -> i
 
 
 def _find_domiciliario_id_for_login_or_email(db, empresa_id: int, login: str | None, email: str | None) -> int | None:
+    login_column = None
     if login and _empleado_has_column(db, "login"):
+        login_column = "login"
+    elif login and _empleado_has_column(db, "usuario"):
+        login_column = "usuario"
+
+    if login and login_column:
         row = db.execute(
             text(
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
-                "AND lower(login) = lower(:login) "
-                "AND lower(cargo) = 'domiciliario' "
+                f"AND lower({login_column}) = lower(:login) "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "login": login},
@@ -257,7 +286,7 @@ def _find_domiciliario_id_for_login_or_email(db, empresa_id: int, login: str | N
                 "SELECT id_empleado FROM petalops.empleado "
                 "WHERE empresa_id = :empresa_id "
                 "AND lower(email) = lower(:email) "
-                "AND lower(cargo) = 'domiciliario' "
+                "AND lower(trim(cargo)) = 'domiciliario' "
                 "LIMIT 1"
             ),
             {"empresa_id": int(empresa_id), "email": email},
@@ -298,7 +327,9 @@ def count_entregas_activas(db, empresa_id: int, sucursal_id: int | None, domicil
 
 
 def assert_domiciliario_capacity(db, empresa_id: int, sucursal_id: int | None, domiciliario_id: int, ignore_entrega_id: int | None = None, limit: int | None = None):
-    limit = int(limit or DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS)
+    limit = domicilio_max_tareas_activas() if limit is None else int(limit)
+    if limit <= 0:
+        return
     total = count_entregas_activas(db, empresa_id, sucursal_id, domiciliario_id, ignore_entrega_id=ignore_entrega_id)
     if total >= limit:
         raise HTTPException(

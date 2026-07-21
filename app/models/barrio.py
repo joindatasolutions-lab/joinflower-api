@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, Numeric, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, BigInteger, String, Numeric, DateTime, ForeignKey
 
 from app.database import Base
 
@@ -13,6 +13,6 @@ class Barrio(Base):
     zonaID = Column("zona_id", BigInteger, nullable=False)
     nombreBarrio = Column("nombre_barrio", String(150), nullable=False)
     costoDomicilio = Column("costo_domicilio", Numeric(12, 2), nullable=False)
-    activo = Column("activo", Boolean, nullable=False)
+    activo = Column("activo", BigInteger, nullable=False)
     createdAt = Column("created_at", DateTime)
     updatedAt = Column("updated_at", DateTime)

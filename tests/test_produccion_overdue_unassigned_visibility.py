@@ -14,6 +14,9 @@ class _ScalarQuery:
     def scalar(self):
         return self.value
 
+    def count(self):
+        return self.value
+
 
 class _FakeDb:
     def query(self, *args, **kwargs):
@@ -55,6 +58,7 @@ def test_listar_produccion_allows_overdue_unassigned_items_for_florista(monkeypa
         sucursal_id=3,
         fecha=date(2026, 5, 13),
         estado=None,
+        todas_fechas=False,
         incluir_cancelado=False,
         auto_asignar_pendientes_hoy=False,
         db=db,
@@ -98,6 +102,7 @@ def test_listar_produccion_keeps_exact_date_filter_for_admin(monkeypatch):
         sucursal_id=3,
         fecha=date(2026, 5, 13),
         estado=None,
+        todas_fechas=False,
         incluir_cancelado=False,
         auto_asignar_pendientes_hoy=False,
         db=db,

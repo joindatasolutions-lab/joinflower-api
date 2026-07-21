@@ -3,6 +3,7 @@ from .pedidodetalle import PedidoDetalle
 from .producto import Producto
 from .cliente import Cliente
 from .barrio import Barrio
+from .zona import Zona
 from .categoria import Categoria
 from .entrega import Entrega
 from .estadoentrega import EstadoEntrega

@@ -23,10 +23,14 @@ CREATE TABLE IF NOT EXISTS petalops.pago_metodo (
     pago_id BIGINT NOT NULL REFERENCES petalops.pago(id_pago) ON DELETE CASCADE,
     pedido_id BIGINT NOT NULL REFERENCES petalops.pedido(id_pedido) ON DELETE CASCADE,
     metodo_pago_id BIGINT NOT NULL REFERENCES petalops.metodo_pago_catalogo(id_metodo_pago),
+    monto NUMERIC NOT NULL DEFAULT 0,
     orden INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NULL
 );
+
+ALTER TABLE petalops.pago_metodo
+    ADD COLUMN IF NOT EXISTS monto NUMERIC NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_pago_metodo_empresa_pedido_metodo
     ON petalops.pago_metodo (empresa_id, pedido_id, metodo_pago_id);
