@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -77,22 +78,71 @@ def _hora_text(dt: datetime | None) -> str | None:
     return dt.strftime("%H:%M")
 
 
-def _late_deadline(target: datetime | None) -> datetime | None:
+_RANGO_HORA_TIME_TOKEN_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE)
+
+
+def _parse_rango_hora_deadline_time(rango_hora: str | None) -> time | None:
+    """Interpreta entrega.rangoHora (texto libre) para sacar la hora limite
+    real de entrega. Dos formatos existen hoy en datos reales:
+      - Un rango con paréntesis, ej. "Tarde (2pm - 6pm)" o "Mañana (8am -
+        12pm)" -> usa el FINAL del rango (6pm / 12pm) como limite.
+      - Una hora puntual en formato 24h, ej. "14:00" (la que guarda el
+        input type="time" del formulario) -> esa misma hora es el limite.
+    Devuelve None si no se pudo interpretar nada util; el llamador cae de
+    vuelta al fin del dia en ese caso."""
+    raw = str(rango_hora or "").strip()
+    if not raw:
+        return None
+
+    bracket_match = re.search(r"\(([^)]+)\)", raw)
+    inner = bracket_match.group(1) if bracket_match else raw
+    ultimo_tramo = inner.split("-")[-1].strip()
+
+    match = _RANGO_HORA_TIME_TOKEN_RE.search(ultimo_tramo)
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    meridiano = (match.group(3) or "").lower()
+
+    # "00:00" sin am/pm explicito es el mismo valor por defecto que ya trae
+    # la columna de fecha cuando no se eligio hora real (ver _hora_text) —
+    # no es una entrega de medianoche de verdad, asi que se trata como dato
+    # no interpretable en vez de fijar el limite a la medianoche del mismo
+    # dia (eso volveria a marcar el pedido como atrasado apenas empieza).
+    if hour == 0 and minute == 0 and not meridiano:
+        return None
+
+    if meridiano:
+        hour = hour % 12
+        if meridiano == "pm":
+            hour += 12
+
+    if hour > 23 or minute > 59:
+        return None
+    return time(hour, minute)
+
+
+def _late_deadline(target: datetime | None, rango_hora: str | None = None) -> datetime | None:
     """Fecha limite efectiva para considerar un pedido atrasado. Cuando solo
-    se guardo la fecha (hora en 00:00, ver _hora_text) se le da el beneficio
-    de la duda hasta el final de ese dia — de lo contrario CUALQUIER pedido
+    se guardo la fecha (hora en 00:00, ver _hora_text), se usa el final real
+    de la ventana de entrega si rango_hora trae algo interpretable (ver
+    _parse_rango_hora_deadline_time); si no, se le da el beneficio de la
+    duda hasta el final de ese dia — de lo contrario CUALQUIER pedido
     programado para "hoy" aparece atrasado desde el instante en que se crea,
     porque medianoche ya quedo en el pasado apenas empieza el dia."""
     target = as_colombia_naive_datetime(target)
     if not target:
         return None
     if target.time() == time.min:
-        return datetime.combine(target.date(), time.max)
+        deadline_time = _parse_rango_hora_deadline_time(rango_hora) or time.max
+        return datetime.combine(target.date(), deadline_time)
     return target
 
 
-def _minutes_left(target: datetime | None) -> int | None:
-    deadline = _late_deadline(target)
+def _minutes_left(target: datetime | None, rango_hora: str | None = None) -> int | None:
+    deadline = _late_deadline(target, rango_hora)
     if not deadline:
         return None
     now = colombia_now_naive()
@@ -304,7 +354,10 @@ def listar_pipeline_pedidos(
                 if entrega and entrega.reprogramadaPara
                 else (entrega.fechaEntregaProgramada if entrega else None)
             )
-            late_deadline = _late_deadline(fecha_entrega)
+            rango_hora_valor = (
+                str(entrega.rangoHora).strip() if entrega and entrega.rangoHora and str(entrega.rangoHora).strip() else None
+            )
+            late_deadline = _late_deadline(fecha_entrega, rango_hora_valor)
             if solo_atrasados and (late_deadline is None or late_deadline >= colombia_now_naive()):
                 continue
 
@@ -330,7 +383,7 @@ def listar_pipeline_pedidos(
                 telefono=str((cliente.telefonoCompleto or cliente.telefono or "") or ""),
                 fecha_entrega=fecha_entrega,
                 hora_entrega=_hora_text(fecha_entrega),
-                rango_hora=(str(entrega.rangoHora).strip() if entrega and entrega.rangoHora and str(entrega.rangoHora).strip() else None),
+                rango_hora=rango_hora_valor,
                 direccion=(str(entrega.direccion) if entrega and entrega.direccion else None),
                 total=float(pedido.totalNeto or 0),
                 estado=stage,
@@ -351,7 +404,7 @@ def listar_pipeline_pedidos(
                 prioridad=prioridad,
                 urgente=urgente,
                 tiempo_estimado_produccion=(int(produccion.tiempoEstimadoMin) if produccion and produccion.tiempoEstimadoMin is not None else None),
-                tiempo_restante_entrega=_minutes_left(fecha_entrega),
+                tiempo_restante_entrega=_minutes_left(fecha_entrega, rango_hora_valor),
                 progreso_porcentaje=STAGE_PROGRESS[stage],
                 resumen_productos=resumen,
                 imagen_url=(
