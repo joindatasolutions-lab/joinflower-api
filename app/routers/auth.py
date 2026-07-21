@@ -88,7 +88,6 @@ DEFAULT_ROLE_MODULE_POLICY = {
         "usuarios": (1, 1, 1, 1),
         "inventario": (1, 1, 1, 1),
         "contabilidad": (1, 1, 1, 1),
-        "trazabilidad": (1, 1, 1, 1),
         "clientes": (1, 1, 1, 1),
     },
     "Florista": {

@@ -105,7 +105,6 @@ DEFAULT_MODULES = {
     "domicilios",
     "inventario",
     "contabilidad",
-    "trazabilidad",
     "clientes",
     "usuarios",
     "catalogo",
@@ -507,7 +506,6 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             "usuarios",
             "inventario",
             "contabilidad",
-            "trazabilidad",
             "reportes",
             "clientes",
         }
@@ -574,7 +572,6 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
                 "usuarios",
                 "inventario",
                 "contabilidad",
-                "trazabilidad",
                 "reportes",
                 "clientes",
             }
