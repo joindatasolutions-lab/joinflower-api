@@ -1119,8 +1119,33 @@ def _mark_factura_impresa(
         ),
         {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
     ).mappings().first()
+
     if not row:
-        return
+        # Empresas sin flujo de pago Flora (sin metodo_pago/canal capturados
+        # al guardar el pedido) nunca tienen fila en petalops.pago, asi que
+        # antes esto no hacia nada y el aviso de "factura pendiente" quedaba
+        # pegado para siempre. Se crea una fila minima solo para poder
+        # persistir la marca de "impresa" — no representa un pago real.
+        # metodo_pago='' (no NULL, la columna es NOT NULL) a proposito: una
+        # cadena vacia la ignoran _parse_payment_methods/_load_pago_resumen*,
+        # asi que esta fila placeholder no aparece como si fuera un metodo de
+        # pago real capturado.
+        id_pago = db.execute(
+            text(
+                """
+                INSERT INTO petalops.pago (
+                    empresa_id, pedido_id, proveedor, moneda, monto,
+                    metodo_pago, raw_respuesta, fecha_pago, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, :pedido_id, 'manual', 'COP', 0,
+                    '', NULL, NOW(), NOW(), NOW()
+                )
+                RETURNING id_pago
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+        ).scalar()
+        row = {"id_pago": id_pago, "raw_respuesta": None}
 
     raw_respuesta = _serialize_pago_metadata(
         row.get("raw_respuesta"),
@@ -1265,9 +1290,21 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
     return result
 
 
-def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
-    rules = _tenant_order_rules(db, int(empresa_id))
-    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
+def _approval_gate_summary(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    rules: dict | None = None,
+    pago_resumen: dict | None = None,
+) -> dict:
+    # rules/pago_resumen pueden precalcularse (una sola vez / en lote) cuando se
+    # evalua esto para muchos pedidos a la vez (ej. listar_pedidos), para evitar
+    # repetir las mismas consultas por cada fila.
+    if rules is None:
+        rules = _tenant_order_rules(db, int(empresa_id))
+    if pago_resumen is None:
+        pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
 
     missing = []
     if rules["require_payment_before_approval"] and not pago_resumen["metodosPago"]:
@@ -1929,6 +1966,7 @@ def listar_pedidos(
         )
 
     pago_resumen_page = {int(pedido_id): pago_resumen_map.get(int(pedido_id), {}) for pedido_id in pedido_ids}
+    tenant_rules = _tenant_order_rules(db, int(empresa_id))
 
     pedido_rows = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
@@ -1978,6 +2016,8 @@ def listar_pedidos(
             db,
             pedido_id=pedido_id,
             empresa_id=int(pedido.empresaID),
+            rules=tenant_rules,
+            pago_resumen=pago_resumen_page.get(pedido_id) or {},
         )
 
         items.append(
@@ -3333,6 +3373,19 @@ def resumen_contabilidad(
     for detalle, producto in detalle_rows:
         detalles_por_pedido.setdefault(int(detalle.pedidoID), []).append((detalle, producto))
 
+    entrega_obs_rows = (
+        db.query(Entrega.pedidoID, Entrega.observacionGeneral, Entrega.observaciones)
+        .filter(Entrega.empresaID == int(empresa_id), Entrega.pedidoID.in_(pedido_ids))
+        .all()
+    )
+    entrega_obs_por_pedido: dict[int, list[str]] = {}
+    for entrega_pedido_id, observacion_general, observaciones in entrega_obs_rows:
+        bucket = entrega_obs_por_pedido.setdefault(int(entrega_pedido_id), [])
+        for value in (observacion_general, observaciones):
+            cleaned = str(value or "").strip()
+            if cleaned:
+                bucket.append(cleaned)
+
     pagos_por_pedido = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
     _ensure_pedido_auditoria_table(db)
     auditoria_rows = db.execute(
@@ -3425,16 +3478,7 @@ def resumen_contabilidad(
             observacion_detalle = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
             if observacion_detalle:
                 observaciones_pedido.append(observacion_detalle)
-        entrega_obs_rows = (
-            db.query(Entrega.observacionGeneral, Entrega.observaciones)
-            .filter(Entrega.empresaID == int(empresa_id), Entrega.pedidoID == pedido_id)
-            .all()
-        )
-        for observacion_general, observaciones in entrega_obs_rows:
-            for value in (observacion_general, observaciones):
-                cleaned = str(value or "").strip()
-                if cleaned:
-                    observaciones_pedido.append(cleaned)
+        observaciones_pedido.extend(entrega_obs_por_pedido.get(pedido_id, []))
 
         detalles_contables.append({
             "pedidoID": pedido_id,

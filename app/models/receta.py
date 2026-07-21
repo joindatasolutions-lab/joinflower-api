@@ -11,6 +11,8 @@ class Receta(Base):
     empresaID = Column("empresa_id", BigInteger, ForeignKey("petalops.empresa.id_empresa"), nullable=False, index=True)
     nombre = Column("nombre", String(200), nullable=False)
     descripcion = Column("descripcion", Text, nullable=True)
+    productoID = Column("producto_id", BigInteger, ForeignKey("petalops.producto.id_producto"), nullable=True)
+    capacidadManual = Column("capacidad_manual", Numeric(12, 2), nullable=True)
     activo = Column("activo", Boolean, nullable=False, default=True)
     createdAt = Column("created_at", DateTime, nullable=False)
     updatedAt = Column("updated_at", DateTime, nullable=True)

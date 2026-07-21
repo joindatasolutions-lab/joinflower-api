@@ -128,11 +128,21 @@ class MovimientoInventarioListResponse(BaseModel):
 class RecetaCreateRequest(BaseModel):
     nombre: str = Field(min_length=2, max_length=200)
     descripcion: str | None = Field(default=None)
+    productoID: int | None = Field(default=None)
+    # Si no se manda productoID, y se manda precioVenta, se crea un producto
+    # nuevo en el catalogo (con este nombre/descripcion) y se vincula.
+    precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
+    imagenUrl: str | None = Field(default=None)
+    capacidadManual: Decimal | None = Field(default=None, ge=Decimal("0"))
 
 
 class RecetaUpdateRequest(BaseModel):
     nombre: str = Field(min_length=2, max_length=200)
     descripcion: str | None = Field(default=None)
+    productoID: int | None = Field(default=None)
+    precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
+    imagenUrl: str | None = Field(default=None)
+    capacidadManual: Decimal | None = Field(default=None, ge=Decimal("0"))
     activo: bool = True
 
 
@@ -150,6 +160,13 @@ class RecetaItem(BaseModel):
     empresaID: int
     nombre: str
     descripcion: str | None = None
+    productoID: int | None = None
+    codigoProducto: str | None = None
+    precioVenta: Decimal | None = None
+    imagenUrl: str | None = None
+    capacidadManual: Decimal | None = None
+    vendidosHoy: Decimal = Decimal("0")
+    reservados: Decimal = Decimal("0")
     activo: bool
     detalles: list[RecetaDetalleItem] = []
 
@@ -159,6 +176,13 @@ class RecetaListItem(BaseModel):
     empresaID: int
     nombre: str
     descripcion: str | None = None
+    productoID: int | None = None
+    codigoProducto: str | None = None
+    precioVenta: Decimal | None = None
+    imagenUrl: str | None = None
+    capacidadManual: Decimal | None = None
+    vendidosHoy: Decimal = Decimal("0")
+    reservados: Decimal = Decimal("0")
     activo: bool
     totalIngredientes: int = 0
 

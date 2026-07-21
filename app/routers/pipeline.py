@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, or_, text
@@ -66,16 +66,35 @@ def _numero_pedido(pedido: Pedido) -> int:
 
 
 def _hora_text(dt: datetime | None) -> str | None:
-    if not dt:
+    # fechaEntregaProgramada/reprogramadaPara solo guardan la FECHA (siempre
+    # quedan en 00:00) — la hora real, cuando existe, vive aparte en
+    # entrega.rangoHora (texto libre tipo "Tarde (2pm-6pm)"). Mostrar "00:00"
+    # aca seria mostrar un dato inventado, asi que no se devuelve nada para
+    # esos casos; el llamador debe usar rango_hora en su lugar.
+    if not dt or dt.time() == time.min:
         return None
     return dt.strftime("%H:%M")
 
 
-def _minutes_left(target: datetime | None) -> int | None:
+def _late_deadline(target: datetime | None) -> datetime | None:
+    """Fecha limite efectiva para considerar un pedido atrasado. Cuando solo
+    se guardo la fecha (hora en 00:00, ver _hora_text) se le da el beneficio
+    de la duda hasta el final de ese dia — de lo contrario CUALQUIER pedido
+    programado para "hoy" aparece atrasado desde el instante en que se crea,
+    porque medianoche ya quedo en el pasado apenas empieza el dia."""
     if not target:
         return None
+    if target.time() == time.min:
+        return datetime.combine(target.date(), time.max)
+    return target
+
+
+def _minutes_left(target: datetime | None) -> int | None:
+    deadline = _late_deadline(target)
+    if not deadline:
+        return None
     now = datetime.now()
-    delta = target - now
+    delta = deadline - now
     return int(delta.total_seconds() // 60)
 
 
@@ -278,7 +297,8 @@ def listar_pipeline_pedidos(
                 if entrega and entrega.reprogramadaPara
                 else (entrega.fechaEntregaProgramada if entrega else None)
             )
-            if solo_atrasados and (fecha_entrega is None or fecha_entrega >= datetime.now()):
+            late_deadline = _late_deadline(fecha_entrega)
+            if solo_atrasados and (late_deadline is None or late_deadline >= datetime.now()):
                 continue
 
             prioridad = (str(produccion.prioridad or "MEDIA").upper() if produccion else "MEDIA")
@@ -293,6 +313,7 @@ def listar_pipeline_pedidos(
                 telefono=str((cliente.telefonoCompleto or cliente.telefono or "") or ""),
                 fecha_entrega=fecha_entrega,
                 hora_entrega=_hora_text(fecha_entrega),
+                rango_hora=(str(entrega.rangoHora).strip() if entrega and entrega.rangoHora and str(entrega.rangoHora).strip() else None),
                 direccion=(str(entrega.direccion) if entrega and entrega.direccion else None),
                 total=float(pedido.totalNeto or 0),
                 estado=stage,

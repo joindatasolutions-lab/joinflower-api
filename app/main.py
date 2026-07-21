@@ -18,6 +18,7 @@ from app.routers import auth
 from app.routers import barrios
 from app.routers import catalogo
 from app.routers import cliente
+from app.routers import configuracion
 from app.routers import domicilios
 from app.routers import entregas
 from app.routers import inventario
@@ -87,6 +88,7 @@ app.add_middleware(
 app.include_router(catalogo.router)
 app.include_router(pedido.router)
 app.include_router(cliente.router)
+app.include_router(configuracion.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
 app.include_router(auth.router)

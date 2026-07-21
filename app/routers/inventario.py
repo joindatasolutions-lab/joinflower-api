@@ -1,3 +1,5 @@
+import re
+import secrets
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -842,6 +844,162 @@ def listar_movimientos_inventario(
 # Arreglos / Recetas
 # ---------------------------------------------------------------------------
 
+def _producto_precio_imagen(db: Session, producto_id: int | None, sucursal_id: int | None) -> dict:
+    """Precio/imagen del producto vinculado a una receta, para la sucursal
+    actual (petalops.producto_sucursal). No depende del ORM porque el modelo
+    Producto declara una FK a categoria desactualizada frente a la BD real."""
+    if not producto_id:
+        return {"codigoProducto": None, "precioVenta": None, "imagenUrl": None}
+    row = db.execute(
+        text(
+            """
+            SELECT p.codigo_producto AS codigo_producto, ps.precio AS precio, ps.imagen_url AS imagen_url
+            FROM petalops.producto p
+            LEFT JOIN petalops.producto_sucursal ps
+              ON ps.producto_id = p.id_producto
+             AND ps.sucursal_id = :sucursal_id
+            WHERE p.id_producto = :producto_id
+            """
+        ),
+        {"producto_id": int(producto_id), "sucursal_id": int(sucursal_id or 0)},
+    ).mappings().first()
+    if not row:
+        return {"codigoProducto": None, "precioVenta": None, "imagenUrl": None}
+    return {
+        "codigoProducto": row["codigo_producto"],
+        "precioVenta": Decimal(row["precio"]) if row["precio"] is not None else None,
+        "imagenUrl": row["imagen_url"],
+    }
+
+
+def _ventas_receta(db: Session, empresa_id: int, producto_id: int | None) -> dict:
+    """Vendidos hoy (pedidos APROBADO creados hoy) y reservados (pedidos
+    APROBADO cuya entrega todavia no llega a estado 'entregado'/'cancelado')
+    para el producto vinculado a esta receta."""
+    if not producto_id:
+        return {"vendidosHoy": Decimal("0"), "reservados": Decimal("0")}
+    row = db.execute(
+        text(
+            """
+            SELECT
+              COALESCE(SUM(pd.cantidad) FILTER (
+                WHERE UPPER(ep.nombre_estado) = 'APROBADO'
+                  AND DATE(pe.fecha_pedido) = CURRENT_DATE
+              ), 0) AS vendidos_hoy,
+              COALESCE(SUM(pd.cantidad) FILTER (
+                WHERE UPPER(ep.nombre_estado) = 'APROBADO'
+                  AND (ee.codigo IS NULL OR ee.codigo NOT IN ('entregado', 'cancelado'))
+              ), 0) AS reservados
+            FROM petalops.pedido_detalle pd
+            JOIN petalops.pedido pe ON pe.id_pedido = pd.pedido_id
+            JOIN petalops.estado_pedido ep ON ep.id_estado_pedido = pe.estado_pedido_id
+            LEFT JOIN petalops.entrega en ON en.pedido_id = pe.id_pedido
+            LEFT JOIN petalops.estado_entrega ee ON ee.id_estado_entrega = en.estadoentregaid
+            WHERE pd.empresa_id = :empresa_id
+              AND pd.producto_id = :producto_id
+            """
+        ),
+        {"empresa_id": int(empresa_id), "producto_id": int(producto_id)},
+    ).mappings().first()
+    if not row:
+        return {"vendidosHoy": Decimal("0"), "reservados": Decimal("0")}
+    return {
+        "vendidosHoy": Decimal(row["vendidos_hoy"] or 0),
+        "reservados": Decimal(row["reservados"] or 0),
+    }
+
+
+def _obtener_o_crear_categoria_arreglos(db: Session, empresa_id: int) -> int:
+    row = db.execute(
+        text("SELECT id_categoria FROM petalops.categoria WHERE empresa_id = :empresa_id AND nombre ILIKE 'Arreglos' LIMIT 1"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    if row:
+        return int(row[0])
+    row = db.execute(
+        text(
+            """
+            INSERT INTO petalops.categoria (empresa_id, nombre, created_at, activo)
+            VALUES (:empresa_id, 'Arreglos', now(), true)
+            RETURNING id_categoria
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return int(row[0])
+
+
+def _crear_producto_para_receta(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int | None,
+    nombre: str,
+    descripcion: str | None,
+    precio: Decimal,
+    imagen_url: str | None,
+) -> int:
+    categoria_id = _obtener_o_crear_categoria_arreglos(db, empresa_id)
+    now = datetime.now(timezone.utc)
+    base_slug = re.sub(r"[^A-Z0-9]+", "", nombre.strip().upper())[:12] or "ARR"
+    codigo_producto = f"ARR-{base_slug}-{secrets.token_hex(3).upper()}"
+    row = db.execute(
+        text(
+            """
+            INSERT INTO petalops.producto (
+              empresa_id, categoria_id, codigo_producto, nombre_producto, descripcion,
+              porcentaje_iva, iva_incluido, activo, created_at, updated_at
+            )
+            VALUES (
+              :empresa_id, :categoria_id, :codigo_producto, :nombre, :descripcion,
+              0, true, true, :now, :now
+            )
+            RETURNING id_producto
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "categoria_id": categoria_id,
+            "codigo_producto": codigo_producto,
+            "nombre": nombre.strip(),
+            "descripcion": (descripcion.strip() if descripcion else None),
+            "now": now,
+        },
+    ).first()
+    producto_id = int(row[0])
+
+    if sucursal_id:
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.producto_sucursal (
+                  producto_id, sucursal_id, precio, imagen_url, activo, created_at, updated_at
+                )
+                VALUES (:producto_id, :sucursal_id, :precio, :imagen_url, true, :now, :now)
+                """
+            ),
+            {
+                "producto_id": producto_id,
+                "sucursal_id": int(sucursal_id),
+                "precio": precio,
+                "imagen_url": imagen_url,
+                "now": now,
+            },
+        )
+    return producto_id
+
+
+def _receta_item_extra(db: Session, rec: Receta, sucursal_id: int | None) -> dict:
+    precio_info = _producto_precio_imagen(db, rec.productoID, sucursal_id)
+    ventas_info = _ventas_receta(db, int(rec.empresaID), rec.productoID)
+    return {
+        "productoID": (int(rec.productoID) if rec.productoID else None),
+        "capacidadManual": (Decimal(rec.capacidadManual) if rec.capacidadManual is not None else None),
+        **precio_info,
+        **ventas_info,
+    }
+
+
 @router.get("/recetas", response_model=RecetaListResponse)
 def listar_recetas(
     empresa_id: int = Query(..., alias="empresaID"),
@@ -864,6 +1022,7 @@ def listar_recetas(
     items = []
     for rec in rows:
         total = db.query(RecetaDetalle).filter(RecetaDetalle.recetaID == int(rec.idReceta)).count()
+        extra = _receta_item_extra(db, rec, auth.sucursalID)
         items.append(
             RecetaListItem(
                 idReceta=int(rec.idReceta),
@@ -872,6 +1031,7 @@ def listar_recetas(
                 descripcion=(str(rec.descripcion) if rec.descripcion else None),
                 activo=bool(rec.activo),
                 totalIngredientes=total,
+                **extra,
             )
         )
     return RecetaListResponse(items=items, total=len(items))
@@ -886,12 +1046,33 @@ def crear_receta(
 ):
     assert_same_empresa(auth, empresa_id)
 
+    producto_id = payload.productoID
+    if producto_id is not None:
+        existe = db.execute(
+            text("SELECT 1 FROM petalops.producto WHERE id_producto = :id AND empresa_id = :empresa_id"),
+            {"id": int(producto_id), "empresa_id": int(empresa_id)},
+        ).first()
+        if not existe:
+            raise HTTPException(status_code=400, detail="Producto no válido para esta empresa")
+    elif payload.precioVenta is not None:
+        producto_id = _crear_producto_para_receta(
+            db,
+            empresa_id=empresa_id,
+            sucursal_id=auth.sucursalID,
+            nombre=payload.nombre,
+            descripcion=payload.descripcion,
+            precio=payload.precioVenta,
+            imagen_url=payload.imagenUrl,
+        )
+
     now = datetime.now(timezone.utc)
     try:
         rec = Receta(
             empresaID=int(empresa_id),
             nombre=payload.nombre.strip(),
             descripcion=(payload.descripcion.strip() if payload.descripcion else None),
+            productoID=producto_id,
+            capacidadManual=payload.capacidadManual,
             activo=True,
             createdAt=now,
             updatedAt=now,
@@ -903,6 +1084,7 @@ def crear_receta(
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear receta (nombre duplicado)")
 
+    extra = _receta_item_extra(db, rec, auth.sucursalID)
     return RecetaItem(
         idReceta=int(rec.idReceta),
         empresaID=int(rec.empresaID),
@@ -910,6 +1092,7 @@ def crear_receta(
         descripcion=(str(rec.descripcion) if rec.descripcion else None),
         activo=bool(rec.activo),
         detalles=[],
+        **extra,
     )
 
 
@@ -945,6 +1128,7 @@ def obtener_receta(
         for det, inv, ins in detalles_rows
     ]
 
+    extra = _receta_item_extra(db, rec, auth.sucursalID)
     return RecetaItem(
         idReceta=int(rec.idReceta),
         empresaID=int(rec.empresaID),
@@ -952,6 +1136,7 @@ def obtener_receta(
         descripcion=(str(rec.descripcion) if rec.descripcion else None),
         activo=bool(rec.activo),
         detalles=detalles,
+        **extra,
     )
 
 
@@ -967,8 +1152,29 @@ def actualizar_receta(
         raise HTTPException(status_code=404, detail="Receta no encontrada")
     assert_same_empresa(auth, int(rec.empresaID))
 
+    producto_id = payload.productoID
+    if producto_id is not None:
+        existe = db.execute(
+            text("SELECT 1 FROM petalops.producto WHERE id_producto = :id AND empresa_id = :empresa_id"),
+            {"id": int(producto_id), "empresa_id": int(rec.empresaID)},
+        ).first()
+        if not existe:
+            raise HTTPException(status_code=400, detail="Producto no válido para esta empresa")
+        rec.productoID = producto_id
+    elif payload.precioVenta is not None:
+        rec.productoID = _crear_producto_para_receta(
+            db,
+            empresa_id=int(rec.empresaID),
+            sucursal_id=auth.sucursalID,
+            nombre=payload.nombre,
+            descripcion=payload.descripcion,
+            precio=payload.precioVenta,
+            imagen_url=payload.imagenUrl,
+        )
+
     rec.nombre = payload.nombre.strip()
     rec.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
+    rec.capacidadManual = payload.capacidadManual
     rec.activo = bool(payload.activo)
     rec.updatedAt = datetime.now(timezone.utc)
 

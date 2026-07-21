@@ -25,6 +25,7 @@ class PipelinePedidoCard(BaseModel):
     telefono: str | None = None
     fecha_entrega: datetime | None = None
     hora_entrega: str | None = None
+    rango_hora: str | None = None
     direccion: str | None = None
     total: float
     estado: str
