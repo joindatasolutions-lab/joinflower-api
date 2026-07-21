@@ -856,6 +856,29 @@ def crear_usuario(
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
 
+        # petalops.empleado tiene un indice unico (usuario, empresa_id) que tambien
+        # usan los floristas/domiciliarios externos (sin cuenta de login). Si ya
+        # existe un empleado con este mismo "usuario" en la empresa, el INSERT de
+        # _sync_employee_profile_for_operational_user mas abajo revienta con un
+        # IntegrityError generico — se valida antes para dar un mensaje claro.
+        existing_empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND lower(usuario) = :login
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": target_empresa_id, "login": login},
+        ).first()
+        if existing_empleado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
+            )
+
         rol = (
             db.query(Rol)
             .filter(Rol.idRol == payload.rolID, Rol.empresaID == target_empresa_id)
@@ -1052,6 +1075,25 @@ def actualizar_usuario(
         )
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
+
+        existing_empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND lower(usuario) = :login
+                  AND (usuario_id IS NULL OR usuario_id != :usuario_id)
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": target_empresa_id, "login": login, "usuario_id": int(usuario.idusuario)},
+        ).first()
+        if existing_empleado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
+            )
 
         rol = (
             db.query(Rol)
@@ -1287,8 +1329,37 @@ def listar_roles(
     rows = db.query(Rol).filter(Rol.empresaID == empresa_id).order_by(Rol.nombreRol.asc()).all()
     if not is_super_admin_context(auth):
         rows = [row for row in rows if normalize_role_name(row.nombreRol) not in STRUCTURAL_ROLES]
+
+    rol_ids = [int(row.idRol) for row in rows]
+    modulos_por_rol: dict[int, list[str]] = {rol_id: [] for rol_id in rol_ids}
+    if rol_ids:
+        # El check "seleccionar todos los modulos" del front no puede prometer mas
+        # modulos que los que el rol realmente tiene en permiso_modulo — eso es lo
+        # que de verdad usa el login para armar modulosActivosPlan (ver
+        # _build_auth_context). Sin esto el front solo puede adivinar el techo real.
+        permisos_rows = db.execute(
+            text(
+                """
+                SELECT rol_id, modulo
+                FROM petalops.permiso_modulo
+                WHERE rol_id = ANY(:rol_ids)
+                  AND puede_ver = TRUE
+                """
+            ),
+            {"rol_ids": rol_ids},
+        ).all()
+        for rol_id, modulo in permisos_rows:
+            modulos_por_rol.setdefault(int(rol_id), []).append(normalize_module_name(modulo))
+
     return RoleListResponse(
-        items=[RoleOption(rolID=int(row.idRol), nombreRol=str(row.nombreRol or "")) for row in rows]
+        items=[
+            RoleOption(
+                rolID=int(row.idRol),
+                nombreRol=str(row.nombreRol or ""),
+                modulosPermitidos=sorted(modulos_por_rol.get(int(row.idRol), [])),
+            )
+            for row in rows
+        ]
     )
 
 

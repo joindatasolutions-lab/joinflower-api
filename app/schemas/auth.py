@@ -182,6 +182,7 @@ class UserDeleteResponse(BaseModel):
 class RoleOption(BaseModel):
     rolID: int
     nombreRol: str
+    modulosPermitidos: list[str] = []
 
 
 class RoleListResponse(BaseModel):
