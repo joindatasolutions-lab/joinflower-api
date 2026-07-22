@@ -14,11 +14,14 @@ ESTADO_CANCELADO = "Cancelado"
 class DomiciliarioItem(BaseModel):
     idDomiciliario: int
     usuarioID: int | None = None
+    login: str | None = None
     nombre: str
     telefono: str | None = None
     tipo: str | None = None
     estado: str | None = None
     vehiculo: str | None = None
+    placa: str | None = None
+    detalleVehiculo: str | None = None
     pedidosActivos: int = 0
     activo: bool
 
@@ -34,7 +37,25 @@ class DomiciliarioUpdateRequest(BaseModel):
     tipo: str | None = Field(default=None, max_length=80)
     estado: str | None = Field(default=None, max_length=20)
     vehiculo: str | None = Field(default=None, max_length=80)
+    placa: str | None = Field(default=None, max_length=20)
+    detalleVehiculo: str | None = Field(default=None, max_length=160)
     activo: bool | None = None
+
+
+class DomiciliarioCreateRequest(BaseModel):
+    nombre: str = Field(min_length=3)
+    sucursalID: int | None = None
+    telefono: str | None = Field(default=None, max_length=40)
+    tipo: str | None = Field(default="Interno", max_length=80)
+    estado: str | None = Field(default="Activo", max_length=20)
+    vehiculo: str | None = Field(default=None, max_length=80)
+    placa: str | None = Field(default=None, max_length=20)
+    detalleVehiculo: str | None = Field(default=None, max_length=160)
+    activo: bool = True
+
+
+class DomiciliarioCreateResponse(DomiciliarioItem):
+    passwordTemporal: str | None = None
 
 
 class DomiciliarioDeleteResponse(BaseModel):

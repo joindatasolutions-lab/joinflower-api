@@ -9,3 +9,9 @@ ALTER TABLE petalops.empleado
 
 ALTER TABLE petalops.empleado
     ADD COLUMN IF NOT EXISTS estado VARCHAR(20);
+
+ALTER TABLE petalops.empleado
+    ADD COLUMN IF NOT EXISTS placa VARCHAR(20);
+
+ALTER TABLE petalops.empleado
+    ADD COLUMN IF NOT EXISTS detalle_vehiculo VARCHAR(160);

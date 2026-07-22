@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +21,7 @@ from app.core.security import (
     get_current_auth_context,
     is_empresa_admin_context,
     is_super_admin_context,
+    pwd_context,
     require_module_access,
 )
 from app.core.timezone import colombia_today
@@ -33,9 +35,13 @@ from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.produccion import Produccion
 from app.models.zona import Zona
+from app.models.rol import Rol
+from app.models.usuario import Usuario
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
+    DomiciliarioCreateRequest,
+    DomiciliarioCreateResponse,
     DomiciliarioDeleteResponse,
     DomiciliarioItem,
     DomiciliarioListResponse,
@@ -1125,11 +1131,14 @@ def _domiciliario_item(row: Domiciliario, pedidos_activos: int = 0) -> Domicilia
     return DomiciliarioItem(
         idDomiciliario=int(row.idDomiciliario),
         usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
+        login=(str(row.usuario).strip() if getattr(row, "usuario", None) else None),
         nombre=str(row.nombre or ""),
         telefono=(str(row.telefono).strip() if getattr(row, "telefono", None) else None),
         tipo=(str(row.tipo).strip() if getattr(row, "tipo", None) else "Interno"),
         estado=_domiciliario_estado(row),
         vehiculo=(str(row.vehiculo).strip() if getattr(row, "vehiculo", None) else None),
+        placa=(str(row.placa).strip() if getattr(row, "placa", None) else None),
+        detalleVehiculo=(str(row.detalleVehiculo).strip() if getattr(row, "detalleVehiculo", None) else None),
         pedidosActivos=int(pedidos_activos),
         activo=bool(row.activo),
     )
@@ -1142,6 +1151,82 @@ def _assert_admin_can_manage_domiciliarios(auth):
             "Solo un administrador puede editar domiciliarios",
             status_code=403,
         )
+
+
+def _normalize_login_part(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", ascii_value.lower())
+
+
+def _base_login_from_name(nombre: str) -> str:
+    parts = [_normalize_login_part(part) for part in str(nombre or "").strip().split()]
+    parts = [part for part in parts if part]
+    if len(parts) >= 2:
+        return f"{parts[0][0]}{parts[1]}"[:70]
+    if parts:
+        return parts[0][:70]
+    return "domiciliario"
+
+
+def _default_domiciliario_password(nombre: str) -> str:
+    first_name = str(nombre or "").strip().split()[0]
+    normalized = unicodedata.normalize("NFKD", first_name)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    clean = re.sub(r"[^A-Za-z0-9]+", "", ascii_value)
+    if not clean:
+        clean = "Domiciliario"
+    return f"{clean[:1].upper()}{clean[1:].lower()}123"
+
+
+def _next_unique_domiciliario_login(db: Session, empresa_id: int, nombre: str) -> str:
+    base = _base_login_from_name(nombre)
+    login = base
+    suffix = 1
+    while True:
+        existing_user = (
+            db.query(Usuario.idusuario)
+            .filter(func.lower(Usuario.login) == login.lower())
+            .first()
+        )
+        existing_employee = (
+            db.query(Domiciliario.idDomiciliario)
+            .filter(
+                Domiciliario.empresaID == int(empresa_id),
+                func.lower(func.coalesce(Domiciliario.usuario, "")) == login.lower(),
+            )
+            .first()
+        )
+        if not existing_user and not existing_employee:
+            return login
+        suffix += 1
+        login = f"{base}{suffix}"
+
+
+def _validate_domiciliario_estado(raw_estado: str | None, activo: bool | None = None) -> tuple[str, int]:
+    estado = str(raw_estado or "").strip().title()
+    if not estado:
+        estado = "Activo" if activo is not False else "Inactivo"
+    if estado not in {"Activo", "Inactivo", "Eliminado"}:
+        raise _err("DOMICILIARIO_ESTADO_INVALID", "Estado debe ser Activo, Inactivo o Eliminado", status_code=400)
+    if activo is not None:
+        return ("Activo" if activo else "Inactivo") if raw_estado is None else estado, (1 if activo else 0)
+    return estado, (1 if estado == "Activo" else 0)
+
+
+def _resolve_domiciliario_role(db: Session, empresa_id: int) -> Rol:
+    rol = (
+        db.query(Rol)
+        .filter(Rol.empresaID == int(empresa_id), func.lower(Rol.nombreRol) == "domiciliario")
+        .first()
+    )
+    if rol:
+        return rol
+
+    rol = Rol(empresaID=int(empresa_id), nombreRol="Domiciliario")
+    db.add(rol)
+    db.flush()
+    return rol
 
 
 @router.get("/domiciliarios", response_model=DomiciliarioListResponse)
@@ -1206,6 +1291,86 @@ def listar_domiciliarios(
     )
 
 
+@router.post(
+    "/domiciliarios",
+    response_model=DomiciliarioCreateResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def crear_domiciliario(
+    payload: DomiciliarioCreateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    nombre = payload.nombre.strip()
+    if not nombre:
+        raise _err("DOMICILIARIO_NOMBRE_INVALID", "Nombre de domiciliario invalido", status_code=400)
+
+    sucursal_id = int(payload.sucursalID if payload.sucursalID is not None else (auth.sucursalID or 0))
+    if not sucursal_id:
+        raise _err("DOMICILIARIO_SUCURSAL_REQUIRED", "Sucursal requerida para crear domiciliario", status_code=400)
+
+    sucursal = (
+        db.query(Sucursal)
+        .filter(Sucursal.idSucursal == int(sucursal_id), Sucursal.empresaID == int(empresa_id))
+        .first()
+    )
+    if not sucursal:
+        raise _err("DOMICILIARIO_SUCURSAL_INVALID", "Sucursal invalida para la empresa", status_code=400)
+
+    estado, activo_flag = _validate_domiciliario_estado(payload.estado, payload.activo)
+    login = _next_unique_domiciliario_login(db, int(empresa_id), nombre)
+    email = f"{login}@petalops.local"
+    password_temporal = _default_domiciliario_password(nombre)
+    password_hash = pwd_context.hash(password_temporal)
+    rol = _resolve_domiciliario_role(db, int(empresa_id))
+
+    usuario = Usuario(
+        empresaID=int(empresa_id),
+        sucursalID=int(sucursal_id),
+        nombre=nombre,
+        login=login,
+        email=email,
+        passwordHash=password_hash,
+        rolID=int(rol.idRol),
+        estado=estado,
+        esSuperadmin=False,
+        createdAt=datetime.now(timezone.utc),
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db.add(usuario)
+    db.flush()
+
+    domiciliario = Domiciliario(
+        empresaID=int(empresa_id),
+        sucursalID=int(sucursal_id),
+        usuarioID=int(usuario.idusuario),
+        nombre=nombre,
+        cargo="Domiciliario",
+        usuario=login,
+        email=email,
+        passwordHash=password_hash,
+        telefono=(payload.telefono.strip() if payload.telefono else None),
+        tipo=(payload.tipo.strip() if payload.tipo else "Interno"),
+        estado=estado,
+        vehiculo=(payload.vehiculo.strip() if payload.vehiculo else None),
+        placa=(payload.placa.strip() if payload.placa else None),
+        detalleVehiculo=(payload.detalleVehiculo.strip() if payload.detalleVehiculo else None),
+        activo=activo_flag,
+        createdAt=datetime.now(timezone.utc),
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db.add(domiciliario)
+    db.commit()
+    db.refresh(domiciliario)
+
+    item = _domiciliario_item(domiciliario, pedidos_activos=0)
+    return DomiciliarioCreateResponse(**item.model_dump(), passwordTemporal=password_temporal)
+
+
 @router.put(
     "/domiciliarios/{domiciliario_id}",
     response_model=DomiciliarioItem,
@@ -1267,16 +1432,24 @@ def actualizar_domiciliario(
         has_changes = True
 
     if payload.estado is not None:
-        estado = payload.estado.strip().title()
-        if estado not in {"Activo", "Inactivo", "Eliminado"}:
-            raise _err("DOMICILIARIO_ESTADO_INVALID", "Estado debe ser Activo, Inactivo o Eliminado", status_code=400)
+        estado, activo_flag = _validate_domiciliario_estado(payload.estado)
         domiciliario.estado = estado
-        domiciliario.activo = 1 if estado == "Activo" else 0
+        domiciliario.activo = activo_flag
         has_changes = True
 
     if payload.vehiculo is not None:
         vehiculo = payload.vehiculo.strip()
         domiciliario.vehiculo = vehiculo or None
+        has_changes = True
+
+    if payload.placa is not None:
+        placa = payload.placa.strip()
+        domiciliario.placa = placa or None
+        has_changes = True
+
+    if payload.detalleVehiculo is not None:
+        detalle_vehiculo = payload.detalleVehiculo.strip()
+        domiciliario.detalleVehiculo = detalle_vehiculo or None
         has_changes = True
 
     if payload.activo is not None:
