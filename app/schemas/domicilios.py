@@ -147,6 +147,63 @@ class DomicilioContadoresResponse(BaseModel):
     disponibles: int
 
 
+class DomicilioMetricasResumen(BaseModel):
+    total: int
+    pendientes: int
+    asignados: int
+    enRuta: int
+    entregados: int
+    noEntregados: int
+    cancelados: int
+    novedades: int
+    tasaEntrega: float
+    tiempoPromedioEntregaMin: float | None = None
+    costoDomicilioTotal: float
+    costoDomicilioPromedio: float
+
+
+class DomicilioMetricasItem(BaseModel):
+    grupo: str
+    periodo: str | None = None
+    domiciliarioID: int | None = None
+    domiciliario: str | None = None
+    estadoEntrega: str | None = None
+    estadoPedido: str | None = None
+    novedad: str | None = None
+    barrioID: int | None = None
+    barrio: str | None = None
+    zonaID: int | None = None
+    zona: str | None = None
+    total: int
+    pendientes: int
+    asignados: int
+    enRuta: int
+    entregados: int
+    noEntregados: int
+    cancelados: int
+    novedades: int
+    tasaEntrega: float
+    tiempoPromedioEntregaMin: float | None = None
+    costoDomicilioTotal: float
+    costoDomicilioPromedio: float
+
+
+class DomicilioMetricasResponse(BaseModel):
+    empresaID: int
+    sucursalID: int | None = None
+    fechaDesde: date
+    fechaHasta: date
+    agruparPor: str
+    resumen: DomicilioMetricasResumen
+    items: list[DomicilioMetricasItem]
+    porDomiciliario: list[DomicilioMetricasItem]
+    porEstadoEntrega: list[DomicilioMetricasItem]
+    porEstadoPedido: list[DomicilioMetricasItem]
+    porBarrio: list[DomicilioMetricasItem]
+    porZona: list[DomicilioMetricasItem]
+    novedades: list[DomicilioMetricasItem]
+
+
 class PedidoDisponibleItem(BaseModel):
     id: int
     idEntrega: int | None = None

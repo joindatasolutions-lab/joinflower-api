@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 import os
@@ -54,6 +54,9 @@ from app.schemas.domicilios import (
     DomicilioContadoresResponse,
     DomicilioCourierCard,
     DomicilioCourierListResponse,
+    DomicilioMetricasItem,
+    DomicilioMetricasResponse,
+    DomicilioMetricasResumen,
     PedidoAsignadoResponse,
     PedidoDisponibleItem,
     ESTADO_ASIGNADO,
@@ -1122,6 +1125,200 @@ def _domicilio_contadores(
     )
 
 
+def _metricas_base_params(
+    empresa_id: int,
+    sucursal_id: int | None,
+    fecha_desde: date,
+    fecha_hasta: date,
+    domiciliario_id: int | None = None,
+) -> dict:
+    return {
+        "empresa_id": int(empresa_id),
+        "sucursal_id": (int(sucursal_id) if sucursal_id is not None else None),
+        "fecha_desde": datetime.combine(fecha_desde, datetime.min.time()),
+        "fecha_hasta": datetime.combine(fecha_hasta + timedelta(days=1), datetime.min.time()),
+        "domiciliario_id": (int(domiciliario_id) if domiciliario_id is not None else None),
+    }
+
+
+def _metricas_where_sql() -> str:
+    return """
+        e.empresa_id = :empresa_id
+        AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
+        AND (:domiciliario_id IS NULL OR e.domiciliarioid = :domiciliario_id)
+        AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
+        AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
+    """
+
+
+def _metricas_select_sql(group_expr: str, extra_select: str = "") -> str:
+    return f"""
+        SELECT
+            {group_expr} AS grupo,
+            {extra_select}
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE ee.codigo = 'pendiente')::int AS pendientes,
+            COUNT(*) FILTER (WHERE ee.codigo = 'asignado')::int AS asignados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'en_ruta')::int AS en_ruta,
+            COUNT(*) FILTER (WHERE ee.codigo = 'entregado')::int AS entregados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'no_entregado')::int AS no_entregados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'cancelado')::int AS cancelados,
+            COUNT(*) FILTER (WHERE NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL)::int AS novedades,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE ee.codigo = 'entregado') / NULLIF(COUNT(*), 0),
+                2
+            )::float AS tasa_entrega,
+            ROUND(
+                AVG(EXTRACT(EPOCH FROM (e.fechaentrega - e.fechaasignacion)) / 60.0)
+                FILTER (WHERE ee.codigo = 'entregado' AND e.fechaentrega IS NOT NULL AND e.fechaasignacion IS NOT NULL),
+                2
+            )::float AS tiempo_promedio_entrega_min,
+            ROUND(SUM(COALESCE(p.costo_domicilio, b.costo_domicilio, 0)), 2)::float AS costo_domicilio_total,
+            ROUND(AVG(COALESCE(p.costo_domicilio, b.costo_domicilio, 0)), 2)::float AS costo_domicilio_promedio
+        FROM petalops.entrega e
+        JOIN petalops.pedido p
+          ON p.id_pedido = e.pedido_id
+         AND p.empresa_id = e.empresa_id
+        LEFT JOIN petalops.estado_entrega ee
+          ON ee.id_estado_entrega = e.estadoentregaid
+        LEFT JOIN petalops.estado_pedido ep
+          ON ep.id_estado_pedido = p.estado_pedido_id
+        LEFT JOIN petalops.empleado emp
+          ON emp.id_empleado = e.domiciliarioid
+         AND emp.empresa_id = e.empresa_id
+        LEFT JOIN petalops.barrio b
+          ON b.id_barrio = e.barrioid
+         AND b.empresa_id = e.empresa_id
+        WHERE {_metricas_where_sql()}
+        GROUP BY {group_expr}
+    """
+
+
+def _metricas_item(row, *, group_by: str) -> DomicilioMetricasItem:
+    data = dict(row)
+    grupo = str(data.get("grupo") or "Sin dato")
+    if group_by == "domiciliario" and data.get("domiciliario"):
+        grupo = str(data.get("domiciliario"))
+    if group_by == "barrio" and data.get("barrio"):
+        grupo = str(data.get("barrio"))
+    if group_by == "zona" and data.get("zona"):
+        grupo = str(data.get("zona"))
+    return DomicilioMetricasItem(
+        grupo=grupo,
+        periodo=str(data.get("periodo")) if data.get("periodo") is not None else (grupo if group_by in {"anio", "mes", "dia"} else None),
+        domiciliarioID=(int(data["domiciliario_id"]) if data.get("domiciliario_id") is not None else None),
+        domiciliario=data.get("domiciliario"),
+        estadoEntrega=data.get("estado_entrega"),
+        estadoPedido=data.get("estado_pedido"),
+        novedad=data.get("novedad"),
+        barrioID=(int(data["barrio_id"]) if data.get("barrio_id") is not None else None),
+        barrio=data.get("barrio"),
+        zonaID=(int(data["zona_id"]) if data.get("zona_id") is not None else None),
+        zona=data.get("zona"),
+        total=int(data.get("total") or 0),
+        pendientes=int(data.get("pendientes") or 0),
+        asignados=int(data.get("asignados") or 0),
+        enRuta=int(data.get("en_ruta") or 0),
+        entregados=int(data.get("entregados") or 0),
+        noEntregados=int(data.get("no_entregados") or 0),
+        cancelados=int(data.get("cancelados") or 0),
+        novedades=int(data.get("novedades") or 0),
+        tasaEntrega=float(data.get("tasa_entrega") or 0),
+        tiempoPromedioEntregaMin=(float(data["tiempo_promedio_entrega_min"]) if data.get("tiempo_promedio_entrega_min") is not None else None),
+        costoDomicilioTotal=float(data.get("costo_domicilio_total") or 0),
+        costoDomicilioPromedio=float(data.get("costo_domicilio_promedio") or 0),
+    )
+
+
+def _metricas_rows(
+    db: Session,
+    params: dict,
+    group_by: str,
+) -> list[DomicilioMetricasItem]:
+    group_specs = {
+        "anio": (
+            "to_char(date_trunc('year', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY')",
+            "to_char(date_trunc('year', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY') AS periodo, ",
+            "grupo ASC",
+        ),
+        "mes": (
+            "to_char(date_trunc('month', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM')",
+            "to_char(date_trunc('month', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM') AS periodo, ",
+            "grupo ASC",
+        ),
+        "dia": (
+            "to_char(date_trunc('day', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM-DD')",
+            "to_char(date_trunc('day', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM-DD') AS periodo, ",
+            "grupo ASC",
+        ),
+        "domiciliario": (
+            "COALESCE(e.domiciliarioid::text, 'sin_domiciliario')",
+            "MIN(e.domiciliarioid) AS domiciliario_id, COALESCE(MAX(emp.nombre_empleado), 'Sin domiciliario') AS domiciliario, ",
+            "total DESC, grupo ASC",
+        ),
+        "estadoEntrega": (
+            "COALESCE(ee.nombre, ee.codigo, 'Sin estado')",
+            "COALESCE(ee.nombre, ee.codigo, 'Sin estado') AS estado_entrega, ",
+            "total DESC, grupo ASC",
+        ),
+        "estadoPedido": (
+            "COALESCE(ep.nombre_estado, 'Sin estado')",
+            "COALESCE(ep.nombre_estado, 'Sin estado') AS estado_pedido, ",
+            "total DESC, grupo ASC",
+        ),
+        "novedad": (
+            "COALESCE(NULLIF(TRIM(e.motivonoentregado), ''), 'Sin novedad')",
+            "COALESCE(NULLIF(TRIM(e.motivonoentregado), ''), 'Sin novedad') AS novedad, ",
+            "total DESC, grupo ASC",
+        ),
+        "barrio": (
+            "COALESCE(e.barrioid::text, LOWER(COALESCE(e.barrionombre, b.nombre_barrio, 'sin_barrio')))",
+            "MIN(e.barrioid) AS barrio_id, COALESCE(MAX(e.barrionombre), MAX(b.nombre_barrio), 'Sin barrio') AS barrio, ",
+            "total DESC, grupo ASC",
+        ),
+        "zona": (
+            "COALESCE(b.zona_id::text, 'sin_zona')",
+            "MIN(b.zona_id) AS zona_id, CASE WHEN MIN(b.zona_id) IS NULL THEN 'Sin zona' ELSE CONCAT('Zona ', MIN(b.zona_id)) END AS zona, ",
+            "total DESC, grupo ASC",
+        ),
+    }
+    group_expr, extra_select, order_by = group_specs[group_by]
+    rows = db.execute(
+        text(f"{_metricas_select_sql(group_expr, extra_select)} ORDER BY {order_by}"),
+        params,
+    ).mappings().all()
+    return [_metricas_item(row, group_by=group_by) for row in rows]
+
+
+def _metricas_resumen(db: Session, params: dict) -> DomicilioMetricasResumen:
+    row = db.execute(
+        text(
+            f"""
+            SELECT *
+            FROM (
+                {_metricas_select_sql("1", "")}
+            ) s
+            """
+        ),
+        params,
+    ).mappings().first()
+    item = _metricas_item(row or {}, group_by="total")
+    return DomicilioMetricasResumen(
+        total=item.total,
+        pendientes=item.pendientes,
+        asignados=item.asignados,
+        enRuta=item.enRuta,
+        entregados=item.entregados,
+        noEntregados=item.noEntregados,
+        cancelados=item.cancelados,
+        novedades=item.novedades,
+        tasaEntrega=item.tasaEntrega,
+        tiempoPromedioEntregaMin=item.tiempoPromedioEntregaMin,
+        costoDomicilioTotal=item.costoDomicilioTotal,
+        costoDomicilioPromedio=item.costoDomicilioPromedio,
+    )
+
+
 def _domiciliario_estado(row: Domiciliario) -> str:
     estado = str(getattr(row, "estado", "") or "").strip()
     if estado:
@@ -2139,6 +2336,85 @@ def obtener_contadores_domicilio(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
     return _domicilio_contadores(db, empresa_id, sucursal_id, domiciliario_id, start, end)
+
+
+@router.get("/metricas", response_model=DomicilioMetricasResponse)
+def obtener_metricas_domicilios(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    anio: int | None = Query(None, alias="anio"),
+    mes: int | None = Query(None, ge=1, le=12),
+    dia: int | None = Query(None, ge=1, le=31),
+    domiciliario_id: int | None = Query(None, alias="domiciliarioID"),
+    agrupar_por: str = Query("mes", alias="agruparPor"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    allowed_group_by = {
+        "anio",
+        "mes",
+        "dia",
+        "domiciliario",
+        "estadoEntrega",
+        "estadoPedido",
+        "novedad",
+        "barrio",
+        "zona",
+    }
+    if agrupar_por not in allowed_group_by:
+        raise _err(
+            "DOMICILIO_METRICAS_GROUP_INVALID",
+            "agruparPor debe ser anio, mes, dia, domiciliario, estadoEntrega, estadoPedido, novedad, barrio o zona",
+            status_code=400,
+        )
+
+    if fecha_desde is None or fecha_hasta is None:
+        today = colombia_today()
+        target_year = int(anio or today.year)
+        if mes is not None and dia is not None:
+            fecha_desde = date(target_year, int(mes), int(dia))
+            fecha_hasta = fecha_desde
+        elif mes is not None:
+            fecha_desde = date(target_year, int(mes), 1)
+            next_month = date(target_year + (1 if int(mes) == 12 else 0), 1 if int(mes) == 12 else int(mes) + 1, 1)
+            fecha_hasta = next_month - timedelta(days=1)
+        else:
+            fecha_desde = date(target_year, 1, 1)
+            fecha_hasta = date(target_year, 12, 31)
+
+    if fecha_hasta < fecha_desde:
+        raise _err("DOMICILIO_METRICAS_RANGE_INVALID", "fechaHasta no puede ser menor que fechaDesde", status_code=400)
+
+    params = _metricas_base_params(
+        empresa_id=int(empresa_id),
+        sucursal_id=sucursal_id,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        domiciliario_id=domiciliario_id,
+    )
+    return DomicilioMetricasResponse(
+        empresaID=int(empresa_id),
+        sucursalID=(int(sucursal_id) if sucursal_id is not None else None),
+        fechaDesde=fecha_desde,
+        fechaHasta=fecha_hasta,
+        agruparPor=agrupar_por,
+        resumen=_metricas_resumen(db, params),
+        items=_metricas_rows(db, params, agrupar_por),
+        porDomiciliario=_metricas_rows(db, params, "domiciliario"),
+        porEstadoEntrega=_metricas_rows(db, params, "estadoEntrega"),
+        porEstadoPedido=_metricas_rows(db, params, "estadoPedido"),
+        porBarrio=_metricas_rows(db, params, "barrio"),
+        porZona=_metricas_rows(db, params, "zona"),
+        novedades=[
+            item
+            for item in _metricas_rows(db, params, "novedad")
+            if item.novedad
+        ],
+    )
 
 
 @router.post("/pedidos/{pedido_id}/asignar", response_model=PedidoAsignadoResponse)
