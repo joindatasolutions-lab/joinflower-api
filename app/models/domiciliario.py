@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, BigInteger, DateTime, ForeignKey, String
+from sqlalchemy import Column, BigInteger, DateTime, ForeignKey, Integer, String
 
 from app.database import Base
 
@@ -14,6 +14,10 @@ class Domiciliario(Base):
     usuarioID = Column("usuario_id", BigInteger, nullable=True, index=True)
     nombre = Column("nombre_empleado", String(180), nullable=False)
     cargo = Column("cargo", String(100), nullable=False)
-    activo = Column("activo", Boolean, nullable=False, default=True)
+    telefono = Column("telefono", String(40), nullable=True)
+    tipo = Column("tipo", String(80), nullable=True)
+    estado = Column("estado", String(20), nullable=True)
+    vehiculo = Column("vehiculo", String(80), nullable=True)
+    activo = Column("activo", Integer, nullable=False, default=1)
     createdAt = Column("created_at", DateTime)
     updatedAt = Column("updated_at", DateTime)

@@ -443,6 +443,36 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
 
     empleado_id: int | None = int(empleado["id_empleado"]) if empleado else None
     activo_flag = 1 if str(usuario.estado or "").strip().lower() == "activo" else 0
+
+    if empleado_id is None:
+        login_value = str(usuario.login or "").strip().lower()
+        email_value = str(usuario.email or "").strip().lower()
+        empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND (usuario_id IS NULL OR usuario_id = :usuario_id)
+                  AND (
+                    lower(COALESCE(usuario, '')) = :login
+                    OR (:email <> '' AND lower(COALESCE(email, '')) = :email)
+                  )
+                ORDER BY
+                  CASE WHEN lower(COALESCE(usuario, '')) = :login THEN 0 ELSE 1 END,
+                  id_empleado ASC
+                LIMIT 1
+                """
+            ),
+            {
+                "empresa_id": int(usuario.empresaID),
+                "usuario_id": int(usuario.idusuario),
+                "login": login_value,
+                "email": email_value,
+            },
+        ).mappings().first()
+        empleado_id = int(empleado["id_empleado"]) if empleado else None
+
     employee_email = _employee_sync_email_value(db, usuario, empleado_id)
 
     if empleado_id is None:
@@ -501,6 +531,19 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                 "usuario_login": str(usuario.login or "").strip(),
                 "email": employee_email,
                 "password_hash": str(usuario.passwordHash or "").strip(),
+            },
+        )
+        db.execute(
+            text(
+                """
+                UPDATE petalops.empleado
+                SET usuario_id = :usuario_id
+                WHERE id_empleado = :empleado_id
+                """
+            ),
+            {
+                "empleado_id": int(empleado_id),
+                "usuario_id": int(usuario.idusuario),
             },
         )
 

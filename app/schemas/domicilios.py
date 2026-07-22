@@ -16,11 +16,31 @@ class DomiciliarioItem(BaseModel):
     usuarioID: int | None = None
     nombre: str
     telefono: str | None = None
+    tipo: str | None = None
+    estado: str | None = None
+    vehiculo: str | None = None
+    pedidosActivos: int = 0
     activo: bool
 
 
 class DomiciliarioListResponse(BaseModel):
     items: list[DomiciliarioItem]
+
+
+class DomiciliarioUpdateRequest(BaseModel):
+    nombre: str | None = Field(default=None, min_length=3)
+    sucursalID: int | None = None
+    telefono: str | None = Field(default=None, max_length=40)
+    tipo: str | None = Field(default=None, max_length=80)
+    estado: str | None = Field(default=None, max_length=20)
+    vehiculo: str | None = Field(default=None, max_length=80)
+    activo: bool | None = None
+
+
+class DomiciliarioDeleteResponse(BaseModel):
+    status: str
+    idDomiciliario: int
+    estado: str
 
 
 class DomicilioAdminItem(BaseModel):

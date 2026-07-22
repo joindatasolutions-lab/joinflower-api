@@ -36,8 +36,10 @@ from app.models.zona import Zona
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
+    DomiciliarioDeleteResponse,
     DomiciliarioItem,
     DomiciliarioListResponse,
+    DomiciliarioUpdateRequest,
     DomicilioActionResponse,
     DomicilioAdminItem,
     DomicilioAdminListResponse,
@@ -1112,11 +1114,43 @@ def _domicilio_contadores(
     )
 
 
+def _domiciliario_estado(row: Domiciliario) -> str:
+    estado = str(getattr(row, "estado", "") or "").strip()
+    if estado:
+        return estado
+    return "Activo" if bool(row.activo) else "Inactivo"
+
+
+def _domiciliario_item(row: Domiciliario, pedidos_activos: int = 0) -> DomiciliarioItem:
+    return DomiciliarioItem(
+        idDomiciliario=int(row.idDomiciliario),
+        usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
+        nombre=str(row.nombre or ""),
+        telefono=(str(row.telefono).strip() if getattr(row, "telefono", None) else None),
+        tipo=(str(row.tipo).strip() if getattr(row, "tipo", None) else "Interno"),
+        estado=_domiciliario_estado(row),
+        vehiculo=(str(row.vehiculo).strip() if getattr(row, "vehiculo", None) else None),
+        pedidosActivos=int(pedidos_activos),
+        activo=bool(row.activo),
+    )
+
+
+def _assert_admin_can_manage_domiciliarios(auth):
+    if not _actor_can_override_delivery(auth):
+        raise _err(
+            "DOMICILIARIO_ADMIN_REQUIRED",
+            "Solo un administrador puede editar domiciliarios",
+            status_code=403,
+        )
+
+
 @router.get("/domiciliarios", response_model=DomiciliarioListResponse)
 def listar_domiciliarios(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     solo_activos: bool = Query(True, alias="soloActivos"),
+    estado: str | None = Query(None),
+    search_term: str | None = Query(None, alias="q"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -1125,21 +1159,196 @@ def listar_domiciliarios(
     q = q.filter(func.upper(Domiciliario.cargo) == "DOMICILIARIO")
     if sucursal_id is not None:
         q = q.filter(Domiciliario.sucursalID == int(sucursal_id))
-    if solo_activos:
+
+    estado_filter = str(estado or "").strip().lower()
+    if solo_activos and not estado_filter:
         q = q.filter(_activo_truthy(Domiciliario.activo))
+        q = q.filter(func.lower(func.coalesce(Domiciliario.estado, "Activo")) != "eliminado")
+
+    if estado_filter and estado_filter not in {"todos", "todos los estados"}:
+        if estado_filter == "activo":
+            q = q.filter(_activo_truthy(Domiciliario.activo))
+            q = q.filter(func.lower(func.coalesce(Domiciliario.estado, "Activo")) != "eliminado")
+        elif estado_filter == "inactivo":
+            q = q.filter(or_(Domiciliario.activo == 0, func.lower(Domiciliario.estado) == "inactivo"))
+        elif estado_filter == "eliminado":
+            q = q.filter(func.lower(Domiciliario.estado) == "eliminado")
+        else:
+            raise _err("DOMICILIARIO_ESTADO_FILTER_INVALID", "Filtro de estado invalido", status_code=400)
+
+    search = str(search_term or "").strip()
+    if search:
+        pattern = f"%{search}%"
+        q = q.filter(
+            or_(
+                cast(Domiciliario.idDomiciliario, String).ilike(pattern),
+                Domiciliario.nombre.ilike(pattern),
+                Domiciliario.telefono.ilike(pattern),
+                Domiciliario.tipo.ilike(pattern),
+                Domiciliario.vehiculo.ilike(pattern),
+            )
+        )
 
     rows = q.order_by(Domiciliario.nombre.asc()).all()
     return DomiciliarioListResponse(
         items=[
-            DomiciliarioItem(
-                idDomiciliario=int(row.idDomiciliario),
-                usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
-                nombre=str(row.nombre or ""),
-                telefono=None,
-                activo=bool(row.activo),
+            _domiciliario_item(
+                row,
+                domicilio_service.count_entregas_activas(
+                    db=db,
+                    empresa_id=int(empresa_id),
+                    sucursal_id=(int(row.sucursalID) if row.sucursalID is not None else None),
+                    domiciliario_id=int(row.idDomiciliario),
+                ),
             )
             for row in rows
         ]
+    )
+
+
+@router.put(
+    "/domiciliarios/{domiciliario_id}",
+    response_model=DomiciliarioItem,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def actualizar_domiciliario(
+    domiciliario_id: int,
+    payload: DomiciliarioUpdateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    domiciliario = (
+        db.query(Domiciliario)
+        .filter(
+            Domiciliario.idDomiciliario == int(domiciliario_id),
+            Domiciliario.empresaID == int(empresa_id),
+            func.upper(Domiciliario.cargo) == "DOMICILIARIO",
+        )
+        .first()
+    )
+    if not domiciliario:
+        raise _err("DOMICILIARIO_NOT_FOUND", "Domiciliario no encontrado", status_code=404)
+
+    has_changes = False
+
+    if payload.nombre is not None:
+        nombre = payload.nombre.strip()
+        if not nombre:
+            raise _err("DOMICILIARIO_NOMBRE_INVALID", "Nombre de domiciliario invalido", status_code=400)
+        domiciliario.nombre = nombre
+        has_changes = True
+
+    if payload.sucursalID is not None:
+        sucursal = (
+            db.query(Sucursal)
+            .filter(
+                Sucursal.idSucursal == int(payload.sucursalID),
+                Sucursal.empresaID == int(empresa_id),
+            )
+            .first()
+        )
+        if not sucursal:
+            raise _err("DOMICILIARIO_SUCURSAL_INVALID", "Sucursal invalida para la empresa", status_code=400)
+        domiciliario.sucursalID = int(payload.sucursalID)
+        has_changes = True
+
+    if payload.telefono is not None:
+        telefono = payload.telefono.strip()
+        domiciliario.telefono = telefono or None
+        has_changes = True
+
+    if payload.tipo is not None:
+        tipo = payload.tipo.strip()
+        domiciliario.tipo = tipo or None
+        has_changes = True
+
+    if payload.estado is not None:
+        estado = payload.estado.strip().title()
+        if estado not in {"Activo", "Inactivo", "Eliminado"}:
+            raise _err("DOMICILIARIO_ESTADO_INVALID", "Estado debe ser Activo, Inactivo o Eliminado", status_code=400)
+        domiciliario.estado = estado
+        domiciliario.activo = 1 if estado == "Activo" else 0
+        has_changes = True
+
+    if payload.vehiculo is not None:
+        vehiculo = payload.vehiculo.strip()
+        domiciliario.vehiculo = vehiculo or None
+        has_changes = True
+
+    if payload.activo is not None:
+        domiciliario.activo = 1 if payload.activo else 0
+        if payload.estado is None:
+            domiciliario.estado = "Activo" if payload.activo else "Inactivo"
+        has_changes = True
+
+    if not has_changes:
+        raise _err("DOMICILIARIO_UPDATE_EMPTY", "No hay campos para actualizar", status_code=400)
+
+    domiciliario.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(domiciliario)
+
+    pedidos_activos = domicilio_service.count_entregas_activas(
+        db=db,
+        empresa_id=int(empresa_id),
+        sucursal_id=(int(domiciliario.sucursalID) if domiciliario.sucursalID is not None else None),
+        domiciliario_id=int(domiciliario.idDomiciliario),
+    )
+    return _domiciliario_item(domiciliario, pedidos_activos=pedidos_activos)
+
+
+@router.delete(
+    "/domiciliarios/{domiciliario_id}",
+    response_model=DomiciliarioDeleteResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def eliminar_domiciliario(
+    domiciliario_id: int,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    domiciliario = (
+        db.query(Domiciliario)
+        .filter(
+            Domiciliario.idDomiciliario == int(domiciliario_id),
+            Domiciliario.empresaID == int(empresa_id),
+            func.upper(Domiciliario.cargo) == "DOMICILIARIO",
+        )
+        .first()
+    )
+    if not domiciliario:
+        raise _err("DOMICILIARIO_NOT_FOUND", "Domiciliario no encontrado", status_code=404)
+
+    pedidos_activos = domicilio_service.count_entregas_activas(
+        db=db,
+        empresa_id=int(empresa_id),
+        sucursal_id=(int(domiciliario.sucursalID) if domiciliario.sucursalID is not None else None),
+        domiciliario_id=int(domiciliario.idDomiciliario),
+    )
+    if pedidos_activos > 0:
+        raise _err(
+            "DOMICILIARIO_DELETE_HAS_ACTIVE_ORDERS",
+            "No se puede eliminar un domiciliario con pedidos activos",
+            status_code=409,
+        )
+
+    domiciliario.activo = 0
+    domiciliario.estado = "Eliminado"
+    domiciliario.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+
+    return DomiciliarioDeleteResponse(
+        status="ok",
+        idDomiciliario=int(domiciliario.idDomiciliario),
+        estado="Eliminado",
     )
 
 
