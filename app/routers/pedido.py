@@ -207,6 +207,21 @@ def _ticket_wrap_lines(raw_line: str, width: int) -> list[str]:
     return chunks or [""]
 
 
+def _factura_empresa_labels(empresa, sucursal, empresa_id: int) -> tuple[str, str]:
+    nombre_empresa = str(
+        (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "")
+    ).strip()
+    if not nombre_empresa:
+        nombre_empresa = str(getattr(sucursal, "nombreSucursal", None) or "PetalOps").strip() or "PetalOps"
+
+    partes = [part.strip() for part in nombre_empresa.split(" - ", 1) if part.strip()]
+    titulo = partes[0] if partes else nombre_empresa
+    subtitulo = partes[1] if len(partes) > 1 else ""
+    if not subtitulo and int(empresa_id) == FLORA_EMPRESA_ID:
+        subtitulo = "Tienda de Flores"
+    return titulo, subtitulo
+
+
 def _render_factura_pdf(lines: list[str]) -> bytes:
     page_width = 80 * mm
     margin_x = 4 * mm
@@ -3293,6 +3308,14 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         .first()
     )
     empresa = db.query(Empresa).filter(Empresa.idEmpresa == int(pedido.empresaID)).first()
+    sucursal = (
+        db.query(Sucursal)
+        .filter(
+            Sucursal.idSucursal == int(pedido.sucursalID),
+            Sucursal.empresaID == int(pedido.empresaID),
+        )
+        .first()
+    )
     barrio = None
     if entrega and getattr(entrega, "barrioID", None) is not None:
         barrio = (
@@ -3339,12 +3362,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Observaciones entrega: {observacion_entrega}" if observacion_entrega else None,
     ]
     observaciones = "\n".join([item for item in observaciones_factura if item]) or "Sin observaciones"
-    empresa_nombre = str(
-        (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "FLORA - TIENDA DE FLORES")
-    ).strip()
-    empresa_partes = [part.strip() for part in empresa_nombre.split(" - ", 1) if part.strip()]
-    empresa_titulo = empresa_partes[0] if empresa_partes else empresa_nombre
-    empresa_subtitulo = empresa_partes[1] if len(empresa_partes) > 1 else "Tienda de Flores"
+    empresa_titulo, empresa_subtitulo = _factura_empresa_labels(empresa, sucursal, int(pedido.empresaID))
     forma_pago = str(pago_resumen.get("metodoPago") or "No especificada").strip() or "No especificada"
     metodos_pago = [str(item or "").strip().lower() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
     detalle_pago = pago_resumen.get("detallePago") or []
@@ -3383,7 +3401,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     contenido_lineas = [
         empresa_titulo.upper(),
-        empresa_subtitulo,
+        *([empresa_subtitulo] if empresa_subtitulo else []),
         "----------------------------------------",
         f"Pedido: #{numero_legible}",
         f"Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
@@ -3422,7 +3440,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
         f"Operador: {operador_nombre}",
-        f"Celular Flora: {celular_flora}",
+        *([f"Celular Flora: {celular_flora}"] if int(pedido.empresaID) == FLORA_EMPRESA_ID else []),
         "----------------------------------------",
         mensaje_final,
     ]

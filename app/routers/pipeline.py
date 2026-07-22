@@ -96,11 +96,10 @@ def _parse_rango_hora_deadline_time(rango_hora: str | None) -> time | None:
 
     bracket_match = re.search(r"\(([^)]+)\)", raw)
     inner = bracket_match.group(1) if bracket_match else raw
-    ultimo_tramo = inner.split("-")[-1].strip()
-
-    match = _RANGO_HORA_TIME_TOKEN_RE.search(ultimo_tramo)
-    if not match:
+    matches = list(_RANGO_HORA_TIME_TOKEN_RE.finditer(inner))
+    if not matches:
         return None
+    match = matches[-1]
 
     hour = int(match.group(1))
     minute = int(match.group(2)) if match.group(2) else 0
