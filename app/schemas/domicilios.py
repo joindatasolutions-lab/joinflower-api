@@ -167,6 +167,9 @@ class DomicilioMetricasItem(BaseModel):
     periodo: str | None = None
     domiciliarioID: int | None = None
     domiciliario: str | None = None
+    domiciliarioImagenUrl: str | None = None
+    fotoUrl: str | None = None
+    imageUrl: str | None = None
     estadoEntrega: str | None = None
     estadoPedido: str | None = None
     novedad: str | None = None

@@ -1208,6 +1208,9 @@ def _metricas_item(row, *, group_by: str) -> DomicilioMetricasItem:
         periodo=str(data.get("periodo")) if data.get("periodo") is not None else (grupo if group_by in {"anio", "mes", "dia"} else None),
         domiciliarioID=(int(data["domiciliario_id"]) if data.get("domiciliario_id") is not None else None),
         domiciliario=data.get("domiciliario"),
+        domiciliarioImagenUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
+        fotoUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
+        imageUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
         estadoEntrega=data.get("estado_entrega"),
         estadoPedido=data.get("estado_pedido"),
         novedad=data.get("novedad"),
@@ -1253,7 +1256,7 @@ def _metricas_rows(
         ),
         "domiciliario": (
             "COALESCE(e.domiciliarioid::text, 'sin_domiciliario')",
-            "MIN(e.domiciliarioid) AS domiciliario_id, COALESCE(MAX(emp.nombre_empleado), 'Sin domiciliario') AS domiciliario, ",
+            "MIN(e.domiciliarioid) AS domiciliario_id, COALESCE(MAX(emp.nombre_empleado), 'Sin domiciliario') AS domiciliario, MAX(emp.foto_url) AS domiciliario_imagen_url, ",
             "total DESC, grupo ASC",
         ),
         "estadoEntrega": (
