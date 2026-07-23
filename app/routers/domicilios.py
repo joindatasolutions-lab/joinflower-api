@@ -673,6 +673,7 @@ def _build_mis_entregas_query(
 ):
     start = datetime.combine(fecha, datetime.min.time())
     end = datetime.combine(fecha, datetime.max.time())
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
     tipo_entrega_norm = func.lower(
@@ -695,7 +696,7 @@ def _build_mis_entregas_query(
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             entrega_actual.domiciliarioID == int(domiciliario_id),
@@ -710,7 +711,9 @@ def _build_mis_entregas_query(
                     domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA),
                 ]
             ),
+            Produccion.estado == estado_para_entrega,
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
         .order_by(
             func.coalesce(
@@ -744,6 +747,13 @@ def _build_pedidos_disponibles_query(
     tipo_entrega_norm = func.lower(
         func.replace(
             func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
             " ",
             "_",
         )
@@ -944,6 +954,8 @@ def _listar_pedidos_disponibles_api_rows(
               AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega)
                   BETWEEN :fecha_desde AND :fecha_hasta
               AND lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_'))
+                  NOT IN :store_pickup_values
+              AND lower(replace(replace(COALESCE(e.direccion, ''), '-', '_'), ' ', '_'))
                   NOT IN :store_pickup_values
               AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         ),
