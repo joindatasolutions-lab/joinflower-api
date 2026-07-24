@@ -119,12 +119,22 @@ class PedidoListItem(BaseModel):
     facturaImpresaAt: Optional[str] = None
 
 
+class PedidoListKpiSummary(BaseModel):
+    ventaHoy: float = 0
+    pedidosHoy: int = 0
+    aprobados: int = 0
+    pendientes: int = 0
+    cancelados: int = 0
+    sinImprimir: int = 0
+
+
 class PedidoListResponse(BaseModel):
     items: List[PedidoListItem]
     total: int
     page: int
     pageSize: int
     facturasPendientesImpresion: Optional[int] = None
+    kpis: Optional[PedidoListKpiSummary] = None
 
 
 class PedidoDetalleProducto(BaseModel):

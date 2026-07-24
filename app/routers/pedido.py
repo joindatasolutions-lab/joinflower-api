@@ -34,6 +34,7 @@ from app.schemas.pedido import (
     PedidoCreate,
     PedidoListResponse,
     PedidoListItem,
+    PedidoListKpiSummary,
     PedidoListProducto,
     PedidoDetalleResponse,
     PedidoDetalleProducto,
@@ -1960,6 +1961,56 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
     caja_service.refresh_caja_por_pedido(db, pedido=pedido)
 
 
+def _build_pedido_list_kpis(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_ids: list[int],
+    estado_map: dict[int, str],
+    facturas_pendientes_impresion: int,
+) -> PedidoListKpiSummary:
+    if not pedido_ids:
+        return PedidoListKpiSummary(sinImprimir=int(facturas_pendientes_impresion))
+
+    rows = (
+        db.query(Pedido.idPedido, Pedido.totalBruto, Pedido.totalIva)
+        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(pedido_ids))
+        .all()
+    )
+
+    venta_hoy = Decimal("0.00")
+    pedidos_hoy = 0
+    aprobados = 0
+    pendientes = 0
+    cancelados = 0
+    cancelado_estados = {"CANCELADO", "RECHAZADO"}
+    aprobado_estados = {"APROBADO", "PAGADO"}
+    pendiente_estados = {"CREADO", "PENDIENTE"}
+
+    for pedido_id, total_bruto, total_iva in rows:
+        estado_nombre = str(estado_map.get(int(pedido_id), "SIN_ESTADO") or "SIN_ESTADO").strip().upper()
+        if estado_nombre in cancelado_estados:
+            cancelados += 1
+            continue
+
+        if estado_nombre in aprobado_estados:
+            aprobados += 1
+            pedidos_hoy += 1
+            venta_hoy += Decimal(str(total_bruto or 0)) + Decimal(str(total_iva or 0))
+        elif estado_nombre in pendiente_estados:
+            pendientes += 1
+            pedidos_hoy += 1
+
+    return PedidoListKpiSummary(
+        ventaHoy=float(venta_hoy.quantize(Decimal("0.01"))),
+        pedidosHoy=int(pedidos_hoy),
+        aprobados=int(aprobados),
+        pendientes=int(pendientes),
+        cancelados=int(cancelados),
+        sinImprimir=int(facturas_pendientes_impresion),
+    )
+
+
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 @limiter.limit("100/minute")
 def listar_pedidos(
@@ -2169,7 +2220,14 @@ def listar_pedidos(
     )
     candidate_ids = [int(row[0]) for row in candidate_rows]
     if not candidate_ids:
-        return PedidoListResponse(items=[], total=0, page=page, pageSize=page_size, facturasPendientesImpresion=0)
+        return PedidoListResponse(
+            items=[],
+            total=0,
+            page=page,
+            pageSize=page_size,
+            facturasPendientesImpresion=0,
+            kpis=PedidoListKpiSummary(),
+        )
 
     estado_rows = (
         db.query(Pedido.idPedido, EstadoPedido.nombreEstado)
@@ -2189,6 +2247,13 @@ def listar_pedidos(
         and not bool((pago_resumen_map.get(int(pedido_id)) or {}).get("facturaImpresa"))
     ]
     facturas_pendientes_impresion = len(pending_invoice_ids)
+    kpis = _build_pedido_list_kpis(
+        db,
+        empresa_id=int(empresa_id),
+        pedido_ids=candidate_ids,
+        estado_map=estado_map,
+        facturas_pendientes_impresion=facturas_pendientes_impresion,
+    )
     filtered_ids = pending_invoice_ids if sin_imprimir else candidate_ids
     total = len(filtered_ids)
 
@@ -2200,6 +2265,7 @@ def listar_pedidos(
             page=page,
             pageSize=page_size,
             facturasPendientesImpresion=facturas_pendientes_impresion,
+            kpis=kpis,
         )
 
     pago_resumen_page = {int(pedido_id): pago_resumen_map.get(int(pedido_id), {}) for pedido_id in pedido_ids}
@@ -2329,6 +2395,7 @@ def listar_pedidos(
         page=page,
         pageSize=page_size,
         facturasPendientesImpresion=facturas_pendientes_impresion,
+        kpis=kpis,
     )
 
 
