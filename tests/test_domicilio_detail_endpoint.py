@@ -53,6 +53,28 @@ class FakeDb:
         raise AssertionError(f"Unexpected query entities: {entities}")
 
 
+class FakeMetricasResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class FakeMetricasDb:
+    def __init__(self, rows):
+        self.rows = rows
+        self.last_params = None
+
+    def execute(self, query, params):
+        self.last_query = str(query)
+        self.last_params = params
+        return FakeMetricasResult(self.rows)
+
+
 def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *args, **kwargs: None)
 
@@ -205,6 +227,56 @@ def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
     item = domicilios_router._build_pedido_disponible_item(entrega, pedido, cliente, produccion)
 
     assert item.horaEntrega == "10:00"
+
+
+def test_metricas_novedades_detalle_returns_order_detail():
+    fecha_programada = datetime(2026, 7, 16, 10, 0, 0)
+    db = FakeMetricasDb(
+        [
+            {
+                "id_entrega": 10,
+                "pedido_id": 20,
+                "numero_pedido": 96412,
+                "codigo_pedido": "FLR-96412",
+                "cliente": "Cliente Demo",
+                "destinatario": "Maria Demo",
+                "telefonodestino": "3001234567",
+                "direccion": "Calle 123",
+                "barrio_id": 7,
+                "barrio": "El Prado",
+                "zona_id": 2,
+                "zona": "Zona 2",
+                "domiciliario_id": 48,
+                "domiciliario": "Domi Demo",
+                "estado_entrega": "No entregado",
+                "estado_pedido": "En despacho",
+                "novedad": "Dirección incorrecta",
+                "intentonumero": 1,
+                "fechaentregaprogramada": fecha_programada,
+                "fechaentrega": None,
+                "reprogramadapara": None,
+            }
+        ]
+    )
+    params = {
+        "empresa_id": 3,
+        "sucursal_id": None,
+        "fecha_desde": datetime(2026, 7, 1),
+        "fecha_hasta": datetime(2026, 8, 1),
+        "domiciliario_id": None,
+    }
+
+    detalles = domicilios_router._metricas_novedades_detalle(db, params)
+
+    assert db.last_params == params
+    assert "motivonoentregado" in db.last_query
+    assert detalles[0].idEntrega == 10
+    assert detalles[0].pedidoID == 20
+    assert detalles[0].numeroPedido == "FLR-96412"
+    assert detalles[0].cliente == "Cliente Demo"
+    assert detalles[0].domiciliario == "Domi Demo"
+    assert detalles[0].novedad == "Dirección incorrecta"
+    assert detalles[0].fechaEntregaProgramada == fecha_programada
 
 
 def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):

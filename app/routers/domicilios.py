@@ -55,6 +55,7 @@ from app.schemas.domicilios import (
     DomicilioCourierCard,
     DomicilioCourierListResponse,
     DomicilioMetricasItem,
+    DomicilioMetricasNovedadDetalle,
     DomicilioMetricasResponse,
     DomicilioMetricasResumen,
     PedidoAsignadoResponse,
@@ -1334,6 +1335,92 @@ def _metricas_resumen(db: Session, params: dict) -> DomicilioMetricasResumen:
     )
 
 
+def _metricas_novedades_detalle(db: Session, params: dict) -> list[DomicilioMetricasNovedadDetalle]:
+    rows = db.execute(
+        text(
+            f"""
+            SELECT
+                e.id_entrega,
+                e.pedido_id,
+                p.numero_pedido,
+                p.codigo_pedido,
+                c.nombre_completo AS cliente,
+                e.destinatario,
+                e.telefonodestino,
+                e.direccion,
+                e.barrioid AS barrio_id,
+                COALESCE(e.barrionombre, b.nombre_barrio) AS barrio,
+                b.zona_id,
+                CASE WHEN b.zona_id IS NULL THEN NULL ELSE CONCAT('Zona ', b.zona_id) END AS zona,
+                e.domiciliarioid AS domiciliario_id,
+                emp.nombre_empleado AS domiciliario,
+                COALESCE(ee.nombre, ee.codigo) AS estado_entrega,
+                ep.nombre_estado AS estado_pedido,
+                TRIM(e.motivonoentregado) AS novedad,
+                e.intentonumero,
+                e.fechaentregaprogramada,
+                e.fechaentrega,
+                e.reprogramadapara
+            FROM petalops.entrega e
+            JOIN petalops.pedido p
+              ON p.id_pedido = e.pedido_id
+             AND p.empresa_id = e.empresa_id
+            LEFT JOIN petalops.cliente c
+              ON c.cliente_id = p.cliente_id
+             AND c.empresa_id = p.empresa_id
+            LEFT JOIN petalops.estado_entrega ee
+              ON ee.id_estado_entrega = e.estadoentregaid
+            LEFT JOIN petalops.estado_pedido ep
+              ON ep.id_estado_pedido = p.estado_pedido_id
+            LEFT JOIN petalops.empleado emp
+              ON emp.id_empleado = e.domiciliarioid
+             AND emp.empresa_id = e.empresa_id
+            LEFT JOIN petalops.barrio b
+              ON b.id_barrio = e.barrioid
+             AND b.empresa_id = e.empresa_id
+            WHERE {_metricas_where_sql()}
+              AND NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL
+            ORDER BY
+                COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) DESC,
+                e.id_entrega DESC
+            """
+        ),
+        params,
+    ).mappings().all()
+
+    detalles: list[DomicilioMetricasNovedadDetalle] = []
+    for row in rows:
+        data = dict(row)
+        codigo_pedido = str(data["codigo_pedido"]).strip() if data.get("codigo_pedido") else None
+        numero_pedido = codigo_pedido or str(data.get("numero_pedido") or data.get("pedido_id"))
+        detalles.append(
+            DomicilioMetricasNovedadDetalle(
+                idEntrega=int(data["id_entrega"]),
+                pedidoID=int(data["pedido_id"]),
+                numeroPedido=numero_pedido,
+                codigoPedido=codigo_pedido,
+                cliente=(str(data.get("cliente")).strip() if data.get("cliente") else None),
+                destinatario=(str(data.get("destinatario")).strip() if data.get("destinatario") else None),
+                telefonoDestino=(str(data.get("telefonodestino")).strip() if data.get("telefonodestino") else None),
+                direccion=(str(data.get("direccion")).strip() if data.get("direccion") else None),
+                barrioID=(int(data["barrio_id"]) if data.get("barrio_id") is not None else None),
+                barrio=(str(data.get("barrio")).strip() if data.get("barrio") else None),
+                zonaID=(int(data["zona_id"]) if data.get("zona_id") is not None else None),
+                zona=(str(data.get("zona")).strip() if data.get("zona") else None),
+                domiciliarioID=(int(data["domiciliario_id"]) if data.get("domiciliario_id") is not None else None),
+                domiciliario=(str(data.get("domiciliario")).strip() if data.get("domiciliario") else None),
+                estadoEntrega=(str(data.get("estado_entrega")).strip() if data.get("estado_entrega") else None),
+                estadoPedido=(str(data.get("estado_pedido")).strip() if data.get("estado_pedido") else None),
+                novedad=str(data.get("novedad") or "").strip(),
+                intentoNumero=int(data.get("intentonumero") or 1),
+                fechaEntregaProgramada=data.get("fechaentregaprogramada"),
+                fechaEntrega=data.get("fechaentrega"),
+                reprogramadaPara=data.get("reprogramadapara"),
+            )
+        )
+    return detalles
+
+
 def _domiciliario_estado(row: Domiciliario) -> str:
     estado = str(getattr(row, "estado", "") or "").strip()
     if estado:
@@ -2429,6 +2516,7 @@ def obtener_metricas_domicilios(
             for item in _metricas_rows(db, params, "novedad")
             if item.novedad
         ],
+        detalleNovedades=_metricas_novedades_detalle(db, params),
     )
 
 

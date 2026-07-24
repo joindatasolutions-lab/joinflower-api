@@ -191,6 +191,30 @@ class DomicilioMetricasItem(BaseModel):
     costoDomicilioPromedio: float
 
 
+class DomicilioMetricasNovedadDetalle(BaseModel):
+    idEntrega: int
+    pedidoID: int
+    numeroPedido: str
+    codigoPedido: str | None = None
+    cliente: str | None = None
+    destinatario: str | None = None
+    telefonoDestino: str | None = None
+    direccion: str | None = None
+    barrioID: int | None = None
+    barrio: str | None = None
+    zonaID: int | None = None
+    zona: str | None = None
+    domiciliarioID: int | None = None
+    domiciliario: str | None = None
+    estadoEntrega: str | None = None
+    estadoPedido: str | None = None
+    novedad: str
+    intentoNumero: int
+    fechaEntregaProgramada: datetime | None = None
+    fechaEntrega: datetime | None = None
+    reprogramadaPara: datetime | None = None
+
+
 class DomicilioMetricasResponse(BaseModel):
     empresaID: int
     sucursalID: int | None = None
@@ -205,6 +229,7 @@ class DomicilioMetricasResponse(BaseModel):
     porBarrio: list[DomicilioMetricasItem]
     porZona: list[DomicilioMetricasItem]
     novedades: list[DomicilioMetricasItem]
+    detalleNovedades: list[DomicilioMetricasNovedadDetalle]
 
 
 class PedidoDisponibleItem(BaseModel):
