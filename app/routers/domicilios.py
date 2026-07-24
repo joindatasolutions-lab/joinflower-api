@@ -1249,6 +1249,7 @@ def _metricas_base_params(
     fecha_desde: date,
     fecha_hasta: date,
     domiciliario_id: int | None = None,
+    estado_para_entrega: int | None = None,
 ) -> dict:
     return {
         "empresa_id": int(empresa_id),
@@ -1256,6 +1257,7 @@ def _metricas_base_params(
         "fecha_desde": datetime.combine(fecha_desde, datetime.min.time()),
         "fecha_hasta": datetime.combine(fecha_hasta + timedelta(days=1), datetime.min.time()),
         "domiciliario_id": (int(domiciliario_id) if domiciliario_id is not None else None),
+        "estado_para_entrega": int(estado_para_entrega) if estado_para_entrega is not None else None,
     }
 
 
@@ -1264,8 +1266,22 @@ def _metricas_where_sql() -> str:
         e.empresa_id = :empresa_id
         AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         AND (:domiciliario_id IS NULL OR e.domiciliarioid = :domiciliario_id)
+        AND pr.estado_produccion_id = :estado_para_entrega
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
+    """
+
+
+def _metricas_novedad_abierta_sql() -> str:
+    return """
+        NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL
+        AND lower(
+            replace(
+                replace(COALESCE(ee.codigo, ee.nombre, ''), '_', ''),
+                ' ',
+                ''
+            )
+        ) = 'noentregado'
     """
 
 
@@ -1281,7 +1297,7 @@ def _metricas_select_sql(group_expr: str, extra_select: str = "") -> str:
             COUNT(*) FILTER (WHERE ee.codigo = 'entregado')::int AS entregados,
             COUNT(*) FILTER (WHERE ee.codigo = 'no_entregado')::int AS no_entregados,
             COUNT(*) FILTER (WHERE ee.codigo = 'cancelado')::int AS cancelados,
-            COUNT(*) FILTER (WHERE NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL)::int AS novedades,
+            COUNT(*) FILTER (WHERE {_metricas_novedad_abierta_sql()})::int AS novedades,
             ROUND(
                 100.0 * COUNT(*) FILTER (WHERE ee.codigo = 'entregado') / NULLIF(COUNT(*), 0),
                 2
@@ -1301,6 +1317,9 @@ def _metricas_select_sql(group_expr: str, extra_select: str = "") -> str:
           ON ee.id_estado_entrega = e.estadoentregaid
         LEFT JOIN petalops.estado_pedido ep
           ON ep.id_estado_pedido = p.estado_pedido_id
+        JOIN petalops.produccion pr
+          ON pr.id_produccion = e.produccionid
+         AND pr.empresa_id = e.empresa_id
         LEFT JOIN petalops.empleado emp
           ON emp.id_empleado = e.domiciliarioid
          AND emp.empresa_id = e.empresa_id
@@ -1477,6 +1496,9 @@ def _metricas_novedades_detalle(db: Session, params: dict) -> list[DomicilioMetr
               ON ee.id_estado_entrega = e.estadoentregaid
             LEFT JOIN petalops.estado_pedido ep
               ON ep.id_estado_pedido = p.estado_pedido_id
+            JOIN petalops.produccion pr
+              ON pr.id_produccion = e.produccionid
+             AND pr.empresa_id = e.empresa_id
             LEFT JOIN petalops.empleado emp
               ON emp.id_empleado = e.domiciliarioid
              AND emp.empresa_id = e.empresa_id
@@ -1484,7 +1506,7 @@ def _metricas_novedades_detalle(db: Session, params: dict) -> list[DomicilioMetr
               ON b.id_barrio = e.barrioid
              AND b.empresa_id = e.empresa_id
             WHERE {_metricas_where_sql()}
-              AND NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL
+              AND {_metricas_novedad_abierta_sql()}
             ORDER BY
                 COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) DESC,
                 e.id_entrega DESC
@@ -1944,15 +1966,19 @@ def listar_admin(
     assert_same_empresa(auth, empresa_id)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
 
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
         .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
-        .filter(entrega_actual.empresaID == int(empresa_id))
+        .filter(
+            entrega_actual.empresaID == int(empresa_id),
+            Produccion.estado == estado_para_entrega,
+        )
     )
 
     q = _with_location_joins(q, entrega_actual, Pedido)
@@ -2741,6 +2767,7 @@ def obtener_metricas_domicilios(
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
         domiciliario_id=domiciliario_id,
+        estado_para_entrega=produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA),
     )
     return DomicilioMetricasResponse(
         empresaID=int(empresa_id),

@@ -7,6 +7,20 @@ from app.routers import domicilios as domicilios_router
 from app.services import domicilio_service
 
 
+class FakeQuery:
+    def __init__(self, first_value=None):
+        self._first_value = first_value
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return self._first_value
+
+
 def test_domicilio_capacity_default_disables_limit(monkeypatch):
     monkeypatch.delenv("DOMICILIO_MAX_TAREAS_ACTIVAS", raising=False)
     monkeypatch.setattr(domicilio_service, "count_entregas_activas", lambda *args, **kwargs: 999)
@@ -89,3 +103,49 @@ def test_domicilio_contadores_counts_disponibles_without_location_joins(monkeypa
     )
 
     assert captured["include_location"] is False
+
+
+def test_ensure_entrega_desde_produccion_sets_pending_when_production_ready(monkeypatch):
+    entrega = SimpleNamespace(
+        produccionID=None,
+        sucursalID=1,
+        estadoEntregaID=3,
+        domiciliarioID=48,
+        fechaAsignacion=datetime(2026, 7, 24, 9, 0, 0),
+        fechaSalida=datetime(2026, 7, 24, 9, 15, 0),
+        fechaEntregaProgramada=None,
+        fechaEntrega=None,
+        updatedAt=None,
+    )
+    produccion = SimpleNamespace(
+        idProduccion=77,
+        empresaID=3,
+        sucursalID=2,
+        pedidoID=2877,
+    )
+    pedido = SimpleNamespace(fechaPedido=datetime(2026, 7, 24, 8, 0, 0))
+
+    class FakeDb:
+        def __init__(self):
+            self.calls = 0
+
+        def query(self, *_args, **_kwargs):
+            self.calls += 1
+            return FakeQuery(first_value=None if self.calls == 1 else entrega)
+
+    monkeypatch.setattr(domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+
+    result = domicilio_service.ensure_entrega_desde_produccion(
+        db=FakeDb(),
+        produccion=produccion,
+        pedido=pedido,
+    )
+
+    assert result is entrega
+    assert entrega.produccionID == 77
+    assert entrega.sucursalID == 2
+    assert entrega.estadoEntregaID == 1
+    assert entrega.domiciliarioID is None
+    assert entrega.fechaAsignacion is None
+    assert entrega.fechaSalida is None
+    assert entrega.fechaEntregaProgramada == pedido.fechaPedido

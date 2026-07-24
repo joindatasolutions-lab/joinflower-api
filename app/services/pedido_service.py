@@ -17,8 +17,10 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.sucursal import Sucursal
+from app.schemas.domicilios import ESTADO_BORRADOR
 from app.schemas.pedido import PedidoCheckoutRequest
 from app.core.timezone import colombia_now_naive
+from app.services import domicilio_service
 
 
 def _activo_truthy(column):
@@ -306,7 +308,7 @@ def _crear_pedido_checkout_compuesto(
         empresaID=empresa_id,
         sucursalID=sucursal_id,
         pedidoID=pedido.idPedido,
-        estadoEntregaID=1,
+        estadoEntregaID=domicilio_service.resolve_or_create_estado_entrega_id(db, ESTADO_BORRADOR),
         tipoEntrega=entrega_payload.tipoEntrega,
         destinatario=entrega_payload.destinatario,
         telefonoDestino=entrega_payload.telefonoDestino,
