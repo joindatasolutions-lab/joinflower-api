@@ -87,6 +87,15 @@ FLORA_PAYMENT_METHODS = {
     "RAPPI",
     "Anulado",
 }
+
+STORE_PICKUP_DELIVERY_VALUES = (
+    "recogida_en_tienda",
+    "recoger_en_tienda",
+    "retiro_en_tienda",
+    "tienda",
+    "recogida",
+    "recoger",
+)
 FLORA_SALES_CHANNELS = {
     "Huawei",
     "Samsung",
@@ -924,6 +933,10 @@ def _resolve_costo_domicilio(
 def _normalize_delivery_type_from_barrio_name(barrio_nombre: str | None) -> str:
     nombre = str(barrio_nombre or "").strip().lower()
     return "recogida_en_tienda" if nombre == "recoger en tienda" else "domicilio"
+
+
+def _normalize_store_pickup_value(value: str | None) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _find_barrio_by_name(db: Session, *, empresa_id: int, sucursal_id: int, barrio_nombre: str | None) -> Barrio | None:
@@ -2037,9 +2050,24 @@ def listar_pedidos(
         base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
+        tipo_entrega_norm = func.lower(
+            func.replace(
+                func.replace(func.coalesce(Entrega.tipoEntrega, ""), "-", "_"),
+                " ",
+                "_",
+            )
+        )
+        barrio_nombre_norm = func.lower(
+            func.replace(
+                func.replace(func.coalesce(Entrega.barrioNombre, ""), "-", "_"),
+                " ",
+                "_",
+            )
+        )
         base = base.filter(
             or_(
-                func.lower(func.coalesce(Entrega.tipoEntrega, "")).in_(("recogida_en_tienda", "tienda")),
+                tipo_entrega_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
+                barrio_nombre_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
                 func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
             )
         )

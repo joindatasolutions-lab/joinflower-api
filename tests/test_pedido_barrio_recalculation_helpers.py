@@ -1,11 +1,20 @@
 from app.routers.barrios import _invalidate_barrios_cache
-from app.routers.pedido import _normalize_delivery_type_from_barrio_name
+from app.routers.pedido import (
+    STORE_PICKUP_DELIVERY_VALUES,
+    _normalize_delivery_type_from_barrio_name,
+    _normalize_store_pickup_value,
+)
 from app.services.cache import get_cache, set_cache
 
 
 def test_normalize_delivery_type_from_barrio_name_returns_store_pickup():
     assert _normalize_delivery_type_from_barrio_name("Recoger en tienda") == "recogida_en_tienda"
     assert _normalize_delivery_type_from_barrio_name(" recoger en tienda ") == "recogida_en_tienda"
+
+
+def test_store_pickup_filter_accepts_recoger_en_tienda_label():
+    assert _normalize_store_pickup_value("Recoger En Tienda") in STORE_PICKUP_DELIVERY_VALUES
+    assert _normalize_store_pickup_value("retiro-en-tienda") in STORE_PICKUP_DELIVERY_VALUES
 
 
 def test_normalize_delivery_type_from_barrio_name_returns_delivery_for_regular_neighborhood():
