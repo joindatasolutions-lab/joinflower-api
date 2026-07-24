@@ -371,3 +371,109 @@ def test_devolver_entrega_rejects_en_ruta(monkeypatch):
         )
 
     assert exc.value.status_code == 400
+
+
+def test_marcar_entregado_resolves_novedad_without_signature(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        sucursalID=1,
+        domiciliarioID=48,
+        estadoEntregaID=5,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones=None,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Empresa Admin", userID=100, login="admin")
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_NO_ENTREGADO)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
+
+    response = domicilios_router.marcar_entregado(
+        10,
+        usuarioCambio="admin",
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones="Nueva dirección",
+        firmaImagen=None,
+        evidenciaFoto=None,
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
+    assert entrega.estadoEntregaID == 4
+    assert entrega.firmaNombre is None
+    assert entrega.firmaDocumento is None
+    assert entrega.latitudEntrega is None
+    assert entrega.longitudEntrega is None
+    assert entrega.observaciones == "Nueva dirección"
+    assert db.committed is True
+
+
+def test_marcar_entregado_allows_optional_signature(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        sucursalID=1,
+        domiciliarioID=48,
+        estadoEntregaID=3,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones=None,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100, login="domi")
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
+
+    response = domicilios_router.marcar_entregado(
+        10,
+        usuarioCambio="domi",
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=4.7109,
+        longitudEntrega=-74.0721,
+        observaciones=None,
+        firmaImagen=None,
+        evidenciaFoto=None,
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
+    assert entrega.firmaNombre is None
+    assert entrega.firmaDocumento is None
+    assert entrega.latitudEntrega == 4.7109
+    assert entrega.longitudEntrega == -74.0721
+    assert db.committed is True

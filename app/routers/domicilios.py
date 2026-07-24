@@ -2272,12 +2272,12 @@ def marcar_en_ruta(
 def marcar_entregado(
     entrega_id: int,
     usuarioCambio: str = Form(...),
-    firmaNombre: str = Form(...),
-    firmaDocumento: str = Form(...),
+    firmaNombre: str | None = Form(None),
+    firmaDocumento: str | None = Form(None),
     firmaImagenUrl: str | None = Form(None),
     evidenciaFotoUrl: str | None = Form(None),
-    latitudEntrega: float = Form(...),
-    longitudEntrega: float = Form(...),
+    latitudEntrega: float | None = Form(None),
+    longitudEntrega: float | None = Form(None),
     observaciones: str | None = Form(None),
     firmaImagen: UploadFile | None = File(None),
     evidenciaFoto: UploadFile | None = File(None),
@@ -2295,18 +2295,28 @@ def marcar_entregado(
         current=actual,
         target=ESTADO_ENTREGADO,
     )
+    resuelve_novedad = actual == ESTADO_NO_ENTREGADO
+    if not resuelve_novedad:
+        if latitudEntrega is None:
+            raise _err("DOMICILIO_LATITUD_REQUIRED", "latitudEntrega es requerida para marcar entregado", status_code=422)
+        if longitudEntrega is None:
+            raise _err("DOMICILIO_LONGITUD_REQUIRED", "longitudEntrega es requerida para marcar entregado", status_code=422)
 
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ENTREGADO)
     entrega.fechaEntrega = datetime.now(timezone.utc)
-    entrega.firmaNombre = firmaNombre.strip()
-    entrega.firmaDocumento = firmaDocumento.strip()
+    if str(firmaNombre or "").strip():
+        entrega.firmaNombre = str(firmaNombre).strip()
+    if str(firmaDocumento or "").strip():
+        entrega.firmaDocumento = str(firmaDocumento).strip()
     if firmaImagen is not None:
         entrega.firmaImagenUrl = _save_upload_file(firmaImagen)
     elif firmaImagenUrl:
         entrega.firmaImagenUrl = firmaImagenUrl.strip()
     entrega.evidenciaFotoUrl = _save_upload_file(evidenciaFoto) or (evidenciaFotoUrl.strip() if evidenciaFotoUrl else None)
-    entrega.latitudEntrega = latitudEntrega
-    entrega.longitudEntrega = longitudEntrega
+    if latitudEntrega is not None:
+        entrega.latitudEntrega = latitudEntrega
+    if longitudEntrega is not None:
+        entrega.longitudEntrega = longitudEntrega
     entrega.observaciones = (observaciones or "").strip() or entrega.observaciones
     entrega.updatedAt = datetime.now(timezone.utc)
     _audit_domicilio_action(
@@ -2317,11 +2327,11 @@ def marcar_entregado(
         estado_anterior=actual,
         estado_nuevo=ESTADO_ENTREGADO,
         extra={
-            "firmaNombre": entrega.firmaNombre,
-            "firmaDocumento": entrega.firmaDocumento,
+            "firmaNombre": str(getattr(entrega, "firmaNombre", "") or "").strip() or None,
+            "firmaDocumento": str(getattr(entrega, "firmaDocumento", "") or "").strip() or None,
             "evidenciaFotoUrl": entrega.evidenciaFotoUrl,
             "observaciones": str(observaciones or "").strip() or None,
-            "resuelveNovedad": actual == ESTADO_NO_ENTREGADO,
+            "resuelveNovedad": resuelve_novedad,
         },
     )
     db.commit()
