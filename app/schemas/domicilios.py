@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 
 
 ESTADO_PENDIENTE = "Pendiente"
-ESTADO_BORRADOR = "Borrador"
 ESTADO_ASIGNADO = "Asignado"
 ESTADO_EN_RUTA = "EnRuta"
 ESTADO_ENTREGADO = "Entregado"

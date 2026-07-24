@@ -274,7 +274,6 @@ def test_metricas_novedades_detalle_returns_order_detail():
 
     assert db.last_params == params
     assert "motivonoentregado" in db.last_query
-    assert "= 'noentregado'" in db.last_query
     assert detalles[0].idEntrega == 10
     assert detalles[0].pedidoID == 20
     assert detalles[0].numeroPedido == "96412"

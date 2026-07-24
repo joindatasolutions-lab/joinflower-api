@@ -16,7 +16,6 @@ from app.models.produccion import Produccion
 from app.models.transicionestadoentrega import TransicionEstadoEntrega
 from app.schemas.domicilios import (
     ESTADO_ASIGNADO,
-    ESTADO_BORRADOR,
     ESTADO_CANCELADO,
     ESTADO_EN_RUTA,
     ESTADO_ENTREGADO,
@@ -25,7 +24,6 @@ from app.schemas.domicilios import (
 )
 
 TRANSICIONES_VALIDAS = {
-    ESTADO_BORRADOR: {ESTADO_PENDIENTE, ESTADO_CANCELADO},
     ESTADO_PENDIENTE: {ESTADO_ASIGNADO, ESTADO_CANCELADO},
     ESTADO_ASIGNADO: {ESTADO_EN_RUTA, ESTADO_CANCELADO},
     ESTADO_EN_RUTA: {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO},
@@ -36,7 +34,6 @@ TRANSICIONES_VALIDAS = {
 
 # Fallback IDs when estado_entrega catalog is not seeded yet.
 ESTADO_ID_FALLBACK = {
-    ESTADO_BORRADOR: 0,
     ESTADO_PENDIENTE: 1,
     ESTADO_ASIGNADO: 2,
     ESTADO_EN_RUTA: 3,
@@ -67,8 +64,6 @@ def estado_norm(value: str | int | None) -> str:
         return ESTADO_FROM_ID_FALLBACK.get(int(text), ESTADO_PENDIENTE)
 
     text = str(value or "").strip().upper().replace("_", "")
-    if text == "BORRADOR":
-        return ESTADO_BORRADOR
     if text == "PENDIENTE":
         return ESTADO_PENDIENTE
     if text == "ASIGNADO":
@@ -175,34 +170,6 @@ def resolve_estado_entrega_id(db: Session, value: str | int | None) -> int:
         return int(row[0])
 
     return fallback_id
-
-
-def resolve_or_create_estado_entrega_id(db: Session, value: str, nombre: str | None = None) -> int:
-    normalized = estado_norm(value)
-    if not _estado_entrega_table_exists(db):
-        return estado_id(normalized)
-
-    normalized_sql = normalized.upper().replace("_", "").replace(" ", "")
-    row = (
-        db.query(EstadoEntrega)
-        .filter(
-            func.replace(func.replace(func.upper(EstadoEntrega.codigo), "_", ""), " ", "")
-            == normalized_sql
-        )
-        .first()
-    )
-    if row:
-        return int(row.idEstadoEntrega)
-
-    estado = EstadoEntrega(
-        codigo=normalized.lower(),
-        nombre=nombre or normalized,
-        orden=0 if normalized == ESTADO_BORRADOR else None,
-        createdAt=now_utc(),
-    )
-    db.add(estado)
-    db.flush()
-    return int(estado.idEstadoEntrega)
 
 
 def assert_transition_allowed_for_empresa(
@@ -423,18 +390,17 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
     else:
         entrega.produccionID = int(produccion.idProduccion)
         entrega.sucursalID = int(produccion.sucursalID)
+        entrega.estadoEntregaID = estado_id(entrega.estadoEntregaID)
         entrega.updatedAt = current_time
-
-    entrega.estadoEntregaID = resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
-    entrega.domiciliarioID = None
-    entrega.fechaAsignacion = None
-    entrega.fechaSalida = None
 
     if pedido and not entrega.fechaEntregaProgramada:
         entrega.fechaEntregaProgramada = entrega.fechaEntrega or pedido.fechaPedido
 
     if not entrega.fechaEntregaProgramada and entrega.fechaEntrega:
         entrega.fechaEntregaProgramada = entrega.fechaEntrega
+
+    if not entrega.estadoEntregaID:
+        entrega.estadoEntregaID = ESTADO_ID_FALLBACK[ESTADO_PENDIENTE]
 
     return entrega
 
