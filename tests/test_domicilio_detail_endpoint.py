@@ -77,6 +77,7 @@ class FakeMetricasDb:
 
 def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *args, **kwargs: None)
+    monkeypatch.setattr(domicilios_router, "_domicilio_auditoria", lambda *args, **kwargs: [])
 
     entrega = SimpleNamespace(
         idEntrega=10,
@@ -84,6 +85,7 @@ def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
         pedidoID=20,
         mensaje="Feliz cumple",
         domiciliarioID=48,
+        estadoEntregaID=4,
     )
     pedido = SimpleNamespace(
         idPedido=20,
@@ -112,9 +114,11 @@ def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
     response = domicilios_router.obtener_detalle_domicilio(10, db=db, auth=auth)
 
     assert response.idEntrega == 10
-    assert response.numeroPedido == "FLR-96412"
+    assert response.numeroPedido == "96412"
     assert response.cliente == "Cliente Demo"
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
     assert response.customerMessage == "Feliz cumple"
+    assert response.auditoria == []
     assert response.items[0].productId == 50
     assert response.items[0].name == "Ramo Primavera"
     assert response.items[0].qty == 2
@@ -272,11 +276,44 @@ def test_metricas_novedades_detalle_returns_order_detail():
     assert "motivonoentregado" in db.last_query
     assert detalles[0].idEntrega == 10
     assert detalles[0].pedidoID == 20
-    assert detalles[0].numeroPedido == "FLR-96412"
+    assert detalles[0].numeroPedido == "96412"
     assert detalles[0].cliente == "Cliente Demo"
     assert detalles[0].domiciliario == "Domi Demo"
     assert detalles[0].novedad == "Dirección incorrecta"
     assert detalles[0].fechaEntregaProgramada == fecha_programada
+
+
+def test_novedad_audit_summary_tracks_resolution():
+    novedad_at = datetime(2026, 7, 23, 9, 30, 0)
+    resolved_at = datetime(2026, 7, 23, 11, 45, 0)
+    entrega = SimpleNamespace(motivoNoEntregado="Dirección incorrecta")
+    auditoria = [
+        domicilios_router.DomicilioAuditItem(
+            accion="MARCAR_NO_ENTREGADO",
+            estadoAnterior="en_ruta",
+            estadoNuevo="no_entregado",
+            actorLogin="mateo",
+            detalle={"motivo": "Dirección incorrecta"},
+            createdAt=novedad_at,
+        ),
+        domicilios_router.DomicilioAuditItem(
+            accion="RESOLVER_NOVEDAD",
+            estadoAnterior="no_entregado",
+            estadoNuevo="entregado",
+            actorLogin="admin",
+            detalle={"solucion": "Pedido entregado después de resolver la novedad"},
+            createdAt=resolved_at,
+        ),
+    ]
+
+    summary = domicilios_router._novedad_audit_summary(auditoria, entrega)
+
+    assert summary["novedad"] == "Dirección incorrecta"
+    assert summary["novedadRegistradaEn"] == novedad_at
+    assert summary["novedadRegistradaPor"] == "mateo"
+    assert summary["resolucion"] == "Pedido entregado después de resolver la novedad"
+    assert summary["resueltaEn"] == resolved_at
+    assert summary["resueltaPor"] == "admin"
 
 
 def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
@@ -297,6 +334,7 @@ def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
     monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_ASIGNADO)
     monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
 
     response = domicilios_router.devolver_entrega(
         10,
@@ -322,6 +360,7 @@ def test_devolver_entrega_rejects_en_ruta(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
 
     with pytest.raises(HTTPException) as exc:
         domicilios_router.devolver_entrega(

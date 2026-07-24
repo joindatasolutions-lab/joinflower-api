@@ -191,6 +191,17 @@ class DomicilioMetricasItem(BaseModel):
     costoDomicilioPromedio: float
 
 
+class DomicilioAuditItem(BaseModel):
+    accion: str
+    estadoAnterior: str | None = None
+    estadoNuevo: str | None = None
+    actorUserID: int | None = None
+    actorLogin: str | None = None
+    domiciliarioID: int | None = None
+    detalle: dict | None = None
+    createdAt: datetime
+
+
 class DomicilioMetricasNovedadDetalle(BaseModel):
     idEntrega: int
     pedidoID: int
@@ -330,5 +341,13 @@ class DomicilioDetailResponse(BaseModel):
     idEntrega: int
     numeroPedido: str
     cliente: str
+    estado: str | None = None
     items: list[OrderItemDetail]
     customerMessage: str | None = None  # Solo para usuarios autorizados
+    novedad: str | None = None
+    novedadRegistradaEn: datetime | None = None
+    novedadRegistradaPor: str | None = None
+    resolucion: str | None = None
+    resueltaEn: datetime | None = None
+    resueltaPor: str | None = None
+    auditoria: list[DomicilioAuditItem] = Field(default_factory=list)

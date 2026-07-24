@@ -49,6 +49,7 @@ from app.schemas.domicilios import (
     DomiciliarioListResponse,
     DomiciliarioUpdateRequest,
     DomicilioActionResponse,
+    DomicilioAuditItem,
     DomicilioAdminItem,
     DomicilioAdminListResponse,
     DomicilioContadoresResponse,
@@ -338,6 +339,110 @@ def _audit_domicilio_action(
             "detalle_json": json.dumps(extra or {}, ensure_ascii=True),
         },
     )
+
+
+def _parse_audit_detail(value) -> dict | None:
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _domicilio_auditoria(db: Session, entrega: Entrega) -> list[DomicilioAuditItem]:
+    _ensure_domicilio_auditoria_table(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                accion,
+                estado_anterior,
+                estado_nuevo,
+                actor_user_id,
+                actor_login,
+                domiciliario_id,
+                detalle_json,
+                created_at
+            FROM petalops.domicilio_auditoria
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = :pedido_id
+            ORDER BY created_at ASC, id_audit ASC
+            """
+        ),
+        {
+            "empresa_id": int(entrega.empresaID),
+            "pedido_id": int(entrega.pedidoID),
+            "entrega_id": int(entrega.idEntrega),
+        },
+    ).mappings().all()
+
+    return [
+        DomicilioAuditItem(
+            accion=str(row.get("accion") or ""),
+            estadoAnterior=(str(row.get("estado_anterior")).strip() if row.get("estado_anterior") else None),
+            estadoNuevo=(str(row.get("estado_nuevo")).strip() if row.get("estado_nuevo") else None),
+            actorUserID=(int(row["actor_user_id"]) if row.get("actor_user_id") is not None else None),
+            actorLogin=(str(row.get("actor_login")).strip() if row.get("actor_login") else None),
+            domiciliarioID=(int(row["domiciliario_id"]) if row.get("domiciliario_id") is not None else None),
+            detalle=_parse_audit_detail(row.get("detalle_json")),
+            createdAt=row.get("created_at"),
+        )
+        for row in rows
+        if row.get("created_at") is not None
+    ]
+
+
+def _novedad_audit_summary(
+    auditoria: list[DomicilioAuditItem],
+    entrega: Entrega,
+) -> dict:
+    def norm(value: str | None) -> str:
+        return str(value or "").strip().lower().replace("_", "").replace(" ", "")
+
+    novedad_event = None
+    for item in auditoria:
+        accion = norm(item.accion)
+        estado_nuevo = norm(item.estadoNuevo)
+        if estado_nuevo == norm(ESTADO_NO_ENTREGADO) or accion in {"noentregado", "marcarnoentregado"}:
+            novedad_event = item
+
+    resolution_event = None
+    if novedad_event:
+        for item in auditoria:
+            if item.createdAt <= novedad_event.createdAt:
+                continue
+            accion = norm(item.accion)
+            estado_nuevo = norm(item.estadoNuevo)
+            if accion == "resolvernovedad" or (estado_nuevo and estado_nuevo != norm(ESTADO_NO_ENTREGADO)):
+                resolution_event = item
+                break
+
+    detalle_novedad = novedad_event.detalle if novedad_event else None
+    detalle_resolucion = resolution_event.detalle if resolution_event else None
+    motivo = (
+        (detalle_novedad or {}).get("motivo")
+        or getattr(entrega, "motivoNoEntregado", None)
+    )
+    resolucion = None
+    if resolution_event:
+        resolucion = (
+            (detalle_resolucion or {}).get("solucion")
+            or (detalle_resolucion or {}).get("observaciones")
+            or resolution_event.accion
+        )
+
+    return {
+        "novedad": (str(motivo).strip() if motivo else None),
+        "novedadRegistradaEn": (novedad_event.createdAt if novedad_event else None),
+        "novedadRegistradaPor": (novedad_event.actorLogin if novedad_event else None),
+        "resolucion": (str(resolucion).strip() if resolucion else None),
+        "resueltaEn": (resolution_event.createdAt if resolution_event else None),
+        "resueltaPor": (resolution_event.actorLogin if resolution_event else None),
+    }
 
 
 def _latest_entrega_id_subquery(db: Session, empresa_id: int):
@@ -1392,7 +1497,8 @@ def _metricas_novedades_detalle(db: Session, params: dict) -> list[DomicilioMetr
     for row in rows:
         data = dict(row)
         codigo_pedido = str(data["codigo_pedido"]).strip() if data.get("codigo_pedido") else None
-        numero_pedido = codigo_pedido or str(data.get("numero_pedido") or data.get("pedido_id"))
+        numero_pedido_base = str(data.get("numero_pedido") or data.get("pedido_id"))
+        numero_pedido = numero_pedido_base if int(params.get("empresa_id") or 0) == 3 else (codigo_pedido or numero_pedido_base)
         detalles.append(
             DomicilioMetricasNovedadDetalle(
                 idEntrega=int(data["id_entrega"]),
@@ -2101,6 +2207,15 @@ def devolver_entrega(
     entrega.fechaSalida = None
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="DEVOLUCION",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_PENDIENTE,
+        extra={"motivoPrevio": str(getattr(entrega, "motivoNoEntregado", None) or "").strip() or None},
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_PENDIENTE)
@@ -2135,6 +2250,15 @@ def marcar_en_ruta(
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA)
     entrega.fechaSalida = datetime.now(timezone.utc)
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="EN_RUTA",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_EN_RUTA,
+        extra={"fechaSalida": entrega.fechaSalida.isoformat() if entrega.fechaSalida else None},
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_EN_RUTA)
@@ -2185,6 +2309,21 @@ def marcar_entregado(
     entrega.longitudEntrega = longitudEntrega
     entrega.observaciones = (observaciones or "").strip() or entrega.observaciones
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="ENTREGADO",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_ENTREGADO,
+        extra={
+            "firmaNombre": entrega.firmaNombre,
+            "firmaDocumento": entrega.firmaDocumento,
+            "evidenciaFotoUrl": entrega.evidenciaFotoUrl,
+            "observaciones": str(observaciones or "").strip() or None,
+            "resuelveNovedad": actual == ESTADO_NO_ENTREGADO,
+        },
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ENTREGADO)
@@ -2218,6 +2357,19 @@ def marcar_no_entregado(
     entrega.observaciones = (payload.observaciones or "").strip() or entrega.observaciones
     entrega.reprogramadaPara = payload.reprogramarPara
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="NO_ENTREGADO",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_NO_ENTREGADO,
+        extra={
+            "motivo": entrega.motivoNoEntregado,
+            "observaciones": str(payload.observaciones or "").strip() or None,
+            "reprogramarPara": payload.reprogramarPara.isoformat() if payload.reprogramarPara else None,
+        },
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_NO_ENTREGADO)
@@ -2795,14 +2947,24 @@ def obtener_detalle_domicilio(
             )
         
         # Construir respuesta con formato correcto
-        numero_pedido_str = str(pedido.codigoPedido or pedido.numeroPedido or pedido.idPedido)
+        numero_pedido_base = str(pedido.numeroPedido or pedido.idPedido)
+        numero_pedido_str = (
+            numero_pedido_base
+            if int(pedido.empresaID) == 3
+            else str(pedido.codigoPedido or numero_pedido_base)
+        )
+        auditoria = _domicilio_auditoria(db, entrega)
+        novedad_summary = _novedad_audit_summary(auditoria, entrega)
         
         return DomicilioDetailResponse(
             idEntrega=int(entrega.idEntrega),
             numeroPedido=numero_pedido_str,
             cliente=cliente_nombre,
+            estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
             items=items,
             customerMessage=(str(entrega.mensaje or "") or None),
+            auditoria=auditoria,
+            **novedad_summary,
         )
         
     except HTTPException:
