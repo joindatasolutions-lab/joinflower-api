@@ -2264,31 +2264,35 @@ def marcar_en_ruta(
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_EN_RUTA)
 
 
-@router.put(
-    "/{entrega_id}/entregado",
-    response_model=DomicilioActionResponse,
-    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
-)
-def marcar_entregado(
+def _marcar_entregado_impl(
     entrega_id: int,
-    usuarioCambio: str = Form(...),
-    firmaNombre: str | None = Form(None),
-    firmaDocumento: str | None = Form(None),
-    firmaImagenUrl: str | None = Form(None),
-    evidenciaFotoUrl: str | None = Form(None),
-    latitudEntrega: float | None = Form(None),
-    longitudEntrega: float | None = Form(None),
-    observaciones: str | None = Form(None),
-    firmaImagen: UploadFile | None = File(None),
-    evidenciaFoto: UploadFile | None = File(None),
-    db: Session = Depends(get_db),
-    auth=Depends(get_current_auth_context),
-):
+    usuarioCambio: str,
+    firmaNombre: str | None,
+    firmaDocumento: str | None,
+    firmaImagenUrl: str | None,
+    evidenciaFotoUrl: str | None,
+    latitudEntrega: float | None,
+    longitudEntrega: float | None,
+    observaciones: str | None,
+    firmaImagen: UploadFile | None,
+    evidenciaFoto: UploadFile | None,
+    db: Session,
+    auth,
+    *,
+    accion_auditoria: str = "ENTREGADO",
+    requiere_novedad: bool = False,
+) -> DomicilioActionResponse:
     entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
     assert_same_empresa(auth, int(entrega.empresaID))
     _assert_entrega_actor_scope(entrega, auth, db)
 
     actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if requiere_novedad and actual != ESTADO_NO_ENTREGADO:
+        raise _err(
+            "DOMICILIO_NOVEDAD_REQUIRED",
+            "Solo se pueden resolver novedades en entregas no entregadas",
+            status_code=400,
+        )
     domicilio_service.assert_transition_allowed_for_empresa(
         db=db,
         empresa_id=int(entrega.empresaID),
@@ -2323,10 +2327,11 @@ def marcar_entregado(
         db=db,
         auth=auth,
         entrega=entrega,
-        accion="ENTREGADO",
+        accion=accion_auditoria,
         estado_anterior=actual,
         estado_nuevo=ESTADO_ENTREGADO,
         extra={
+            "usuarioCambio": str(usuarioCambio or "").strip(),
             "firmaNombre": str(getattr(entrega, "firmaNombre", "") or "").strip() or None,
             "firmaDocumento": str(getattr(entrega, "firmaDocumento", "") or "").strip() or None,
             "evidenciaFotoUrl": entrega.evidenciaFotoUrl,
@@ -2337,6 +2342,82 @@ def marcar_entregado(
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ENTREGADO)
+
+
+@router.put(
+    "/{entrega_id}/entregado",
+    response_model=DomicilioActionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def marcar_entregado(
+    entrega_id: int,
+    usuarioCambio: str = Form(...),
+    firmaNombre: str | None = Form(None),
+    firmaDocumento: str | None = Form(None),
+    firmaImagenUrl: str | None = Form(None),
+    evidenciaFotoUrl: str | None = Form(None),
+    latitudEntrega: float | None = Form(None),
+    longitudEntrega: float | None = Form(None),
+    observaciones: str | None = Form(None),
+    firmaImagen: UploadFile | None = File(None),
+    evidenciaFoto: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    return _marcar_entregado_impl(
+        entrega_id=entrega_id,
+        usuarioCambio=usuarioCambio,
+        firmaNombre=firmaNombre,
+        firmaDocumento=firmaDocumento,
+        firmaImagenUrl=firmaImagenUrl,
+        evidenciaFotoUrl=evidenciaFotoUrl,
+        latitudEntrega=latitudEntrega,
+        longitudEntrega=longitudEntrega,
+        observaciones=observaciones,
+        firmaImagen=firmaImagen,
+        evidenciaFoto=evidenciaFoto,
+        db=db,
+        auth=auth,
+    )
+
+
+@router.put(
+    "/{entrega_id}/resolver-novedad",
+    response_model=DomicilioActionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def resolver_novedad(
+    entrega_id: int,
+    usuarioCambio: str = Form(...),
+    observaciones: str | None = Form(None),
+    evidenciaFotoUrl: str | None = Form(None),
+    latitudEntrega: float | None = Form(None),
+    longitudEntrega: float | None = Form(None),
+    firmaNombre: str | None = Form(None),
+    firmaDocumento: str | None = Form(None),
+    firmaImagenUrl: str | None = Form(None),
+    firmaImagen: UploadFile | None = File(None),
+    evidenciaFoto: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    return _marcar_entregado_impl(
+        entrega_id=entrega_id,
+        usuarioCambio=usuarioCambio,
+        firmaNombre=firmaNombre,
+        firmaDocumento=firmaDocumento,
+        firmaImagenUrl=firmaImagenUrl,
+        evidenciaFotoUrl=evidenciaFotoUrl,
+        latitudEntrega=latitudEntrega,
+        longitudEntrega=longitudEntrega,
+        observaciones=observaciones,
+        firmaImagen=firmaImagen,
+        evidenciaFoto=evidenciaFoto,
+        db=db,
+        auth=auth,
+        accion_auditoria="RESOLVER_NOVEDAD",
+        requiere_novedad=True,
+    )
 
 
 @router.put(
