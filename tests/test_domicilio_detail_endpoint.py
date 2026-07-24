@@ -452,7 +452,10 @@ def test_resolver_novedad_endpoint_marks_delivered(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_NO_ENTREGADO)
-    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", lambda *_args, **_kwargs: None)
+    def fail_transition(*_args, **_kwargs):
+        raise AssertionError("resolver_novedad should bypass transition table")
+
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", fail_transition)
     monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
     monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda **kwargs: audit_calls.append(kwargs))
 

@@ -2293,13 +2293,14 @@ def _marcar_entregado_impl(
             "Solo se pueden resolver novedades en entregas no entregadas",
             status_code=400,
         )
-    domicilio_service.assert_transition_allowed_for_empresa(
-        db=db,
-        empresa_id=int(entrega.empresaID),
-        current=actual,
-        target=ESTADO_ENTREGADO,
-    )
     resuelve_novedad = actual == ESTADO_NO_ENTREGADO
+    if not (requiere_novedad and resuelve_novedad):
+        domicilio_service.assert_transition_allowed_for_empresa(
+            db=db,
+            empresa_id=int(entrega.empresaID),
+            current=actual,
+            target=ESTADO_ENTREGADO,
+        )
     if not resuelve_novedad:
         if latitudEntrega is None:
             raise _err("DOMICILIO_LATITUD_REQUIRED", "latitudEntrega es requerida para marcar entregado", status_code=422)
