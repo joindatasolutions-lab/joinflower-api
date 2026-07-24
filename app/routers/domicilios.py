@@ -31,6 +31,7 @@ from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.empresa import Empresa
 from app.models.entrega import Entrega
+from app.models.estadopedido import EstadoPedido
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
@@ -1264,6 +1265,7 @@ def _metricas_where_sql() -> str:
         e.empresa_id = :empresa_id
         AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         AND (:domiciliario_id IS NULL OR e.domiciliarioid = :domiciliario_id)
+        AND upper(COALESCE(ep.nombre_estado, '')) <> 'CREADO'
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
     """
@@ -1950,9 +1952,13 @@ def listar_admin(
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
         .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
-        .filter(entrega_actual.empresaID == int(empresa_id))
+        .filter(
+            entrega_actual.empresaID == int(empresa_id),
+            func.upper(func.coalesce(EstadoPedido.nombreEstado, "")) != "CREADO",
+        )
     )
 
     q = _with_location_joins(q, entrega_actual, Pedido)
