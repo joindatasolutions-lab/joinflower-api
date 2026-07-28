@@ -13,3 +13,4 @@ class Empresa(Base):
     # consumidores caian al valor por defecto "FLORA" para todas las empresas.
     nombreEmpresa = Column("nombre_empresa", String(150), nullable=True)
     nombreComercial = Column("nombre_comercial", String(180), nullable=True)
+    slug = Column("slug", String(50), nullable=True)

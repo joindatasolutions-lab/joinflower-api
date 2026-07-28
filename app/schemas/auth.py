@@ -20,6 +20,8 @@ class PermisoModuloItem(BaseModel):
 class AuthMeResponse(BaseModel):
     userID: int
     empresaID: int
+    empresaNombre: str | None = None
+    empresaSlug: str | None = None
     sucursalID: int | None = None
     planID: int | None = None
     rolID: int
@@ -57,6 +59,8 @@ class TokenPayload(BaseModel):
 class AuthContext(BaseModel):
     userID: int
     empresaID: int
+    empresaNombre: str | None = None
+    empresaSlug: str | None = None
     sucursalID: int | None = None
     rolID: int
     planID: int | None = None
@@ -89,6 +93,8 @@ class AuthContext(BaseModel):
         return {
             "userID": self.userID,
             "empresaID": self.empresaID,
+            "empresaNombre": self.empresaNombre,
+            "empresaSlug": self.empresaSlug,
             "sucursalID": self.sucursalID,
             "planID": self.planID,
             "rolID": self.rolID,
@@ -200,6 +206,7 @@ class SucursalListResponse(BaseModel):
 class EmpresaOption(BaseModel):
     empresaID: int
     nombre: str
+    empresaSlug: str | None = None
 
 
 class EmpresaListResponse(BaseModel):
@@ -233,6 +240,7 @@ class EmpresaModuloListResponse(BaseModel):
 class EmpresaModuloResumenItem(BaseModel):
     empresaID: int
     nombre: str
+    empresaSlug: str | None = None
     planID: int | None = None
     estado: str | None = None
     items: list[EmpresaModuloItem]

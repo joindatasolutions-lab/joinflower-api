@@ -330,7 +330,7 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         )
     ).first()
     if not table_row:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
 
     table_name = str(table_row[0])
 
@@ -356,19 +356,34 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         else ("planid" if "planid" in cols else ("planID" if "planID" in cols else None))
     )
     estado_col = "estado" if "estado" in cols else None
+    slug_col = "slug" if "slug" in cols else None
+    nombre_comercial_col = "nombre_comercial" if "nombre_comercial" in cols else None
+    nombre_empresa_col = (
+        "nombre_empresa" if "nombre_empresa" in cols
+        else ("nombreempresa" if "nombreempresa" in cols else ("nombreEmpresa" if "nombreEmpresa" in cols else None))
+    )
 
     if id_col is None:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
 
     q_table = f'"{table_name}"'
     q_id_col = f'"{id_col}"'
     plan_select = f'"{plan_col}" AS plan_id' if plan_col else "NULL AS plan_id"
     estado_select = f'"{estado_col}" AS estado' if estado_col else "NULL AS estado"
+    slug_select = f'"{slug_col}" AS slug' if slug_col else "NULL AS slug"
+    if nombre_comercial_col and nombre_empresa_col:
+        nombre_select = f'COALESCE("{nombre_comercial_col}", "{nombre_empresa_col}") AS nombre'
+    elif nombre_comercial_col:
+        nombre_select = f'"{nombre_comercial_col}" AS nombre'
+    elif nombre_empresa_col:
+        nombre_select = f'"{nombre_empresa_col}" AS nombre'
+    else:
+        nombre_select = "NULL AS nombre"
 
     try:
         row = db.execute(
             text(
-                f"SELECT {q_id_col} AS empresa_id, {plan_select}, {estado_select} "
+                f"SELECT {q_id_col} AS empresa_id, {plan_select}, {estado_select}, {nombre_select}, {slug_select} "
                 f"FROM petalops.{q_table} WHERE {q_id_col} = :empresa_id LIMIT 1"
             ),
             {"empresa_id": int(empresa_id)},
@@ -379,11 +394,13 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if not row:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
     return {
         "exists": True,
         "planID": (int(row.get("plan_id")) if row.get("plan_id") is not None else None),
         "estado": row.get("estado"),
+        "nombre": (str(row.get("nombre")).strip() if row.get("nombre") is not None else None),
+        "slug": (str(row.get("slug")).strip() if row.get("slug") is not None else None),
     }
 
 def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, bool] | None:
@@ -473,6 +490,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     rol_id = _safe_int(payload.get("rolID"), 0)
     sucursal_id = payload.get("sucursalID")
     plan_id = payload.get("planID")
+    empresa_nombre = None
+    empresa_slug = None
 
     usuario = (
         db.query(Usuario)
@@ -518,6 +537,10 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             }
             for modulo in modulos_plan
         }
+        if empresa_id:
+            empresa_meta = load_empresa_auth_meta(db, empresa_id)
+            empresa_nombre = empresa_meta.get("nombre")
+            empresa_slug = empresa_meta.get("slug")
     elif is_superadmin_user and impersonated:
         empresa_id = int(impersonated_empresa_id)
         rol_id = _safe_int(payload.get("impersonatedRolID"), 0)
@@ -525,6 +548,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         empresa_meta = load_empresa_auth_meta(db, empresa_id)
         if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+        empresa_nombre = empresa_meta.get("nombre")
+        empresa_slug = empresa_meta.get("slug")
 
         effective_plan_id = (
             empresa_meta["planID"]
@@ -602,6 +627,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         empresa_meta = load_empresa_auth_meta(db, empresa_id)
         if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+        empresa_nombre = empresa_meta.get("nombre")
+        empresa_slug = empresa_meta.get("slug")
 
         rol = (
             db.query(Rol)
@@ -694,6 +721,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     return AuthContext(
         userID=user_id,
         empresaID=empresa_id,
+        empresaNombre=empresa_nombre,
+        empresaSlug=empresa_slug,
         sucursalID=(_safe_int(usuario.sucursalID) if usuario.sucursalID is not None else _safe_int(sucursal_id)),
         rolID=rol_id,
         planID=effective_plan_id,

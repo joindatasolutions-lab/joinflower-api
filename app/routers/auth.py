@@ -1369,7 +1369,7 @@ def listar_empresas(
         rows = db.execute(
             text(
                 """
-                SELECT id_empresa, COALESCE(nombre_comercial, nombre_empresa) AS nombre
+                SELECT id_empresa, COALESCE(nombre_comercial, nombre_empresa) AS nombre, slug
                 FROM petalops.empresa
                 ORDER BY id_empresa ASC
                 """
@@ -1380,7 +1380,7 @@ def listar_empresas(
         rows = db.execute(
             text(
                 """
-                SELECT id_empresa, CONCAT('Empresa ', id_empresa) AS nombre
+                SELECT id_empresa, CONCAT('Empresa ', id_empresa) AS nombre, NULL AS slug
                 FROM petalops.empresa
                 ORDER BY id_empresa ASC
                 """
@@ -1389,7 +1389,11 @@ def listar_empresas(
 
     return EmpresaListResponse(
         items=[
-            EmpresaOption(empresaID=int(row[0]), nombre=str(row[1] or f"Empresa {int(row[0])}"))
+            EmpresaOption(
+                empresaID=int(row[0]),
+                nombre=str(row[1] or f"Empresa {int(row[0])}"),
+                empresaSlug=(str(row[2]).strip() if row[2] is not None else None),
+            )
             for row in rows
         ]
     )
@@ -1406,6 +1410,7 @@ def listar_empresas_modulos(
                 """
                 SELECT id_empresa,
                        COALESCE(nombre_comercial, nombre_empresa, CONCAT('Empresa ', id_empresa)) AS nombre,
+                       slug,
                        plan_id,
                        estado
                 FROM petalops.empresa
@@ -1420,6 +1425,7 @@ def listar_empresas_modulos(
                 """
                 SELECT id_empresa,
                        CONCAT('Empresa ', id_empresa) AS nombre,
+                       NULL AS slug,
                        NULL AS plan_id,
                        'Activo' AS "estado"
                 FROM petalops.empresa
@@ -1440,8 +1446,9 @@ def listar_empresas_modulos(
             EmpresaModuloResumenItem(
                 empresaID=empresa_id,
                 nombre=str(row[1] or f"Empresa {empresa_id}"),
-                planID=(int(row[2]) if row[2] is not None else None),
-                estado=(str(row[3]) if row[3] is not None else None),
+                empresaSlug=(str(row[2]).strip() if row[2] is not None else None),
+                planID=(int(row[3]) if row[3] is not None else None),
+                estado=(str(row[4]) if row[4] is not None else None),
                 items=modulos,
             )
         )
