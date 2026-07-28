@@ -971,6 +971,26 @@ def _build_pedidos_sin_asignar_query(
     )
 
 
+def _assert_pedido_para_entrega(db: Session, pedido: Pedido, entrega: Entrega) -> Produccion:
+    produccion = (
+        db.query(Produccion)
+        .filter(
+            Produccion.idProduccion == entrega.produccionID,
+            Produccion.pedidoID == pedido.idPedido,
+            Produccion.empresaID == pedido.empresaID,
+        )
+        .first()
+    )
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
+    if not produccion or int(produccion.estado) != int(estado_para_entrega):
+        raise _err(
+            "DOMICILIO_PEDIDO_NOT_READY",
+            "Solo se pueden tomar pedidos que esten en estado de produccion ParaEntrega",
+            status_code=409,
+        )
+    return produccion
+
+
 def _fecha_rango(fecha: date | None, fecha_desde: date | None, fecha_hasta: date | None) -> tuple[datetime, datetime]:
     if fecha is not None:
         return datetime.combine(fecha, datetime.min.time()), datetime.combine(fecha, datetime.max.time())
@@ -2818,6 +2838,8 @@ def autoasignar_pedido(
             status_code=409,
         )
 
+    produccion = _assert_pedido_para_entrega(db, pedido, entrega)
+
     domicilio_service.assert_domiciliario_capacity(
         db=db,
         empresa_id=int(empresa_id),
@@ -2878,14 +2900,6 @@ def autoasignar_pedido(
     cliente = (
         db.query(Cliente)
         .filter(Cliente.idCliente == int(pedido.clienteID), Cliente.empresaID == int(empresa_id))
-        .first()
-    )
-    produccion = (
-        db.query(Produccion)
-        .filter(
-            Produccion.idProduccion == entrega.produccionID,
-            Produccion.empresaID == int(empresa_id),
-        )
         .first()
     )
     start, end = _fecha_rango(colombia_today(), None, None)
