@@ -198,11 +198,20 @@ def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
         )
     ).fetchall()
 
-    by_code = {str(code): int(state_id) for state_id, code in rows}
+    by_code = {
+        str(code or "").strip().lower().replace(" ", "").replace("_", ""): int(state_id)
+        for state_id, code in rows
+    }
     return {
         "pendiente": by_code.get("pendiente", 1),
-        "en_proceso": by_code.get("en_proceso", 3),
-        "terminado": by_code.get("terminado", by_code.get("listo", 4)),
+        "en_proceso": by_code.get("enproceso", 3),
+        "terminado": (
+            by_code.get("paraentrega")
+            or by_code.get("paraentregar")
+            or by_code.get("terminado")
+            or by_code.get("listo")
+            or 4
+        ),
         "cancelado": by_code.get("cancelado", 5),
     }
 
@@ -225,12 +234,12 @@ def _resolve_estado_produccion_labels(db: Session) -> dict[int, str]:
     ).fetchall()
 
     for state_id, raw_code in rows:
-        code = str(raw_code or "").strip().lower()
+        code = str(raw_code or "").strip().lower().replace(" ", "").replace("_", "")
         if code == "pendiente":
             labels[int(state_id)] = ESTADO_PENDIENTE
-        elif code == "en_proceso":
+        elif code == "enproceso":
             labels[int(state_id)] = ESTADO_EN_PRODUCCION
-        elif code in {"terminado", "listo"}:
+        elif code in {"paraentrega", "paraentregar", "terminado", "listo"}:
             labels[int(state_id)] = ESTADO_PARA_ENTREGA
         elif code == "cancelado":
             labels[int(state_id)] = ESTADO_CANCELADO
