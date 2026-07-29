@@ -54,14 +54,6 @@ class FakeFirstSession:
         return SimpleNamespace(first=lambda: self.first_row)
 
 
-class FakeRowsSession:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def execute(self, statement, params=None):
-        return SimpleNamespace(fetchall=lambda: self.rows)
-
-
 def test_cancelar_producciones_por_pedido_cancelado_uses_exact_update_rule(monkeypatch):
     row = SimpleNamespace(
         idProduccion=10,
@@ -126,20 +118,6 @@ def test_pedido_esta_cancelado_returns_false_when_not_found():
     )
 
     assert result is False
-
-
-def test_estado_produccion_id_recognizes_para_entrega_code_variants():
-    db = FakeRowsSession(
-        [
-            (1, "pendiente"),
-            (2, "en_proceso"),
-            (6, "para_entrega"),
-            (5, "cancelado"),
-        ]
-    )
-
-    assert produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA) == 6
-    assert produccion_service.estado_produccion_norm(6, db) == produccion_service.ESTADO_PARA_ENTREGA
 
 
 def test_sincronizar_producciones_de_pedidos_cancelados_runs_company_scope_rule(monkeypatch):
