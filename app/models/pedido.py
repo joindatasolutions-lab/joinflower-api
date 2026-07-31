@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, Numeric, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Column, BigInteger, Numeric, DateTime, ForeignKey, String
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -23,6 +23,10 @@ class Pedido(Base):
     totalBruto = Column("total_bruto", Numeric(12,2))
     totalIva = Column("total_iva", Numeric(12,2))
     costoDomicilio = Column("costo_domicilio", Numeric(12,2))
+    domicilioObsequiado = Column("domicilio_obsequiado", Boolean, nullable=False, default=False)
+    omitirCostoDomicilio = Column("omitir_costo_domicilio", Boolean, nullable=False, default=False)
+    domicilioOriginal = Column("domicilio_original", Numeric(12,2))
+    descuentoDomicilio = Column("descuento_domicilio", Numeric(12,2))
     totalNeto = Column("total_neto", Numeric(12,2))
 
     createdAt = Column("created_at", DateTime)
