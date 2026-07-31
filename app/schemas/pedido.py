@@ -112,16 +112,6 @@ class PedidoManualEntregaInput(BaseModel):
     observacionGeneral: Optional[str] = None
 
 
-class PedidoManualFinancieroInput(BaseModel):
-    metodoPago: Optional[str] = None
-    metodosPago: Optional[List[str]] = None
-    detallePago: Optional[List[dict]] = None
-    montoEfectivo: Optional[float] = None
-    canalFlora: Optional[str] = None
-    canalVenta: Optional[str] = None
-    omitirRecargoLink: bool = False
-
-
 class PedidoManualRequest(BaseModel):
     empresaID: Optional[int] = None
     empresaId: Optional[int] = None
@@ -131,19 +121,11 @@ class PedidoManualRequest(BaseModel):
     items: Optional[List[PedidoManualProductoItem]] = None
     cliente: PedidoManualClienteInput
     entrega: PedidoManualEntregaInput
-    financiero: Optional[PedidoManualFinancieroInput] = None
     domicilio: Optional[float] = None
     domicilioOriginal: Optional[float] = None
     descuentoDomicilio: Optional[float] = None
     domicilioObsequiado: bool = False
     omitirCostoDomicilio: bool = False
-    metodoPago: Optional[str] = None
-    metodosPago: Optional[List[str]] = None
-    detallePago: Optional[List[dict]] = None
-    montoEfectivo: Optional[float] = None
-    canalFlora: Optional[str] = None
-    canalVenta: Optional[str] = None
-    omitirRecargoLink: bool = False
 
 
 class PedidoCheckoutResponse(BaseModel):

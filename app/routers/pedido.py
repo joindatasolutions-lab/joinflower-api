@@ -883,57 +883,6 @@ def _load_empresa_menu_config(db: Session, *, empresa_id: int, seccion: str = "p
     return {row["codigo"]: row for row in rows}
 
 
-def _listar_metodos_pago_empresa(db: Session, *, empresa_id: int) -> dict:
-    if not _table_exists(db, "metodo_pago_catalogo"):
-        config = _load_empresa_menu_config(db, empresa_id=int(empresa_id))
-        opciones = config.get("pedido_metodos_pago", {}).get("opciones") or []
-        metodos = [str(item).strip() for item in opciones if str(item).strip()]
-        return {
-            "empresaID": int(empresa_id),
-            "items": [
-                {
-                    "id": None,
-                    "codigo": _catalog_code_from_name(nombre),
-                    "nombre": nombre,
-                    "orden": index,
-                    "activo": True,
-                }
-                for index, nombre in enumerate(metodos, start=1)
-            ],
-            "metodosPago": metodos,
-        }
-
-    rows = db.execute(
-        text(
-            """
-            SELECT id_metodo_pago, codigo, nombre, orden, activo
-            FROM petalops.metodo_pago_catalogo
-            WHERE empresa_id = :empresa_id
-              AND activo = TRUE
-            ORDER BY orden ASC, nombre ASC
-            """
-        ),
-        {"empresa_id": int(empresa_id)},
-    ).mappings().all()
-
-    items = [
-        {
-            "id": int(row["id_metodo_pago"]),
-            "codigo": str(row["codigo"] or ""),
-            "nombre": str(row["nombre"] or ""),
-            "orden": int(row["orden"] or 0),
-            "activo": bool(row["activo"]),
-        }
-        for row in rows
-        if str(row["nombre"] or "").strip()
-    ]
-    return {
-        "empresaID": int(empresa_id),
-        "items": items,
-        "metodosPago": [item["nombre"] for item in items],
-    }
-
-
 def _pedido_detalle_has_observaciones_personalizados(db: Session) -> bool:
     row = db.execute(
         text(
@@ -4329,21 +4278,6 @@ def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depend
     return checkout_pedido(db=db, payload=data)
 
 
-@router.get("/pedido/manual/metodos-pago", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@router.get("/pedido/manual/medios-pago", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@router.get("/pedido/metodos-pago", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@router.get("/pedidos/metodos-pago", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@limiter.limit("100/minute")
-def listar_metodos_pago_pedido_manual(
-    request: Request,
-    empresa_id: int = Query(..., alias="empresaID"),
-    db: Session = Depends(get_db),
-    auth=Depends(get_current_auth_context),
-):
-    assert_same_empresa(auth, int(empresa_id))
-    return _listar_metodos_pago_empresa(db, empresa_id=int(empresa_id))
-
-
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
 @limiter.limit("60/minute")
 def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
@@ -4352,57 +4286,6 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
     if empresa_id <= 0 or sucursal_id <= 0:
         raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_SCOPE_INVALID", "message": "empresaID y sucursalID son obligatorios"})
     assert_same_empresa(auth, empresa_id)
-
-    financiero_payload = data.financiero
-    metodos_pago = [
-        str(item or "").strip()
-        for item in (
-            financiero_payload.metodosPago
-            if financiero_payload and financiero_payload.metodosPago is not None
-            else (
-                data.metodosPago
-                if data.metodosPago is not None
-                else [
-                    (
-                        financiero_payload.metodoPago
-                        if financiero_payload and financiero_payload.metodoPago
-                        else data.metodoPago
-                    )
-                ]
-            )
-        )
-        if str(item or "").strip()
-    ]
-    if not metodos_pago:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "PAYMENT_METHOD_REQUIRED",
-                "message": "El método de pago es obligatorio para pedidos manuales.",
-            },
-        )
-    canal_flora = str(
-        (financiero_payload.canalFlora if financiero_payload and financiero_payload.canalFlora else None)
-        or (financiero_payload.canalVenta if financiero_payload and financiero_payload.canalVenta else None)
-        or data.canalFlora
-        or data.canalVenta
-        or ""
-    ).strip() or None
-    detalle_pago = (
-        financiero_payload.detallePago
-        if financiero_payload and financiero_payload.detallePago is not None
-        else data.detallePago
-    )
-    monto_efectivo_raw = (
-        financiero_payload.montoEfectivo
-        if financiero_payload and financiero_payload.montoEfectivo is not None
-        else data.montoEfectivo
-    )
-    omitir_recargo_link = bool(
-        financiero_payload.omitirRecargoLink
-        if financiero_payload is not None
-        else data.omitirRecargoLink
-    )
 
     productos_payload = data.productos if data.productos is not None else data.items
     if not productos_payload:
@@ -4566,22 +4449,6 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
         pedido.totalBruto = total_bruto.quantize(Decimal("0.01"))
         pedido.totalIva = Decimal("0.00")
         pedido.totalNeto = (pedido.totalBruto + pedido.totalIva + Decimal(str(pedido.costoDomicilio or 0))).quantize(Decimal("0.01"))
-
-        _upsert_pago_flora(
-            db,
-            pedido_id=int(pedido.idPedido),
-            empresa_id=empresa_id,
-            monto=Decimal(str(pedido.totalNeto or 0)).quantize(Decimal("0.01")),
-            metodos_pago=metodos_pago,
-            canal_flora=canal_flora,
-            detalle_pago=detalle_pago,
-            monto_efectivo=(
-                Decimal(str(monto_efectivo_raw)).quantize(Decimal("0.01"))
-                if monto_efectivo_raw is not None
-                else None
-            ),
-            omitir_recargo_link=omitir_recargo_link,
-        )
 
         fecha_entrega = data.entrega.fechaEntrega
         if isinstance(fecha_entrega, datetime):
