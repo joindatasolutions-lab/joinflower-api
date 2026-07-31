@@ -487,6 +487,16 @@ def log_historial(
     )
 
 
+def validar_unico_florista_por_pedido(producciones: list[Produccion]) -> None:
+    florista_ids = {
+        int(produccion.floristaID)
+        for produccion in producciones
+        if getattr(produccion, "floristaID", None) is not None
+    }
+    if len(florista_ids) > 1:
+        raise ValueError("Un pedido no puede tener varios floristas asignados en produccion")
+
+
 def asegurar_produccion_desde_pedido_aprobado(
     db: Session,
     pedido: Pedido,
@@ -636,31 +646,66 @@ def asignar_pendientes_por_fecha(
     asignadas = 0
     sin_disponibilidad = 0
 
+    pendientes_por_pedido: dict[tuple[int, int], list[Produccion]] = {}
     for prod in pendientes:
-        florista = seleccionar_florista_auto(
-            db=db,
-            empresa_id=int(prod.empresaID),
-            sucursal_id=int(prod.sucursalID),
-            fecha_programada=prod.fechaProgramadaProduccion,
-            ignore_produccion_id=int(prod.idProduccion),
+        pendientes_por_pedido.setdefault((int(prod.empresaID), int(prod.pedidoID)), []).append(prod)
+
+    for (_, pedido_id), grupo in pendientes_por_pedido.items():
+        prod_referencia = grupo[0]
+        producciones_pedido = (
+            db.query(Produccion)
+            .filter(
+                Produccion.empresaID == int(prod_referencia.empresaID),
+                Produccion.pedidoID == int(pedido_id),
+                Produccion.estado != estados["cancelado"],
+            )
+            .all()
         )
+        validar_unico_florista_por_pedido(producciones_pedido)
+        florista_id_existente = next(
+            (
+                int(produccion.floristaID)
+                for produccion in producciones_pedido
+                if produccion.floristaID is not None
+            ),
+            None,
+        )
+        florista = None
+        if florista_id_existente is not None:
+            florista = (
+                db.query(Florista)
+                .filter(
+                    Florista.idFlorista == florista_id_existente,
+                    Florista.empresaID == int(prod_referencia.empresaID),
+                )
+                .first()
+            )
+        if florista is None:
+            florista = seleccionar_florista_auto(
+                db=db,
+                empresa_id=int(prod_referencia.empresaID),
+                sucursal_id=int(prod_referencia.sucursalID),
+                fecha_programada=prod_referencia.fechaProgramadaProduccion,
+            )
         if not florista:
-            sin_disponibilidad += 1
+            sin_disponibilidad += len(grupo)
             continue
 
         now = colombia_now_naive()
-        prod.floristaID = int(florista.idFlorista)
-        prod.fechaAsignacion = now
-        prod.updatedAt = now
-        log_historial(
-            db=db,
-            produccion=prod,
-            florista_anterior_id=None,
-            florista_nuevo_id=int(florista.idFlorista),
-            motivo=motivo,
-            usuario=usuario,
-        )
-        asignadas += 1
+        for prod in grupo:
+            prod.floristaID = int(florista.idFlorista)
+            prod.fechaAsignacion = now
+            prod.updatedAt = now
+            log_historial(
+                db=db,
+                produccion=prod,
+                florista_anterior_id=None,
+                florista_nuevo_id=int(florista.idFlorista),
+                motivo=motivo,
+                usuario=usuario,
+            )
+            asignadas += 1
+        validar_unico_florista_por_pedido(producciones_pedido)
 
     return {
         "evaluadas": evaluadas,
@@ -697,39 +742,45 @@ def reasignar_pendientes_por_indisponibilidad(
     reasignadas = 0
     sin_reemplazo = 0
 
+    pendientes_por_pedido: dict[tuple[int, int], list[Produccion]] = {}
     for prod in pendientes:
+        pendientes_por_pedido.setdefault((int(prod.empresaID), int(prod.pedidoID)), []).append(prod)
+
+    for (_, pedido_id), grupo in pendientes_por_pedido.items():
+        prod_referencia = grupo[0]
         if estado_florista_norm(florista.estado) == "Incapacidad" and not is_florista_in_incapacity(
-            florista, prod.fechaProgramadaProduccion
+            florista, prod_referencia.fechaProgramadaProduccion
         ):
             continue
 
         nuevo = seleccionar_florista_auto(
             db=db,
-            empresa_id=int(prod.empresaID),
-            sucursal_id=int(prod.sucursalID),
-            fecha_programada=prod.fechaProgramadaProduccion,
-            ignore_produccion_id=int(prod.idProduccion),
+            empresa_id=int(prod_referencia.empresaID),
+            sucursal_id=int(prod_referencia.sucursalID),
+            fecha_programada=prod_referencia.fechaProgramadaProduccion,
             excluded_florista_id=int(florista.idFlorista),
         )
 
-        anterior = int(prod.floristaID) if prod.floristaID else None
-        prod.floristaID = int(nuevo.idFlorista) if nuevo else None
         now = colombia_now_naive()
-        prod.fechaAsignacion = now if nuevo else prod.fechaAsignacion
-        prod.updatedAt = now
-        log_historial(
-            db=db,
-            produccion=prod,
-            florista_anterior_id=anterior,
-            florista_nuevo_id=(int(nuevo.idFlorista) if nuevo else None),
-            motivo=motivo,
-            usuario=usuario,
-        )
+        for prod in grupo:
+            anterior = int(prod.floristaID) if prod.floristaID else None
+            prod.floristaID = int(nuevo.idFlorista) if nuevo else None
+            prod.fechaAsignacion = now if nuevo else prod.fechaAsignacion
+            prod.updatedAt = now
+            log_historial(
+                db=db,
+                produccion=prod,
+                florista_anterior_id=anterior,
+                florista_nuevo_id=(int(nuevo.idFlorista) if nuevo else None),
+                motivo=motivo,
+                usuario=usuario,
+            )
 
-        if nuevo:
-            reasignadas += 1
-        else:
-            sin_reemplazo += 1
+            if nuevo:
+                reasignadas += 1
+            else:
+                sin_reemplazo += 1
+        validar_unico_florista_por_pedido(grupo)
 
     return {
         "evaluadas": len(pendientes),
@@ -827,18 +878,21 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             "mensaje": "El pedido no tiene detalles para generar produccion",
         }
 
-    existing_by_detail_id = {
-        int(prod.pedidoDetalleID): prod
-        for prod in db.query(Produccion)
+    existing_producciones = (
+        db.query(Produccion)
         .filter(
             Produccion.empresaID == int(pedido.empresaID),
             Produccion.pedidoID == int(pedido.idPedido),
-            Produccion.pedidoDetalleID.is_not(None),
             Produccion.estado != estados["cancelado"],
         )
         .all()
+    )
+    existing_by_detail_id = {
+        int(prod.pedidoDetalleID): prod
+        for prod in existing_producciones
         if prod.pedidoDetalleID is not None
     }
+    validar_unico_florista_por_pedido(existing_producciones)
 
     siguiente_orden = int(
         db.query(func.max(Produccion.ordenProduccion))
@@ -854,8 +908,35 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
     auto_asignar_hoy = fecha_programada == colombia_today()
     now = colombia_now_naive()
     created_items: list[dict[str, Any]] = []
+    created_producciones: list[Produccion] = []
     skipped_count = 0
     auto_asignados = 0
+    existing_florista_id = next(
+        (
+            int(produccion.floristaID)
+            for produccion in existing_producciones
+            if produccion.floristaID is not None
+        ),
+        None,
+    )
+    florista_asignado = None
+    if existing_florista_id is not None:
+        florista_asignado = (
+            db.query(Florista)
+            .filter(
+                Florista.idFlorista == existing_florista_id,
+                Florista.empresaID == int(pedido.empresaID),
+            )
+            .first()
+        )
+    elif auto_asignar_hoy:
+        florista_asignado = seleccionar_florista_auto(
+            db=db,
+            empresa_id=int(pedido.empresaID),
+            sucursal_id=int(pedido.sucursalID),
+            fecha_programada=fecha_programada,
+        )
+    florista_asignado_id = int(florista_asignado.idFlorista) if florista_asignado else existing_florista_id
 
     for detalle in detalles:
         detalle_id = int(detalle.idPedidoDetalle)
@@ -874,23 +955,14 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             continue
 
         siguiente_orden += 1
-        florista = None
-        if auto_asignar_hoy:
-            florista = seleccionar_florista_auto(
-                db=db,
-                empresa_id=int(pedido.empresaID),
-                sucursal_id=int(pedido.sucursalID),
-                fecha_programada=fecha_programada,
-            )
-
         produccion = Produccion(
             empresaID=int(pedido.empresaID),
             sucursalID=int(pedido.sucursalID),
             pedidoID=int(pedido.idPedido),
             pedidoDetalleID=detalle_id,
-            floristaID=(int(florista.idFlorista) if florista else None),
+            floristaID=florista_asignado_id,
             fechaProgramadaProduccion=fecha_programada,
-            fechaAsignacion=(now if florista else None),
+            fechaAsignacion=(now if florista_asignado_id is not None else None),
             estado=estados["pendiente"],
             prioridad="MEDIA",
             tiempoEstimadoMin=calcular_tiempo_estimado_detalle(detalle),
@@ -900,15 +972,20 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
         )
         db.add(produccion)
         db.flush()
+        created_producciones.append(produccion)
 
-        if florista:
+        if florista_asignado_id is not None:
             auto_asignados += 1
             log_historial(
                 db=db,
                 produccion=produccion,
                 florista_anterior_id=None,
-                florista_nuevo_id=int(florista.idFlorista),
-                motivo="Asignacion automatica por aprobacion del pedido (produccion de hoy)",
+                florista_nuevo_id=florista_asignado_id,
+                motivo=(
+                    "Asignacion automatica por aprobacion del pedido (produccion de hoy)"
+                    if existing_florista_id is None
+                    else "Asignacion al florista responsable del pedido"
+                ),
                 usuario=usuario,
             )
 
@@ -916,11 +993,13 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             {
                 "produccionID": int(produccion.idProduccion),
                 "pedidoDetalleID": detalle_id,
-                "autoAsignado": bool(florista),
-                "floristaID": (int(florista.idFlorista) if florista else None),
+                "autoAsignado": bool(florista_asignado_id),
+                "floristaID": florista_asignado_id,
                 "created": True,
             }
         )
+
+    validar_unico_florista_por_pedido(existing_producciones + created_producciones)
 
     created_count = sum(1 for item in created_items if item["created"])
     if created_count == 0:

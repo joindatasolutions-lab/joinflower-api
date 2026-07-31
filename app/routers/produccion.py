@@ -1025,12 +1025,26 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     assert_same_empresa(auth, int(produccion.empresaID))
     _bloquear_operacion_si_pedido_cancelado(db, produccion, "produccion.asignar")
 
+    estados = produccion_service._resolve_estado_produccion_ids(db)
+    producciones_pedido = (
+        db.query(Produccion)
+        .filter(
+            Produccion.empresaID == int(produccion.empresaID),
+            Produccion.pedidoID == int(produccion.pedidoID),
+            Produccion.estado != estados["cancelado"],
+        )
+        .order_by(Produccion.idProduccion.asc())
+        .all()
+    )
+    if not producciones_pedido:
+        producciones_pedido = [produccion]
+
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
     if not fecha_programada:
         raise HTTPException(status_code=400, detail="fechaProgramadaProduccion es obligatoria")
 
-    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
-    if estado_actual == ESTADO_EN_PRODUCCION and not (payload.motivo and payload.usuarioCambio):
+    estados_actuales = {_estado_produccion_norm(item.estado, db=db) for item in producciones_pedido}
+    if ESTADO_EN_PRODUCCION in estados_actuales and not (payload.motivo and payload.usuarioCambio):
         raise HTTPException(status_code=400, detail="Para reasignar en EnProduccion debes indicar motivo y usuarioCambio")
 
     if payload.floristaID is not None:
@@ -1054,7 +1068,6 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
             empresa_id=int(produccion.empresaID),
             sucursal_id=int(produccion.sucursalID),
             fecha_programada=fecha_programada,
-            ignore_produccion_id=int(produccion.idProduccion),
         )
         if not florista:
             raise HTTPException(status_code=400, detail="No hay floristas disponibles para asignación automática")
@@ -1065,42 +1078,49 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
         fecha_programada=fecha_programada,
         empresa_id=int(produccion.empresaID),
         sucursal_id=int(produccion.sucursalID),
-        ignore_produccion_id=int(produccion.idProduccion),
     )
 
-    anterior = int(produccion.floristaID) if produccion.floristaID else None
     now = _utc_now_naive()
+    actualizadas = 0
+    for item in producciones_pedido:
+        anterior = int(item.floristaID) if item.floristaID else None
+        item.floristaID = int(florista.idFlorista)
+        item.fechaProgramadaProduccion = fecha_programada
+        item.fechaAsignacion = now
+        item.updatedAt = now
 
-    produccion.floristaID = int(florista.idFlorista)
-    produccion.fechaProgramadaProduccion = fecha_programada
-    produccion.fechaAsignacion = now
-    produccion.updatedAt = now
+        if payload.prioridad:
+            item.prioridad = str(payload.prioridad).upper().strip()
+        if payload.observacionesInternas:
+            item.observacionesInternas = payload.observacionesInternas.strip()
 
-    if payload.prioridad:
-        produccion.prioridad = str(payload.prioridad).upper().strip()
-    if payload.observacionesInternas:
-        produccion.observacionesInternas = payload.observacionesInternas.strip()
+        if anterior != int(florista.idFlorista):
+            _log_historial(
+                db,
+                produccion=item,
+                florista_anterior_id=anterior,
+                florista_nuevo_id=int(florista.idFlorista),
+                motivo=(payload.motivo or "Reasignacion"),
+                usuario=(payload.usuarioCambio or "system"),
+            )
+            actualizadas += 1
 
-    if anterior != int(florista.idFlorista):
-        _log_historial(
-            db,
-            produccion=produccion,
-            florista_anterior_id=anterior,
-            florista_nuevo_id=int(florista.idFlorista),
-            motivo=(payload.motivo or "Reasignación"),
-            usuario=(payload.usuarioCambio or "system"),
-        )
+    try:
+        produccion_service.validar_unico_florista_por_pedido(producciones_pedido)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     db.commit()
 
     return {
         "status": "ok",
         "idProduccion": produccion_id,
+        "pedidoID": int(produccion.pedidoID),
+        "produccionesActualizadas": actualizadas,
         "floristaID": int(florista.idFlorista),
         "florista": florista.nombre,
-        "fechaProgramadaProduccion": str(produccion.fechaProgramadaProduccion),
+        "fechaProgramadaProduccion": str(fecha_programada),
     }
-
 
 @router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
@@ -1344,6 +1364,11 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
                             )
 
             produccion.updatedAt = now
+
+        try:
+            produccion_service.validar_unico_florista_por_pedido(producciones)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         pedido.version = int(pedido.version or 1) + 1
         db.commit()
