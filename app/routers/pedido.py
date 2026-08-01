@@ -1090,6 +1090,57 @@ def _manual_domicilio_amounts(
     }
 
 
+def _payload_field_value(payload: BaseModel, name: str, missing):
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    if name in fields_set:
+        return getattr(payload, name)
+    financiero_payload = getattr(payload, "financiero", None)
+    if isinstance(financiero_payload, dict) and name in financiero_payload:
+        return financiero_payload.get(name)
+    return missing
+
+
+def _invalidate_factura_impresa(db: Session, *, pedido_id: int, empresa_id: int) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT id_pago, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+    if not row:
+        return
+
+    raw_respuesta = _serialize_pago_metadata(
+        row.get("raw_respuesta"),
+        canal_flora=_extract_canal_flora(row.get("raw_respuesta")),
+        factura_impresa=False,
+    )
+    db.execute(
+        text(
+            """
+            UPDATE petalops.pago
+            SET raw_respuesta = :raw_respuesta,
+                updated_at = NOW()
+            WHERE id_pago = :id_pago
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "id_pago": int(row["id_pago"]),
+            "empresa_id": int(empresa_id),
+            "raw_respuesta": raw_respuesta,
+        },
+    )
+
+
 def _tenant_order_rules(db: Session, empresa_id: int) -> dict:
     config = _load_empresa_menu_config(db, empresa_id=int(empresa_id))
     payment_field = config.get("pedido_metodos_pago")
@@ -2733,6 +2784,20 @@ class ActualizarDetallePedidoRequest(BaseModel):
     saldoFavorMonto: float | None = None
     saldoFavorNota: str | None = None
     canalFlora: str | None = None
+    domicilio: float | None = None
+    costoDomicilio: float | None = None
+    costo_domicilio: float | None = None
+    domicilioOriginal: float | None = None
+    descuentoDomicilio: float | None = None
+    domicilioObsequiado: bool | None = None
+    domicilio_obsequiado: bool | None = None
+    omitirCostoDomicilio: bool | None = None
+    omitir_costo_domicilio: bool | None = None
+    subtotal: float | None = None
+    iva: float | None = None
+    total: float | None = None
+    forzarRecalculoFinanciero: bool | None = None
+    financiero: dict | None = None
 
 
 class AgregarDetallePedidoRequest(BaseModel):
@@ -3029,6 +3094,77 @@ def actualizar_detalle_pedido(
                         produccion.fechaProgramadaProduccion = fecha_programada
                         produccion.updatedAt = colombia_now_naive()
 
+        missing_financial = object()
+
+        domicilio_payload = _payload_field_value(payload, "domicilio", missing_financial)
+        costo_domicilio_payload = _payload_field_value(payload, "costoDomicilio", missing_financial)
+        if costo_domicilio_payload is missing_financial:
+            costo_domicilio_payload = _payload_field_value(payload, "costo_domicilio", missing_financial)
+        domicilio_original_payload = _payload_field_value(payload, "domicilioOriginal", missing_financial)
+        descuento_domicilio_payload = _payload_field_value(payload, "descuentoDomicilio", missing_financial)
+        domicilio_obsequiado_payload = _payload_field_value(payload, "domicilioObsequiado", missing_financial)
+        if domicilio_obsequiado_payload is missing_financial:
+            domicilio_obsequiado_payload = _payload_field_value(payload, "domicilio_obsequiado", missing_financial)
+        omitir_costo_domicilio_payload = _payload_field_value(payload, "omitirCostoDomicilio", missing_financial)
+        if omitir_costo_domicilio_payload is missing_financial:
+            omitir_costo_domicilio_payload = _payload_field_value(payload, "omitir_costo_domicilio", missing_financial)
+        forzar_recalculo_payload = _payload_field_value(payload, "forzarRecalculoFinanciero", missing_financial)
+
+        if any(
+            value is not missing_financial
+            for value in (
+                domicilio_payload,
+                costo_domicilio_payload,
+                domicilio_original_payload,
+                descuento_domicilio_payload,
+                domicilio_obsequiado_payload,
+                omitir_costo_domicilio_payload,
+                forzar_recalculo_payload,
+            )
+        ):
+            if domicilio_obsequiado_payload is not missing_financial:
+                pedido.domicilioObsequiado = bool(domicilio_obsequiado_payload)
+            if omitir_costo_domicilio_payload is not missing_financial:
+                pedido.omitirCostoDomicilio = bool(omitir_costo_domicilio_payload)
+            if domicilio_original_payload not in (missing_financial, None):
+                pedido.domicilioOriginal = _round_money_decimal(domicilio_original_payload)
+            if descuento_domicilio_payload not in (missing_financial, None):
+                pedido.descuentoDomicilio = _round_money_decimal(descuento_domicilio_payload)
+
+            domicilio_cobrado_payload = (
+                costo_domicilio_payload
+                if costo_domicilio_payload not in (missing_financial, None)
+                else domicilio_payload
+            )
+            omite_domicilio = _pedido_omite_costo_domicilio(pedido)
+            if omite_domicilio:
+                domicilio_original = _round_money_decimal(
+                    (
+                        domicilio_original_payload
+                        if domicilio_original_payload not in (missing_financial, None)
+                        else getattr(pedido, "domicilioOriginal", None)
+                    )
+                    or (
+                        domicilio_cobrado_payload
+                        if domicilio_cobrado_payload not in (missing_financial, None)
+                        else getattr(pedido, "costoDomicilio", None)
+                    )
+                    or 0
+                )
+                pedido.domicilioOriginal = domicilio_original
+                pedido.costoDomicilio = Decimal("0.00")
+                pedido.descuentoDomicilio = domicilio_original
+            else:
+                if domicilio_cobrado_payload not in (missing_financial, None):
+                    pedido.costoDomicilio = _round_money_decimal(domicilio_cobrado_payload)
+                elif domicilio_original_payload not in (missing_financial, None):
+                    pedido.costoDomicilio = _round_money_decimal(domicilio_original_payload)
+                pedido.descuentoDomicilio = Decimal("0.00")
+                if getattr(pedido, "domicilioOriginal", None) is None:
+                    pedido.domicilioOriginal = _round_money_decimal(getattr(pedido, "costoDomicilio", None) or 0)
+
+            needs_totals_recalc = True
+
         if needs_totals_recalc:
             _recalculate_pedido_financials(
                 db,
@@ -3036,6 +3172,7 @@ def actualizar_detalle_pedido(
                 aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
             )
             _sync_existing_pago_total(db, pedido=pedido)
+            _invalidate_factura_impresa(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
 
         if (
             payload.metodosPago is not None
