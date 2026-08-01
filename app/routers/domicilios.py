@@ -1743,6 +1743,7 @@ def crear_domiciliario(
         nombre=nombre,
         login=login,
         email=email,
+        passwordHash=password_hash,
         rolID=int(rol.idRol),
         estado=estado,
         esSuperadmin=False,
