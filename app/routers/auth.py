@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -482,11 +482,11 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     """
                     INSERT INTO petalops.empleado (
                         empresa_id, sucursal_id, nombre_empleado, cargo, activo,
-                        created_at, updated_at, usuario, email, password_hash, usuario_id, is_superuser
+                        created_at, updated_at, usuario, email, usuario_id, is_superuser
                     )
                     VALUES (
                         :empresa_id, :sucursal_id, :nombre_empleado, :cargo, :activo,
-                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :password_hash, :usuario_id, 0
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :usuario_id, 0
                     )
                     RETURNING id_empleado
                     """
@@ -499,7 +499,6 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     "activo": activo_flag,
                     "usuario_login": str(usuario.login or "").strip(),
                     "email": employee_email,
-                    "password_hash": str(usuario.passwordHash or "").strip(),
                     "usuario_id": int(usuario.idusuario),
                 },
             ).scalar()
@@ -516,8 +515,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     activo = :activo,
                     updated_at = CURRENT_TIMESTAMP,
                     usuario = :usuario_login,
-                    email = :email,
-                    password_hash = :password_hash
+                    email = :email
                 WHERE id_empleado = :empleado_id
                 """
             ),
@@ -530,7 +528,6 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                 "activo": activo_flag,
                 "usuario_login": str(usuario.login or "").strip(),
                 "email": employee_email,
-                "password_hash": str(usuario.passwordHash or "").strip(),
             },
         )
         db.execute(
@@ -1626,5 +1623,3 @@ def actualizar_modulos_empresa(
         db.rollback()
         auth_logger.error("Error SQL actualizando modulos de empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_MODULOS_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
-
-

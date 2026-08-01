@@ -239,13 +239,12 @@ Personal de la empresa. Todo empleado tiene un usuario en el sistema (`usuario_i
 | usuario_id | bigint | SÍ | FK → usuario. Acceso al sistema |
 | usuario | varchar(120) | SÍ | **Legacy** — usar usuario_id |
 | email | varchar(255) | SÍ | Email laboral |
-| password_hash | varchar(255) | SÍ | **Legacy** — autenticación debe ir por tabla usuario |
 | identificacion | varchar(50) | SÍ | Documento de identidad. UNIQUE por empresa |
 | last_login | timestamp | SÍ | **Legacy** — usar usuario.ultimo_login |
 | created_at | timestamp | NO | |
 | updated_at | timestamp | SÍ | |
 
-**Nota:** Los campos `usuario`, `email`, `password_hash` y `last_login` son legacy.
+**Nota:** Los campos `usuario`, `email` y `last_login` son legacy.
 La autenticación oficial vive en la tabla `usuario`. Para saber si un empleado es florista,
 verificar existencia en `perfil_florista`.
 
@@ -760,7 +759,7 @@ Pendiente antes de escalar a múltiples empresas en producción.
 
 | tabla | campo | situación |
 |---|---|---|
-| empleado | usuario, email, password_hash, last_login | Legacy — autenticación real en tabla usuario |
+| empleado | usuario, email, last_login | Legacy — autenticación real en tabla usuario |
 | proveedor | (sin empresa_id) | Tabla global, pendiente aislar por empresa |
 | produccion | fecha_fin | Legacy de fecha_finalizacion — usar fecha_finalizacion |
 | entrega | firma | Legacy — usar firmaimagenurl |

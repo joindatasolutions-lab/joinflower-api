@@ -16,7 +16,6 @@ class Domiciliario(Base):
     cargo = Column("cargo", String(100), nullable=False)
     usuario = Column("usuario", String(80), nullable=True)
     email = Column("email", String(180), nullable=True)
-    passwordHash = Column("password_hash", String(255), nullable=True)
     telefono = Column("telefono", String(40), nullable=True)
     tipo = Column("tipo", String(80), nullable=True)
     estado = Column("estado", String(20), nullable=True)

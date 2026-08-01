@@ -4,7 +4,7 @@ import psycopg2
 conn = psycopg2.connect(
     host='136.119.27.100',
     user='joindata',
-    password='Emprender2026#',
+    password='Francia2026##',
     dbname='joinflower-dev',
     port=5432
 )
