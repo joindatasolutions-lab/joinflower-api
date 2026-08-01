@@ -9,6 +9,7 @@ python-jose[cryptography]
 passlib[bcrypt]
 bcrypt==4.0.1
 pytest
+httpx2
 slowapi
 python-multipart
 tzdata
