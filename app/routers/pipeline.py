@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, or_, text
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, load_only
 
 from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
@@ -233,6 +233,10 @@ def listar_pipeline_pedidos(
 
         q = (
             db.query(Pedido, Cliente, EstadoPedido, EntregaLast, ProduccionLast, Domiciliario, FloristaLast)
+            .options(
+                load_only(Domiciliario.idDomiciliario, Domiciliario.empresaID, Domiciliario.nombre),
+                load_only(FloristaLast.idDomiciliario, FloristaLast.empresaID, FloristaLast.nombre),
+            )
             .join(Cliente, Cliente.idCliente == Pedido.clienteID)
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .outerjoin(entrega_last_sq, entrega_last_sq.c.pedido_id == Pedido.idPedido)
