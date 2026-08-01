@@ -1140,7 +1140,11 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
 
 @router.put("/{produccion_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    if is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+    es_cambio_administrativo = bool(payload.cambioAdministrativo) or str(payload.origenCambio or "").strip().lower() == "administrador"
+    es_admin_produccion = is_empresa_admin_context(auth) or is_super_admin_context(auth)
+    if es_cambio_administrativo and not es_admin_produccion:
+        raise HTTPException(status_code=403, detail="Solo administradores pueden ejecutar cambios administrativos de produccion")
+    if is_empresa_admin_context(auth) and not is_super_admin_context(auth) and not es_cambio_administrativo:
         raise HTTPException(status_code=403, detail="Acción no disponible para rol Administrador")
 
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
@@ -1185,12 +1189,16 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
         raise HTTPException(status_code=400, detail="No se permite modificar Producción cuando el domicilio está EnRuta")
 
+    transicion_administrativa_permitida = es_cambio_administrativo and (estado_actual, nuevo_estado) in {
+        (ESTADO_PENDIENTE, ESTADO_EN_PRODUCCION),
+        (ESTADO_EN_PRODUCCION, ESTADO_PARA_ENTREGA),
+    }
     if not produccion_service.transicion_produccion_permitida(
         db=db,
         empresa_id=int(produccion.empresaID),
         origen=produccion.estado,
         destino=nuevo_estado,
-    ):
+    ) and not transicion_administrativa_permitida:
         raise HTTPException(status_code=400, detail=f"Transición no permitida: {estado_actual} -> {nuevo_estado}")
 
     if nuevo_estado == ESTADO_EN_PRODUCCION:
@@ -1235,6 +1243,17 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
 
     if payload.observacionesInternas:
         produccion.observacionesInternas = payload.observacionesInternas.strip()
+
+    usuario_cambio = str(payload.usuarioCambio or auth.login or auth.nombre or "system").strip() or "system"
+    if es_cambio_administrativo:
+        _log_historial(
+            db=db,
+            produccion=produccion,
+            florista_anterior_id=(int(produccion.floristaID) if produccion.floristaID is not None else None),
+            florista_nuevo_id=(int(produccion.floristaID) if produccion.floristaID is not None else None),
+            motivo=f"Cambio administrativo de estado: {estado_actual} -> {nuevo_estado}",
+            usuario=usuario_cambio,
+        )
 
     produccion.updatedAt = now
     db.commit()
