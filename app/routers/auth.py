@@ -1471,11 +1471,44 @@ def crear_empresa(
         if plan_id < 1:
             raise HTTPException(status_code=400, detail="planID debe ser mayor o igual a 1")
 
+        requested_slug = str(payload.slug or "").strip().lower()
+        slug = re.sub(r"[^a-z0-9-]+", "-", requested_slug or nombre.lower()).strip("-")[:80]
+        if len(slug) < 3:
+            raise HTTPException(status_code=400, detail="slug debe tener al menos 3 caracteres validos")
+
+        admin_login = str(payload.adminLogin or "").strip().lower()
+        create_admin = bool(admin_login)
+        if create_admin:
+            admin_login = re.sub(r"[^a-z0-9._-]+", "", admin_login)[:80]
+            if len(admin_login) < 3:
+                raise HTTPException(status_code=400, detail="adminLogin debe tener al menos 3 caracteres validos")
+            if not payload.adminPassword:
+                raise HTTPException(status_code=400, detail="adminPassword es obligatorio para crear el admin inicial")
+            existing_login = db.query(Usuario).filter(func.lower(Usuario.login) == admin_login).first()
+            if existing_login:
+                raise HTTPException(status_code=409, detail="Ya existe un usuario con ese login")
+
         columns = _load_empresa_columns(db)
         if "id_empresa" not in columns:
             raise HTTPException(status_code=500, detail="Tabla empresa sin columna id_empresa")
         if "nombre_empresa" not in columns or "nit" not in columns:
             raise HTTPException(status_code=500, detail="Tabla empresa sin columnas obligatorias nombre_empresa/nit")
+
+        existing_empresa = db.execute(
+            text(
+                """
+                SELECT id_empresa
+                FROM petalops.empresa
+                WHERE lower(COALESCE(slug, '')) = :slug
+                   OR lower(COALESCE(nombre_empresa, '')) = lower(:nombre)
+                   OR lower(COALESCE(nombre_comercial, '')) = lower(:nombre)
+                LIMIT 1
+                """
+            ),
+            {"slug": slug, "nombre": nombre},
+        ).first()
+        if existing_empresa:
+            raise HTTPException(status_code=409, detail="Ya existe una empresa con ese nombre o slug")
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
@@ -1485,9 +1518,9 @@ def crear_empresa(
             text(
                 """
                 INSERT INTO petalops.empresa
-                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, created_at, updated_at)
+                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, slug, created_at, updated_at)
                 VALUES
-                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, :slug, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """
             ),
             {
@@ -1497,12 +1530,79 @@ def crear_empresa(
                 "estado": 1 if estado == "Activo" else 0,
                 "nombre_comercial": nombre,
                 "plan_id": plan_id,
+                "slug": slug,
             },
         )
 
-        # Sin esto el formulario de pedidos arranca sin ninguna opcion de
-        # metodo de pago para la empresa nueva hasta que un admin agregue la
-        # primera a mano desde /configuracion (ver empresa 2 en produccion).
+        next_sucursal_id = int(db.execute(text("SELECT COALESCE(MAX(id_sucursal), 0) + 1 FROM petalops.sucursal")).scalar_one())
+        sucursal_nombre = str(payload.sucursalNombre or f"Principal {nombre}").strip()[:120]
+        prefijo = re.sub(r"[^A-Z0-9]+", "", slug.upper())[:3] or "TEN"
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.sucursal
+                (id_sucursal, empresa_id, nombre_sucursal, direccion, telefono, estado, created_at, updated_at, prefijo_pedido)
+                VALUES
+                (:id_sucursal, :empresa_id, :nombre_sucursal, NULL, NULL, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :prefijo)
+                """
+            ),
+            {
+                "id_sucursal": next_sucursal_id,
+                "empresa_id": next_empresa_id,
+                "nombre_sucursal": sucursal_nombre,
+                "prefijo": prefijo,
+            },
+        )
+
+        _ensure_default_operational_roles(db, next_empresa_id)
+        admin_role = db.execute(
+            text(
+                """
+                SELECT id_rol
+                FROM petalops.rol
+                WHERE empresa_id = :empresa_id AND lower(nombre_rol) = 'admin'
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        ).first()
+        admin_role_id = int(admin_role[0]) if admin_role else None
+
+        _ensure_empresa_modulo_table(db)
+        default_modules = sorted({module for policy in DEFAULT_ROLE_MODULE_POLICY.values() for module in policy.keys()} | {"clientes", "reportes"})
+        for modulo in default_modules:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.empresa_modulo (empresa_id, modulo, activo, updatedat)
+                    VALUES (:empresa_id, :modulo, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT (empresa_id, modulo) DO UPDATE SET
+                      activo = EXCLUDED.activo,
+                      updatedat = EXCLUDED.updatedat
+                    """
+                ),
+                {"empresa_id": next_empresa_id, "modulo": normalize_module_name(modulo)},
+            )
+
+        if admin_role_id is not None:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.permiso_modulo
+                    (rol_id, modulo, puede_ver, puede_crear, puede_editar, puede_eliminar, empresa_id)
+                    VALUES (:rol_id, 'reportes', TRUE, TRUE, TRUE, TRUE, :empresa_id)
+                    ON CONFLICT (rol_id, modulo) DO UPDATE SET
+                      puede_ver = EXCLUDED.puede_ver,
+                      puede_crear = EXCLUDED.puede_crear,
+                      puede_editar = EXCLUDED.puede_editar,
+                      puede_eliminar = EXCLUDED.puede_eliminar,
+                      empresa_id = EXCLUDED.empresa_id
+                    """
+                ),
+                {"rol_id": admin_role_id, "empresa_id": next_empresa_id},
+            )
+
+        # Sin esto el formulario de pedidos arranca sin opciones base.
         db.execute(
             text(
                 """
@@ -1511,6 +1611,7 @@ def crear_empresa(
                 ) VALUES (
                     :empresa_id, 'efectivo', 'Efectivo', 1, TRUE, NOW(), NOW()
                 )
+                ON CONFLICT DO NOTHING
                 """
             ),
             {"empresa_id": next_empresa_id},
@@ -1525,11 +1626,41 @@ def crear_empresa(
                 ) VALUES (
                     :empresa_id, 'presencial', 'Presencial', 1, TRUE, NOW(), NOW()
                 )
+                ON CONFLICT DO NOTHING
                 """
             ),
             {"empresa_id": next_empresa_id},
         )
         sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_canal_venta")
+
+        admin_user_id = None
+        if create_admin and admin_role_id is not None:
+            email = _user_email_or_default(payload.adminEmail, admin_login)
+            admin_user_id = int(
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO petalops.usuario (
+                            empresa_id, sucursal_id, nombre, login, email, passwordhash,
+                            rolid, estado, created_at, updated_at, es_superadmin
+                        ) VALUES (
+                            :empresa_id, :sucursal_id, :nombre, :login, :email, :password_hash,
+                            :rol_id, 'Activo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, FALSE
+                        )
+                        RETURNING id_usuario
+                        """
+                    ),
+                    {
+                        "empresa_id": next_empresa_id,
+                        "sucursal_id": next_sucursal_id,
+                        "nombre": nombre,
+                        "login": admin_login,
+                        "email": email,
+                        "password_hash": pwd_context.hash(str(payload.adminPassword)),
+                        "rol_id": admin_role_id,
+                    },
+                ).scalar_one()
+            )
 
         db.commit()
 
@@ -1539,12 +1670,13 @@ def crear_empresa(
             nombre=nombre,
             planID=plan_id,
             estado=estado,
+            sucursalID=next_sucursal_id,
+            adminUserID=admin_user_id,
         )
     except SQLAlchemyError as exc:
         db.rollback()
         auth_logger.error("Error SQL creando empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
-
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
 def listar_modulos_empresa(

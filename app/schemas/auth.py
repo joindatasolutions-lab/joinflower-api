@@ -217,6 +217,11 @@ class EmpresaCreateRequest(BaseModel):
     nombreComercial: str = Field(min_length=3, max_length=180)
     planID: int = 1
     estado: str = "Activo"
+    slug: str | None = Field(default=None, min_length=3, max_length=80)
+    adminLogin: str | None = Field(default=None, min_length=3, max_length=80)
+    adminPassword: str | None = Field(default=None, min_length=6, max_length=120)
+    adminEmail: str | None = None
+    sucursalNombre: str | None = Field(default=None, min_length=3, max_length=120)
 
 
 class EmpresaCreateResponse(BaseModel):
@@ -225,6 +230,8 @@ class EmpresaCreateResponse(BaseModel):
     nombre: str
     planID: int
     estado: str
+    sucursalID: int | None = None
+    adminUserID: int | None = None
 
 
 class EmpresaModuloItem(BaseModel):
