@@ -28,3 +28,21 @@ def test_late_deadline_for_midnight_date_uses_delivery_window_end():
 
     assert deadline == datetime(2026, 7, 22, 12, 0, 0)
 
+
+
+def test_resolve_stage_uses_delivery_catalog_key_before_numeric_id():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=4, entrega_estado=99, entrega_estado_key="entregado")
+
+    assert stage == "entregado"
+
+
+def test_resolve_stage_uses_production_catalog_key_before_numeric_id():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=99, entrega_estado=1, prod_estado_key="terminado", entrega_estado_key="pendiente")
+
+    assert stage == "listo"
+
+
+def test_resolve_stage_treats_inactive_pedido_operational_states_as_fallback_only():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=None, entrega_estado=None)
+
+    assert stage == "aprobado"

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -320,6 +320,47 @@ def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
     return str((estado.nombreEstado if estado else "") or "").strip().upper()
 
 
+def _ensure_transiciones_pedido_defaults(db: Session, empresa_id: int) -> None:
+    db.execute(
+        text(
+            """
+            WITH estados AS (
+                SELECT id_estado_pedido, UPPER(TRIM(nombre_estado)) AS nombre_estado
+                FROM petalops.estado_pedido
+            ), pares(origen, destino) AS (
+                VALUES
+                    ('CREADO', 'APROBADO'),
+                    ('CREADO', 'CANCELADO'),
+                    ('PENDIENTE', 'APROBADO'),
+                    ('PENDIENTE', 'CANCELADO'),
+                    ('APROBADO', 'CANCELADO')
+            )
+            INSERT INTO petalops.transicion_estado_pedido (
+                empresa_id,
+                estado_origen_id,
+                estado_destino_id,
+                created_at
+            )
+            SELECT
+                :empresa_id,
+                eo.id_estado_pedido,
+                ed.id_estado_pedido,
+                CURRENT_TIMESTAMP
+            FROM pares p
+            JOIN estados eo ON eo.nombre_estado = p.origen
+            JOIN estados ed ON ed.nombre_estado = p.destino
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM petalops.transicion_estado_pedido tep
+                WHERE tep.empresa_id = :empresa_id
+            )
+            ON CONFLICT (empresa_id, estado_origen_id, estado_destino_id) DO NOTHING
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    )
+
+
 def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | None, destino_id: int | None) -> bool:
     if origen_id is None or destino_id is None:
         return False
@@ -329,28 +370,25 @@ def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | 
     if origen_id == destino_id:
         return True
 
-    transitions = db.execute(
+    _ensure_transiciones_pedido_defaults(db, int(empresa_id))
+    transition = db.execute(
         text(
             """
-            SELECT estado_origen_id, estado_destino_id
+            SELECT 1
             FROM petalops.transicion_estado_pedido
             WHERE empresa_id = :empresa_id
+              AND estado_origen_id = :origen_id
+              AND estado_destino_id = :destino_id
+            LIMIT 1
             """
         ),
-        {"empresa_id": int(empresa_id)},
-    ).fetchall()
-    if transitions:
-        return any(int(row[0]) == origen_id and int(row[1]) == destino_id for row in transitions)
-
-    origen = _estado_pedido_nombre(db, origen_id)
-    destino = _estado_pedido_nombre(db, destino_id)
-    fallback = {
-        "CREADO": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
-        "PENDIENTE": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
-        "APROBADO": {"CANCELADO", "PAGADO"},
-        "PAGADO": {"CANCELADO"},
-    }
-    return destino in fallback.get(origen, set())
+        {
+            "empresa_id": int(empresa_id),
+            "origen_id": origen_id,
+            "destino_id": destino_id,
+        },
+    ).first()
+    return transition is not None
 
 
 def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
@@ -4412,7 +4450,25 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
 def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     """Endpoint de checkout: delega la lógica transaccional al servicio de pedidos."""
     assert_same_empresa(auth, int(data.empresaID))
-    return checkout_pedido(db=db, payload=data)
+    result = checkout_pedido(db=db, payload=data)
+    pedido_id = int(result.get("pedidoID") or 0)
+    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id, Pedido.empresaID == int(data.empresaID)).first()
+    if pedido:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_CHECKOUT",
+            estado_origen_id=None,
+            estado_destino_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
+            extra={
+                "numeroPedido": int(pedido.numeroPedido or 0),
+                "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+                "total": float(pedido.totalNeto or 0),
+            },
+        )
+        db.commit()
+    return result
 
 
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
@@ -4620,6 +4676,18 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             )
         )
 
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_MANUAL",
+            estado_origen_id=None,
+            estado_destino_id=int(estado_inicial.idEstadoPedido),
+            extra={
+                "total": float(pedido.totalNeto or 0),
+                "cantidadProductos": len(productos_normalizados),
+            },
+        )
         db.commit()
         total_general = Decimal(str(pedido.totalNeto or 0)).quantize(Decimal("0.01"))
         return {
@@ -4760,12 +4828,24 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                 cantidad=cantidad,
                 precioUnitario=precio_unitario,
                 ivaUnitario=Decimal("0.00"),
-                totalLinea=(precio_unitario * cantidad).quantize(Decimal("0.01")),
+                subtotal=(precio_unitario * cantidad).quantize(Decimal("0.01")),
                 observacionesPersonalizados=None,
             )
 
             db.add(detalle)
 
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_LEGACY",
+            estado_origen_id=None,
+            estado_destino_id=int(estado_inicial.idEstadoPedido),
+            extra={
+                "total": float(pedido.totalNeto or 0),
+                "cantidadProductos": len(data.items),
+            },
+        )
         db.commit()
 
         return {
@@ -4888,6 +4968,26 @@ def cambiar_estado(
             motivo=pedido.motivoRechazo,
         )
         producciones_estado_5 = int(cancelacion_operativa.get("produccionesCanceladas", 0))
+
+    if str(estado_destino.nombreEstado or "").strip().upper() in {"CANCELADO", "RECHAZADO"}:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CANCELAR_PEDIDO_PIPELINE",
+            estado_origen_id=int(estado_actual),
+            estado_destino_id=int(nuevo_estado_id),
+            extra={"motivo": pedido.motivoRechazo},
+        )
+    elif str(estado_destino.nombreEstado or "").strip().upper() not in {"APROBADO", "PAGADO"}:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CAMBIAR_ESTADO_PEDIDO",
+            estado_origen_id=int(estado_actual),
+            estado_destino_id=int(nuevo_estado_id),
+        )
 
     db.commit()
 
