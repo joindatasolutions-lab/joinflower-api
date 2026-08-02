@@ -2046,6 +2046,8 @@ def asignar_domiciliario(
     assert_same_empresa(auth, int(entrega.empresaID))
 
     estado_actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    accion_auditoria = "DESASIGNAR_DOMICILIARIO"
+    estado_nuevo = ESTADO_PENDIENTE
     if payload.domiciliarioID is None:
         domicilio_service.assert_transition_allowed_for_empresa(
             db=db,
@@ -2088,8 +2090,19 @@ def asignar_domiciliario(
         entrega.domiciliarioID = int(domiciliario.idDomiciliario)
         entrega.fechaAsignacion = datetime.now(timezone.utc)
         entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
+        accion_auditoria = "ASIGNAR_DOMICILIARIO"
+        estado_nuevo = ESTADO_ASIGNADO
 
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion=accion_auditoria,
+        estado_anterior=estado_actual,
+        estado_nuevo=estado_nuevo,
+        extra={"domiciliarioID": int(entrega.domiciliarioID) if entrega.domiciliarioID is not None else None},
+    )
     db.commit()
 
     return DomicilioActionResponse(
@@ -2139,6 +2152,7 @@ def tomar_entrega(
             current=actual,
             target=ESTADO_ASIGNADO,
         )
+        assigned_at = datetime.now(timezone.utc)
         updated_rows = (
             db.query(Entrega)
             .filter(
@@ -2150,8 +2164,8 @@ def tomar_entrega(
             .update(
                 {
                     Entrega.domiciliarioID: int(domiciliario_id),
-                    Entrega.fechaAsignacion: datetime.now(timezone.utc),
-                    Entrega.updatedAt: datetime.now(timezone.utc),
+                    Entrega.fechaAsignacion: assigned_at,
+                    Entrega.updatedAt: assigned_at,
                     Entrega.estadoEntregaID: domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO),
                 },
                 synchronize_session=False,
@@ -2164,6 +2178,19 @@ def tomar_entrega(
                 "La entrega ya fue tomada por otro domiciliario",
                 status_code=409,
             )
+        entrega.domiciliarioID = int(domiciliario_id)
+        entrega.fechaAsignacion = assigned_at
+        entrega.updatedAt = assigned_at
+        entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
+        _audit_domicilio_action(
+            db=db,
+            auth=auth,
+            entrega=entrega,
+            accion="AUTOASIGNACION",
+            estado_anterior=actual,
+            estado_nuevo=ESTADO_ASIGNADO,
+            extra={"domiciliarioID": int(domiciliario_id)},
+        )
         db.commit()
         return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ASIGNADO)
 
@@ -2179,6 +2206,16 @@ def tomar_entrega(
         previous=entrega,
         domiciliario_id=domiciliario_id,
         next_state=ESTADO_ASIGNADO,
+    )
+    db.flush()
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=next_entrega,
+        accion="REINTENTO_ASIGNADO",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_ASIGNADO,
+        extra={"entregaAnteriorID": int(entrega.idEntrega), "domiciliarioID": int(domiciliario_id)},
     )
     db.commit()
     return DomicilioActionResponse(status="ok", idEntrega=int(next_entrega.idEntrega), estado=ESTADO_ASIGNADO)

@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, or_
+from sqlalchemy import String, cast, func, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.logger import get_logger
@@ -149,37 +149,44 @@ def _minutes_left(target: datetime | None, rango_hora: str | None = None) -> int
     return int(delta.total_seconds() // 60)
 
 
+def _catalog_key(value: str | None) -> str:
+    return str(value or "").strip().lower().replace("_", "").replace(" ", "")
+
+
 def _resolve_stage(
     pedido_estado: str | None,
     prod_estado: int | None,
     entrega_estado: int | None,
+    prod_estado_key: str | None = None,
+    entrega_estado_key: str | None = None,
 ) -> PipelineStage:
     pedido_key = str(pedido_estado or "").strip().upper()
-    if pedido_key == "CANCELADO":
+    if pedido_key in {"CANCELADO", "RECHAZADO"}:
         return "cancelado"
 
-    if entrega_estado in {6}:
+    entrega_key = _catalog_key(entrega_estado_key)
+    if entrega_key == "cancelado" or (not entrega_key and entrega_estado in {6}):
         return "cancelado"
-    if entrega_estado in {4}:
+    if entrega_key == "entregado" or (not entrega_key and entrega_estado in {4}):
         return "entregado"
-    if entrega_estado in {3}:
+    if entrega_key in {"enruta", "encamino"} or (not entrega_key and entrega_estado in {3}):
         return "en_camino"
 
-    if prod_estado in {5}:
+    prod_key = _catalog_key(prod_estado_key)
+    if prod_key == "cancelado" or (not prod_key and prod_estado in {5}):
         return "cancelado"
-    if prod_estado in {4}:
+    if prod_key in {"terminado", "listo", "paraentrega"} or (not prod_key and prod_estado in {4}):
         return "listo"
-    if prod_estado in {2, 3}:
+    if prod_key in {"asignado", "enproceso", "enproduccion"} or (not prod_key and prod_estado in {2, 3}):
         return "en_produccion"
-    if prod_estado in {1}:
+    if prod_key == "pendiente" or (not prod_key and prod_estado in {1}):
         return "pendiente_produccion"
 
     if pedido_key == "CREADO":
         return "creado"
-    if pedido_key == "APROBADO":
+    if pedido_key in {"APROBADO", "PAGADO"}:
         return "aprobado"
     return "aprobado"
-
 
 @router.get("/pedidos", response_model=PipelinePedidosResponse)
 def listar_pipeline_pedidos(
@@ -299,19 +306,53 @@ def listar_pipeline_pedidos(
         rows = q.order_by(Pedido.fechaPedido.desc(), Pedido.idPedido.desc()).all()
         pedido_ids = [int(row[0].idPedido) for row in rows]
 
-        productos_por_pedido: dict[int, str] = {}
-        if pedido_ids:
-            det_rows = (
-                db.query(
-                    PedidoDetalle.pedidoID,
-                    func.string_agg(Producto.nombreProducto, ", ").label("resumen"),
+        prod_estado_map = {
+            int(row[0]): str(row[1] or "")
+            for row in db.execute(
+                text(
+                    """
+                    SELECT id_estado_produccion, lower(coalesce(codigo, nombre, ''))
+                    FROM petalops.estado_produccion
+                    """
                 )
-                .join(Producto, Producto.idProducto == PedidoDetalle.productoID)
-                .filter(PedidoDetalle.pedidoID.in_(pedido_ids))
-                .group_by(PedidoDetalle.pedidoID)
-                .all()
-            )
-            productos_por_pedido = {int(pid): str(resumen or "") for pid, resumen in det_rows}
+            ).all()
+        }
+        entrega_estado_map = {
+            int(row[0]): str(row[1] or "")
+            for row in db.execute(
+                text(
+                    """
+                    SELECT id_estado_entrega, lower(coalesce(codigo, nombre, ''))
+                    FROM petalops.estado_entrega
+                    """
+                )
+            ).all()
+        }
+        productos_por_pedido: dict[int, dict[str, str | None]] = {}
+        if pedido_ids:
+            det_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        pd.pedido_id,
+                        string_agg(p.nombre_producto, ', ' ORDER BY pd.id_pedido_detalle) AS resumen
+                    FROM petalops.pedido_detalle pd
+                    JOIN petalops.producto p
+                      ON p.id_producto = pd.producto_id
+                     AND p.empresa_id = :empresa_id
+                    WHERE pd.empresa_id = :empresa_id
+                      AND pd.pedido_id = ANY(:pedido_ids)
+                    GROUP BY pd.pedido_id
+                    """
+                ),
+                {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
+            ).mappings().all()
+            productos_por_pedido = {
+                int(row["pedido_id"]): {
+                    "resumen": str(row.get("resumen") or ""),
+                }
+                for row in det_rows
+            }
 
         sucursal_map: dict[int, str] = {}
         if pedido_ids:
@@ -339,10 +380,14 @@ def listar_pipeline_pedidos(
         }
 
         for pedido, cliente, estado_pedido, entrega, produccion, domiciliario, florista in rows:
+            prod_estado_id = int(produccion.estado) if produccion and produccion.estado is not None else None
+            entrega_estado_id = int(entrega.estadoEntregaID) if entrega and entrega.estadoEntregaID is not None else None
             stage = _resolve_stage(
                 (estado_pedido.nombreEstado if estado_pedido else None),
-                (int(produccion.estado) if produccion and produccion.estado is not None else None),
-                (int(entrega.estadoEntregaID) if entrega and entrega.estadoEntregaID is not None else None),
+                prod_estado_id,
+                entrega_estado_id,
+                prod_estado_map.get(prod_estado_id) if prod_estado_id is not None else None,
+                entrega_estado_map.get(entrega_estado_id) if entrega_estado_id is not None else None,
             )
 
             if solo_en_produccion and stage != "en_produccion":
@@ -362,7 +407,8 @@ def listar_pipeline_pedidos(
 
             prioridad = (str(produccion.prioridad or "MEDIA").upper() if produccion else "MEDIA")
             urgente = prioridad in {"ALTA", "URGENTE", "CRITICA"}
-            resumen = productos_por_pedido.get(int(pedido.idPedido), "")
+            producto_payload = productos_por_pedido.get(int(pedido.idPedido), {})
+            resumen = str(producto_payload.get("resumen") or "")
             tiene_tarjeta = bool(entrega and entrega.mensaje and str(entrega.mensaje).strip())
             domiciliario_id_value = (
                 int(entrega.domiciliarioID)
@@ -406,13 +452,9 @@ def listar_pipeline_pedidos(
                 tiempo_restante_entrega=_minutes_left(fecha_entrega, rango_hora_valor),
                 progreso_porcentaje=STAGE_PROGRESS[stage],
                 resumen_productos=resumen,
-                imagen_url=(
-                    str(entrega.evidenciaFotoUrl or entrega.firmaImagenUrl)
-                    if entrega and (entrega.evidenciaFotoUrl or entrega.firmaImagenUrl)
-                    else None
-                ),
                 color_estado=STAGE_COLOR[stage],
                 tiene_tarjeta=tiene_tarjeta,
+                tipo_entrega=(str(entrega.tipoEntrega).strip() if entrega and entrega.tipoEntrega else None),
                 es_domicilio=bool(entrega and str(entrega.tipoEntrega or "").strip().lower() != "recoger"),
                 stage=stage,
             )

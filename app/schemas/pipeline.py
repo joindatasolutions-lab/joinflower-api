@@ -41,7 +41,7 @@ class PipelinePedidoCard(BaseModel):
     tiempo_restante_entrega: int | None = None
     progreso_porcentaje: int = 0
     resumen_productos: str | None = None
-    imagen_url: str | None = None
+    tipo_entrega: str | None = None
     color_estado: str
     tiene_tarjeta: bool = False
     es_domicilio: bool = True
