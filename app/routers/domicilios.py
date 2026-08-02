@@ -820,10 +820,7 @@ def _build_mis_entregas_query(
             ),
             Produccion.estado == estado_para_entrega,
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            or_(
-                tipo_entrega_norm != "",
-                direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            ),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
         .order_by(
             func.coalesce(
@@ -892,10 +889,7 @@ def _build_pedidos_disponibles_query(
                 entrega_actual.domiciliarioID == int(domiciliario_id),
             ),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            or_(
-                tipo_entrega_norm != "",
-                direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            ),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
 
@@ -957,10 +951,7 @@ def _build_pedidos_sin_asignar_query(
                 entrega_actual.fechaEntrega,
             ).between(fecha_desde, fecha_hasta),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            or_(
-                tipo_entrega_norm != "",
-                direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            ),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
     )
 
@@ -1071,11 +1062,8 @@ def _listar_pedidos_disponibles_api_rows(
                   BETWEEN :fecha_desde AND :fecha_hasta
               AND lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_'))
                   NOT IN :store_pickup_values
-              AND (
-                    lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_')) <> ''
-                 OR lower(replace(replace(COALESCE(e.direccion, ''), '-', '_'), ' ', '_'))
-                    NOT IN :store_pickup_values
-              )
+              AND lower(replace(replace(COALESCE(e.direccion, ''), '-', '_'), ' ', '_'))
+                  NOT IN :store_pickup_values
               AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         ),
         productos AS (
