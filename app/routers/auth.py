@@ -34,7 +34,7 @@ from app.middlewares.rate_limit import limiter
 from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
-from app.services.cache import get_cache, set_cache
+from app.services.cache import cache_ttl, get_cache, set_cache
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.schemas.auth import (
     AuthMeResponse,
@@ -1720,7 +1720,7 @@ def listar_modulos_empresa(
         items = _build_empresa_module_items(db, normalized_empresa_id)
         db.commit()
         response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
-        set_cache(cache_key, response.model_dump(), ttl=300)
+        set_cache(cache_key, response.model_dump(), ttl=cache_ttl("empresa_config", 300))
         return response
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL listando modulos de empresa", exc_info=True)
@@ -1764,7 +1764,7 @@ def actualizar_modulos_empresa(
         set_cache(
             f"empresa_config:{empresa_id}",
             EmpresaModuloListResponse(empresaID=empresa_id, items=updated_items).model_dump(),
-            ttl=300,
+            ttl=cache_ttl("empresa_config", 300),
         )
 
         return EmpresaModuloUpdateResponse(

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.barrio import Barrio
 from app.core.security import assert_same_empresa, get_current_auth_context, require_module_access
-from app.services.cache import get_cache, invalidate_cache_prefix, set_cache
+from app.services.cache import cache_ttl, get_cache, invalidate_cache_prefix, set_cache
 
 router = APIRouter()
 
@@ -251,5 +251,5 @@ def search_barrios(
         )
 
     # Neighborhood lookups are frequently repeated by destination autocomplete.
-    set_cache(cache_key, response, ttl=3600)
+    set_cache(cache_key, response, ttl=cache_ttl("barrios", 300))
     return response

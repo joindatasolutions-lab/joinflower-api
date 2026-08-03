@@ -15,6 +15,7 @@ from app.models.insumo import Insumo
 from app.models.movimientoinventario import MovimientoInventario
 from app.models.proveedor import Proveedor
 from app.models.receta import Receta, RecetaDetalle
+from app.services.cache import invalidate_cache_prefix
 from app.schemas.inventario import (
     InventarioActivoRequest,
     InventarioCreateRequest,
@@ -1045,6 +1046,13 @@ def _crear_producto_para_receta(
     return producto_id
 
 
+def _invalidate_catalogo_cache(empresa_id: int, sucursal_id: int | None) -> None:
+    """Limpia el caché de /catalogo tras crear un producto nuevo via receta (ver cache-fase1)."""
+    if not sucursal_id:
+        return
+    invalidate_cache_prefix(f"catalogo:{int(empresa_id)}:sucursal:{int(sucursal_id)}")
+
+
 def _receta_item_extra(db: Session, rec: Receta, sucursal_id: int | None) -> dict:
     precio_info = _producto_precio_imagen(db, rec.productoID, sucursal_id)
     ventas_info = _ventas_receta(db, int(rec.empresaID), rec.productoID)
@@ -1103,6 +1111,7 @@ def crear_receta(
     assert_same_empresa(auth, empresa_id)
 
     producto_id = payload.productoID
+    producto_nuevo_sucursal_id: int | None = None
     if producto_id is not None:
         existe = db.execute(
             text("SELECT 1 FROM petalops.producto WHERE id_producto = :id AND empresa_id = :empresa_id"),
@@ -1120,6 +1129,7 @@ def crear_receta(
             precio=payload.precioVenta,
             imagen_url=payload.imagenUrl,
         )
+        producto_nuevo_sucursal_id = auth.sucursalID
 
     now = datetime.now(timezone.utc)
     try:
@@ -1139,6 +1149,9 @@ def crear_receta(
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear receta (nombre duplicado)")
+
+    # Producto recien creado y comiteado: invalidar catalogo cacheado para que aparezca sin esperar el TTL.
+    _invalidate_catalogo_cache(empresa_id, producto_nuevo_sucursal_id)
 
     extra = _receta_item_extra(db, rec, auth.sucursalID)
     return RecetaItem(
@@ -1209,6 +1222,7 @@ def actualizar_receta(
     assert_same_empresa(auth, int(rec.empresaID))
 
     producto_id = payload.productoID
+    producto_nuevo_sucursal_id: int | None = None
     if producto_id is not None:
         existe = db.execute(
             text("SELECT 1 FROM petalops.producto WHERE id_producto = :id AND empresa_id = :empresa_id"),
@@ -1227,6 +1241,7 @@ def actualizar_receta(
             precio=payload.precioVenta,
             imagen_url=payload.imagenUrl,
         )
+        producto_nuevo_sucursal_id = auth.sucursalID
 
     rec.nombre = payload.nombre.strip()
     rec.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
@@ -1240,6 +1255,9 @@ def actualizar_receta(
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible actualizar receta")
+
+    # Producto recien creado y comiteado: invalidar catalogo cacheado para que aparezca sin esperar el TTL.
+    _invalidate_catalogo_cache(int(rec.empresaID), producto_nuevo_sucursal_id)
 
     return obtener_receta(receta_id, db=db, auth=auth)
 
