@@ -4,13 +4,16 @@ import os
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from jose import JWTError, jwt
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.security import (
+    JWT_ALGORITHM,
     JWT_EXPIRE_MINUTES,
+    JWT_SECRET,
     _quote_ident,
     _resolve_table_spec,
     auth_schema_error,
@@ -18,6 +21,7 @@ from app.core.security import (
     get_current_auth_context,
     load_empresa_auth_meta,
     load_usuario_module_overrides,
+    oauth2_scheme,
     pwd_context,
     require_admin_role,
     is_empresa_admin_context,
@@ -27,6 +31,7 @@ from app.core.security import (
     is_empresa_activa,
     require_global_join_user,
     resolve_empresa_module_candidates,
+    revoke_token,
     verify_password,
 )
 from app.database import get_db
@@ -747,6 +752,32 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL en login", exc_info=True)
         raise _err("AUTH_LOGIN_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    auth=Depends(get_current_auth_context),
+    db: Session = Depends(get_db),
+):
+    """Revoca el token actual (ver punto 12 de mejoras-arquitectura.md). No requiere
+    desactivar la cuenta: solo este token deja de servir, aunque no haya expirado."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return {"status": "ok"}
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if jti and exp:
+        revoke_token(
+            db,
+            jti=jti,
+            usuario_id=int(auth.userID),
+            expira_en=datetime.fromtimestamp(exp, tz=timezone.utc),
+        )
+    return {"status": "ok"}
+
 
 @router.get("/me", response_model=AuthMeResponse)
 def me(auth=Depends(get_current_auth_context)):

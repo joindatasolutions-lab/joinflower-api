@@ -1,4 +1,5 @@
 ﻿import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
@@ -257,14 +258,10 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     if not plain_password or not password_hash:
         return False
 
-    if password_hash.startswith("$2"):
-        try:
-            return pwd_context.verify(plain_password, password_hash)
-        except (exc.UnknownHashError, ValueError):
-            return False
-
-    # Transitional fallback for legacy records with plain passwords.
-    return plain_password == password_hash
+    try:
+        return pwd_context.verify(plain_password, password_hash)
+    except (exc.UnknownHashError, ValueError):
+        return False
 
 
 def is_empresa_activa(estado_value) -> bool:
@@ -308,12 +305,56 @@ def create_access_token(
         "sucursalID": (int(sucursal_id) if sucursal_id is not None else None),
         "rolID": int(rol_id),
         "planID": (int(plan_id) if plan_id is not None else None),
+        "jti": secrets.token_hex(16),
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
     if extra_claims:
         payload.update(extra_claims)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _token_revocado_table_exists(db: Session) -> bool:
+    """Defensivo: permite desplegar este codigo antes de correr la migracion
+    sql/alter_token_revocado.sql sin romper el login (ver mostrar_codigo_catalogo
+    en pedido.py para el mismo patron)."""
+    row = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'petalops' AND table_name = 'token_revocado'
+            LIMIT 1
+            """
+        )
+    ).first()
+    return bool(row)
+
+
+def is_token_revoked(db: Session, jti: str | None) -> bool:
+    if not jti or not _token_revocado_table_exists(db):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM petalops.token_revocado WHERE jti = :jti LIMIT 1"),
+        {"jti": jti},
+    ).first()
+    return bool(row)
+
+
+def revoke_token(db: Session, *, jti: str, usuario_id: int, expira_en: datetime) -> None:
+    """Revoca un JWT especifico (ej. logout explicito) sin desactivar la cuenta."""
+    if not jti or not _token_revocado_table_exists(db):
+        return
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.token_revocado (jti, usuario_id, expira_en)
+            VALUES (:jti, :usuario_id, :expira_en)
+            ON CONFLICT (jti) DO NOTHING
+            """
+        ),
+        {"jti": jti, "usuario_id": int(usuario_id), "expira_en": expira_en},
+    )
+    db.commit()
 
 
 def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
@@ -754,6 +795,8 @@ def get_current_auth_context(
         raise credentials_error
 
     try:
+        if is_token_revoked(db, payload.get("jti")):
+            raise credentials_error
         return _build_auth_context(db, payload)
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
