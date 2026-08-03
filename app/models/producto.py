@@ -9,7 +9,7 @@ class Producto(Base):
 
     idProducto = Column("id_producto", BigInteger, primary_key=True, index=True)
     empresaID = Column("empresa_id", BigInteger)
-    categoriaID = Column("categoria_id", BigInteger, ForeignKey("petalops.categoria.idcategoria"))
+    categoriaID = Column("categoria_id", BigInteger, ForeignKey("petalops.categoria.id_categoria"))
     codigoProducto = Column("codigo_producto", String(50))
     codigoCatalogo = Column("codigo_catalogo", String(50))
     nombreProducto = Column("nombre_producto", String(200))

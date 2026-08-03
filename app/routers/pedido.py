@@ -23,7 +23,6 @@ from app.models.empresa import Empresa
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.produccion import Produccion
-from app.models.transicionestadopedido import TransicionEstadoPedido
 from app.models.estadopedido import EstadoPedido
 from app.models.entrega import Entrega
 from app.models.sucursal import Sucursal
