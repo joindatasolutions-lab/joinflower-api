@@ -334,6 +334,27 @@ def _tipo_movimiento_historial(florista_anterior_id: int | None, florista_nuevo_
     return "MOVIMIENTO_MANUAL"
 
 
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    column_exists = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'petalops' AND table_name = 'empresa' AND column_name = 'mostrar_codigo_catalogo'
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not column_exists:
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
 def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int]) -> dict[int, dict[str, str | int | None]]:
     if not produccion_ids:
         return {}
@@ -488,6 +509,7 @@ def _build_items(
     rows = q.order_by(Pedido.numeroPedido.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
     producto_map = _build_producto_map(db, empresa_id, ids)
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
 
     now = colombia_now_naive()
     items: list[ProduccionItem] = []
@@ -511,7 +533,7 @@ def _build_items(
         observacion_entrega = str(entrega.observacionGeneral or "").strip() if entrega else ""
         observacion_entrega = observacion_entrega or None
         producto_id = producto_info.get("productoID")
-        codigo_base = codigo_catalogo if int(empresa_id) == 3 and codigo_catalogo else codigo_producto
+        codigo_base = codigo_catalogo if mostrar_codigo_catalogo and codigo_catalogo else codigo_producto
         codigo_arreglo = codigo_base or (str(producto_id) if producto_id is not None else None)
 
         items.append(

@@ -63,33 +63,6 @@ router = APIRouter()
 pedido_logger = get_logger("pedido")
 
 FLORA_EMPRESA_ID = 3
-FLORA_PAYMENT_METHODS = {
-    "Cuenta por cobrar",
-    "Efectivo",
-    "Canje",
-    "Contraentrega",
-    "Cotizacion",
-    "Obsequio",
-    "Paypal",
-    "Link bold",
-    "Link payu",
-    "Link wompi",
-    "Datafono credibanco",
-    "Datafono Bold",
-    "Transferencia 0257",
-    "Transferencia 0005",
-    "Transferencia 3220",
-    "Transferencia 4038",
-    "Transferencia 4966",
-    "Transferencia 3671",
-    "Transferencia 6913",
-    "Transferencia 5431",
-    "Transferencia 1340",
-    "Transferencia Jaque",
-    "Transferencia QR",
-    "RAPPI",
-    "Anulado",
-}
 
 STORE_PICKUP_DELIVERY_VALUES = (
     "recogida_en_tienda",
@@ -99,28 +72,8 @@ STORE_PICKUP_DELIVERY_VALUES = (
     "recogida",
     "recoger",
 )
-FLORA_SALES_CHANNELS = {
-    "Huawei",
-    "Samsung",
-    "Andrea",
-    "Página Web",
-    "Presencial",
-    "Rappi",
-}
 LINK_PAYMENT_METHODS = {"link bold", "link payu", "link wompi"}
 LINK_SURCHARGE_PCT = Decimal("5.00")
-
-
-def _tenant_order_rules(empresa_id: int) -> dict:
-    if int(empresa_id) == FLORA_EMPRESA_ID:
-        return {
-            "require_payment_before_approval": True,
-            "require_sales_channel_before_approval": True,
-        }
-    return {
-        "require_payment_before_approval": False,
-        "require_sales_channel_before_approval": False,
-    }
 
 
 def _activo_truthy(column):
@@ -947,12 +900,24 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     return text
 
 
-def _codigo_producto_visible(producto: Producto | None, empresa_id: int) -> str | None:
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    if not _column_exists(db, "empresa", "mostrar_codigo_catalogo"):
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+def _codigo_producto_visible(producto: Producto | None, mostrar_codigo_catalogo: bool) -> str | None:
     if not producto:
         return None
     codigo_producto = _codigo_producto_base(producto)
     codigo_catalogo = _codigo_catalogo_base(producto)
-    if int(empresa_id) == 3 and codigo_catalogo:
+    if mostrar_codigo_catalogo and codigo_catalogo:
         return codigo_catalogo
     return codigo_producto
 
@@ -969,18 +934,18 @@ def _codigo_catalogo_base(producto: Producto | None) -> str | None:
     return str(getattr(producto, "codigoCatalogo", "") or "").strip() or None
 
 
-def _producto_listado_texto(producto: Producto | None, empresa_id: int) -> str:
+def _producto_listado_texto(producto: Producto | None, mostrar_codigo_catalogo: bool) -> str:
     nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
-    codigo = _codigo_producto_visible(producto, empresa_id)
+    codigo = _codigo_producto_visible(producto, mostrar_codigo_catalogo)
     return f"{codigo} - {nombre}" if codigo else nombre
 
 
-def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, empresa_id: int) -> PedidoListProducto:
+def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, mostrar_codigo_catalogo: bool) -> PedidoListProducto:
     nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
     producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
     return PedidoListProducto(
         productoID=producto_id,
-        codigoProducto=_codigo_producto_visible(producto, empresa_id),
+        codigoProducto=_codigo_producto_visible(producto, mostrar_codigo_catalogo),
         codigoCatalogo=_codigo_catalogo_base(producto),
         nombreProducto=nombre,
         cantidad=float(detalle.cantidad or 0),
@@ -2529,15 +2494,16 @@ def listar_pedidos(
         .all()
     )
 
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     productos_por_pedido: dict[int, list[str]] = {}
     productos_detalle_por_pedido: dict[int, list[PedidoListProducto]] = {}
     for detalle, producto in detalles_rows:
         pedido_id = int(detalle.pedidoID)
         productos_por_pedido.setdefault(pedido_id, []).append(
-            _producto_listado_texto(producto, int(empresa_id))
+            _producto_listado_texto(producto, mostrar_codigo_catalogo)
         )
         productos_detalle_por_pedido.setdefault(pedido_id, []).append(
-            _producto_listado_detalle(detalle, producto, int(empresa_id))
+            _producto_listado_detalle(detalle, producto, mostrar_codigo_catalogo)
         )
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
@@ -2649,6 +2615,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         )
 
         has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
+        mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, int(pedido.empresaID))
 
         detalles = (
             db.query(PedidoDetalle, Producto)
@@ -2671,7 +2638,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
             PedidoDetalleProducto(
                 detalleID=int(detalle.idPedidoDetalle),
                 productoID=int((producto.idProducto if producto else detalle.productoID) or 0),
-                codigoProducto=_codigo_producto_visible(producto, int(pedido.empresaID)),
+                codigoProducto=_codigo_producto_visible(producto, mostrar_codigo_catalogo),
                 codigoCatalogo=_codigo_catalogo_base(producto),
                 nombreProducto=str((producto.nombreProducto if producto else None) or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
@@ -3248,12 +3215,12 @@ def actualizar_detalle_pedido(
             if channel_field and not canal_flora:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "FLORA_CHANNEL_REQUIRED", "message": "Celular Flora es obligatorio"},
+                    detail={"code": "FLORA_CHANNEL_REQUIRED", "message": f"{channel_field['titulo'] or 'Canal de venta'} es obligatorio"},
                 )
             if canal_flora and allowed_channels and canal_flora not in allowed_channels:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
+                    detail={"code": "FLORA_CHANNEL_INVALID", "message": f"{channel_field['titulo'] or 'Canal de venta'} inválido"},
                 )
 
             descuento_monto = Decimal(str(
@@ -3800,7 +3767,11 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
     mensaje_final = "Gracias por su compra ✿"
     numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
-    celular_flora = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
+    # Titulo real configurado por empresa para el canal de venta (ver empresa_menu / sql/alter_empresa_menu.sql).
+    # Para Flora esta sembrado como "Celular Flora"; otras empresas ven su propio titulo si lo configuran.
+    canal_venta_field = _load_empresa_menu_config(db, empresa_id=int(pedido.empresaID)).get("pedido_canal_venta")
+    canal_venta_titulo = str(canal_venta_field["titulo"]).strip() if canal_venta_field else None
+    canal_venta_valor = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
 
     recargo_link_monto = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
     descuento_monto = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
@@ -3858,7 +3829,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
         f"Operador: {operador_nombre}",
-        *([f"Celular Flora: {celular_flora}"] if int(pedido.empresaID) == FLORA_EMPRESA_ID else []),
+        *([f"{canal_venta_titulo}: {canal_venta_valor}"] if canal_venta_field else []),
         "----------------------------------------",
         mensaje_final,
     ]
@@ -4086,6 +4057,7 @@ def resumen_contabilidad(
     cuentas_map: dict[str, dict] = {}
     detalles_contables: list[dict] = []
     total_recaudo_global = Decimal("0.00")
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
 
     for pedido, estado in order_rows:
         pedido_id = int(pedido.idPedido)
@@ -4172,7 +4144,7 @@ def resumen_contabilidad(
         })
 
         for detalle, producto in detalles_por_pedido.get(pedido_id, []):
-            codigo = _codigo_producto_visible(producto, int(empresa_id)) or ""
+            codigo = _codigo_producto_visible(producto, mostrar_codigo_catalogo) or ""
             nombre = str(getattr(producto, "nombreProducto", None) or "Arreglo").strip() or "Arreglo"
             producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
             key = f"{producto_id or 'na'}::{codigo or 'sin-codigo'}::{nombre}"
