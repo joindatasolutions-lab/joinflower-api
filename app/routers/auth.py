@@ -266,6 +266,25 @@ def _load_empresa_columns(db: Session) -> set[str]:
 def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaModuloItem]:
     _ensure_empresa_modulo_table(db)
     candidates = resolve_empresa_module_candidates(db, empresa_id)
+    for modulo, activo in candidates.items():
+        normalized = normalize_module_name(modulo)
+        if not normalized:
+            continue
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.empresa_modulo (empresa_id, modulo, activo, updatedat)
+                VALUES (:empresa_id, :modulo, :activo, CURRENT_TIMESTAMP)
+                ON CONFLICT (empresa_id, modulo) DO NOTHING
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "modulo": normalized,
+                "activo": 1 if activo else 0,
+            },
+        )
+    candidates = resolve_empresa_module_candidates(db, empresa_id)
     return [
         EmpresaModuloItem(modulo=modulo, activo=bool(activo))
         for modulo, activo in candidates.items()
@@ -1449,6 +1468,7 @@ def listar_empresas_modulos(
                 items=modulos,
             )
         )
+    db.commit()
     return EmpresaModuloResumenResponse(items=items)
 
 
@@ -1698,6 +1718,7 @@ def listar_modulos_empresa(
 
         _ensure_empresa_modulo_table(db)
         items = _build_empresa_module_items(db, normalized_empresa_id)
+        db.commit()
         response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
         set_cache(cache_key, response.model_dump(), ttl=300)
         return response
@@ -1732,7 +1753,7 @@ def actualizar_modulos_empresa(
                 {
                     "empresa_id": empresa_id,
                     "modulo": modulo,
-                    "activo": bool(activo),
+                    "activo": 1 if activo else 0,
                 },
             )
 
