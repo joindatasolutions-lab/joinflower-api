@@ -57,7 +57,7 @@ from app.core.security import (
     is_super_admin_context,
     require_module_access,
 )
-from app.middlewares.rate_limit import limiter
+from app.middlewares.rate_limit import limiter, rate_limit
 
 router = APIRouter()
 pedido_logger = get_logger("pedido")
@@ -2226,7 +2226,7 @@ def _build_pedido_list_kpis(
 
 
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@limiter.limit("100/minute")
+@limiter.limit(rate_limit("pedidos_list", "100/minute"))
 def listar_pedidos(
     request: Request,
     empresa_id: int = Query(..., alias="empresaID"),
@@ -4446,7 +4446,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
 
 
 @router.post("/pedido/checkout", response_model=PedidoCheckoutResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
-@limiter.limit("60/minute")
+@limiter.limit(rate_limit("pedido_checkout", "60/minute"))
 def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     """Endpoint de checkout: delega la lógica transaccional al servicio de pedidos."""
     assert_same_empresa(auth, int(data.empresaID))
@@ -4472,7 +4472,7 @@ def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depend
 
 
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
-@limiter.limit("60/minute")
+@limiter.limit(rate_limit("pedido_manual", "60/minute"))
 def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     empresa_id = int(data.empresaID if data.empresaID is not None else data.empresaId or 0)
     sucursal_id = int(data.sucursalID if data.sucursalID is not None else data.sucursalId or 0)
@@ -4713,7 +4713,7 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
 
 
 @router.post("/pedido", dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
-@limiter.limit("60/minute")
+@limiter.limit(rate_limit("pedido_crear", "60/minute"))
 def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
 
     assert_same_empresa(auth, int(data.empresaId))

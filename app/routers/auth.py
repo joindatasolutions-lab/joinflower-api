@@ -30,7 +30,7 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
-from app.middlewares.rate_limit import limiter
+from app.middlewares.rate_limit import limiter, rate_limit
 from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
@@ -677,7 +677,7 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit("30/minute")
+@limiter.limit(rate_limit("login", "10/minute"))
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         usuario = (
