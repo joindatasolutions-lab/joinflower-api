@@ -406,6 +406,8 @@ def listar_inventario(
     proveedor_id: int | None = Query(None, alias="proveedorID"),
     q: str | None = Query(None),
     solo_criticos: bool = Query(False, alias="soloCriticos"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=500, ge=1, le=1000, alias="pageSize"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -489,7 +491,11 @@ def listar_inventario(
         estado_norm = str(estado).strip().lower()
         items = [item for item in items if item.estadoStock.lower() == estado_norm]
 
-    return InventarioListResponse(items=items, total=len(items))
+    total = len(items)
+    start = (page - 1) * page_size
+    items_paginados = items[start:start + page_size]
+
+    return InventarioListResponse(items=items_paginados, total=total, page=page, pageSize=page_size)
 
 
 @router.post("", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeCrear"))])
