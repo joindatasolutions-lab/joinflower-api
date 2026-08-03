@@ -1,27 +1,25 @@
-# CRITICO — JWT_SECRET no configurado en produccion (pendiente de aplicar)
+# RESUELTO — JWT_SECRET rotado en produccion
 
-**Estado: NO RESUELTO A PROPOSITO.** Se decidio posponer la rotacion porque las floristerias estaban trabajando activamente al momento del hallazgo (2026-08-03) y rotar el secreto invalida todas las sesiones activas de inmediato. Aplicar en cuanto haya una ventana de mantenimiento (fuera de horario operativo).
+**Estado: RESUELTO (2026-08-03).** Se rotó el secreto en Cloud Run con autorización explícita del usuario. Revisión desplegada: `join-flower-00208-rgs`, sirviendo el 100% del tráfico. Verificado: `JWT_SECRET` aparece en las env vars del servicio (solo se confirmó el nombre, nunca se expuso el valor) y `/health` responde `200 OK`.
 
 Relacionado con el punto 12 de [mejoras-arquitectura.md](./mejoras-arquitectura.md) ("JWT sin refresh token"), encontrado al revisar ese punto.
 
-## El problema
+## El problema que se corrigió
 
 `app/core/security.py:20`:
 ```python
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-change-this-secret")
 ```
 
-Se verifico (solo lectura, gcloud, sin exponer valores) que el servicio `join-flower` en Cloud Run (proyecto `flora-471805`, region `us-central1`, revision activa `join-flower-00207-6t7`, 100% del trafico) **no tiene ni `JWT_SECRET` ni `JWT_SECRET_KEY` configurados**. Las unicas env vars del servicio son: `INSTANCE_CONNECTION_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`, `TEXMEBOT_ENABLED`, `TEXMEBOT_API_KEY`.
+Se había verificado (2026-08-03, solo lectura) que el servicio `join-flower` en Cloud Run (proyecto `flora-471805`, región `us-central1`) **no tenía ni `JWT_SECRET` ni `JWT_SECRET_KEY` configurados**. Producción estaba firmando y validando todos los JWT con el valor por defecto hardcodeado en el código fuente (`"dev-change-this-secret"`), visible para cualquiera con acceso de lectura al repositorio — cualquiera que conociera ese valor podía firmar un JWT válido para cualquier usuario y cualquier rol, incluyendo super admin (`esGlobalJoin=true`), sin ninguna credencial real.
 
-**Consecuencia:** produccion esta firmando y validando todos los JWT con el valor por defecto hardcodeado en el codigo fuente (`"dev-change-this-secret"`), visible para cualquiera con acceso de lectura al repositorio. Cualquiera que conozca ese valor puede firmar un JWT valido para cualquier usuario y cualquier rol, incluyendo super admin (`esGlobalJoin=true`), sin ninguna credencial real — acceso completo a las 4 empresas.
+## Causa raíz (corregida en el repo)
 
-## Causa raiz
+`.env.example` documentaba la variable como `JWT_SECRET_KEY`, pero el código real lee `JWT_SECRET` (nombres distintos). Corregido en `.env.example` para que diga `JWT_SECRET`.
 
-`.env.example` documentaba la variable como `JWT_SECRET_KEY`, pero el codigo real lee `JWT_SECRET` (nombres distintos). Quien configuro Cloud Run probablemente siguio el `.env.example` y configuro el nombre equivocado, o simplemente nunca se configuro. **Ya corregido** en `.env.example` (este commit) para que diga `JWT_SECRET`.
+## Qué se hizo
 
-## Que falta hacer (accion sobre infraestructura, requiere ventana sin usuarios activos)
-
-Correr, en una terminal con `gcloud` autenticado contra el proyecto `flora-471805`:
+Se generó un secreto aleatorio de 64 bytes (`secrets.token_urlsafe(64)`) y se aplicó directamente en Cloud Run:
 
 ```bash
 JWT_SECRET_NEW=$(python -c "import secrets; print(secrets.token_urlsafe(64))")
@@ -32,11 +30,15 @@ gcloud run services update join-flower \
   --update-env-vars="JWT_SECRET=${JWT_SECRET_NEW}"
 ```
 
-**Efecto esperado, no un bug:** todas las sesiones activas quedan invalidadas de inmediato — todos los usuarios logueados (de las 4 empresas) tienen que volver a iniciar sesion. Por eso se pospuso: hacerlo en horario operativo interrumpe a las floristerias trabajando.
+**Efecto aplicado, esperado:** todas las sesiones activas al momento de la rotación quedaron invalidadas — todos los usuarios de las 4 empresas necesitaron volver a iniciar sesión después del deploy (~19:xx del 2026-08-03).
 
-**Recomendacion:** aplicar fuera de horario (ej. de madrugada o en un momento de bajo trafico), avisando de antemano que todos deberan volver a loguearse.
+## Validación posterior
 
-## Notas
+- `gcloud run services describe` (solo nombres de variables, ningún valor expuesto): `JWT_SECRET` aparece en la lista de env vars del servicio.
+- `GET /health` → `200`.
+- `GET /` → `200`.
+- Revisión activa: `join-flower-00208-rgs`, 100% del tráfico.
 
-- No se modifico nada en Cloud Run. El unico cambio aplicado fue el nombre de la variable en `.env.example` (repo, sin efecto en produccion).
-- Se intento aplicar la rotacion directamente vía `gcloud run services update`, pero fue bloqueada por el modo automatico del asistente (proteccion esperada para cambios de infraestructura de produccion) — se le paso el comando al usuario para que lo ejecute cuando decida, o autorice explicitamente.
+## Nota sobre el intento inicial
+
+En un primer intento (mismo día, más temprano), el modo automático del asistente bloqueó el comando `gcloud run services update` por ser un cambio de infraestructura de producción — protección esperada. El usuario decidió posponer la rotación en ese momento porque las floristerías estaban trabajando activamente. Más tarde, el mismo día, el usuario confirmó explícitamente que era buen momento y se aplicó sin bloqueo.
