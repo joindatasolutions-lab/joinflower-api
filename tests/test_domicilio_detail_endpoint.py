@@ -199,16 +199,28 @@ def test_pedido_disponible_item_can_include_product_names():
     assert item.imageUrl == "https://cdn.example.com/ramo.jpg"
 
 
-def test_product_label_prefers_catalog_code_for_flora_empresa():
+def test_product_label_prefers_catalog_code_when_mostrar_codigo_catalogo_activo():
     label = domicilios_router._product_label(
         "Bouquet 12 Rosas Rojas",
         Decimal("1"),
         codigo_producto="PROD-0052",
         codigo_catalogo="0052",
-        empresa_id=3,
+        mostrar_codigo_catalogo=True,
     )
 
     assert label == "0052 - Bouquet 12 Rosas Rojas"
+
+
+def test_product_label_uses_producto_code_when_mostrar_codigo_catalogo_inactivo():
+    label = domicilios_router._product_label(
+        "Bouquet 12 Rosas Rojas",
+        Decimal("1"),
+        codigo_producto="PROD-0052",
+        codigo_catalogo="0052",
+        mostrar_codigo_catalogo=False,
+    )
+
+    assert label == "PROD-0052 - Bouquet 12 Rosas Rojas"
 
 
 def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
