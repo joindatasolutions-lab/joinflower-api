@@ -114,6 +114,8 @@ class InventarioItem(BaseModel):
 class InventarioListResponse(BaseModel):
     items: list[InventarioItem]
     total: int
+    page: int = 1
+    pageSize: int = 500
 
 
 class InventarioMutationResponse(BaseModel):

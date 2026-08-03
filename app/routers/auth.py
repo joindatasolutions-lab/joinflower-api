@@ -4,13 +4,16 @@ import os
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from jose import JWTError, jwt
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.security import (
+    JWT_ALGORITHM,
     JWT_EXPIRE_MINUTES,
+    JWT_SECRET,
     _quote_ident,
     _resolve_table_spec,
     auth_schema_error,
@@ -18,6 +21,7 @@ from app.core.security import (
     get_current_auth_context,
     load_empresa_auth_meta,
     load_usuario_module_overrides,
+    oauth2_scheme,
     pwd_context,
     require_admin_role,
     is_empresa_admin_context,
@@ -27,14 +31,15 @@ from app.core.security import (
     is_empresa_activa,
     require_global_join_user,
     resolve_empresa_module_candidates,
+    revoke_token,
     verify_password,
 )
 from app.database import get_db
-from app.middlewares.rate_limit import limiter
+from app.middlewares.rate_limit import limiter, rate_limit
 from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
-from app.services.cache import get_cache, set_cache
+from app.services.cache import cache_ttl, get_cache, set_cache
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.schemas.auth import (
     AuthMeResponse,
@@ -677,7 +682,7 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit("30/minute")
+@limiter.limit(rate_limit("login", "10/minute"))
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         usuario = (
@@ -747,6 +752,32 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL en login", exc_info=True)
         raise _err("AUTH_LOGIN_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    auth=Depends(get_current_auth_context),
+    db: Session = Depends(get_db),
+):
+    """Revoca el token actual (ver punto 12 de mejoras-arquitectura.md). No requiere
+    desactivar la cuenta: solo este token deja de servir, aunque no haya expirado."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return {"status": "ok"}
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if jti and exp:
+        revoke_token(
+            db,
+            jti=jti,
+            usuario_id=int(auth.userID),
+            expira_en=datetime.fromtimestamp(exp, tz=timezone.utc),
+        )
+    return {"status": "ok"}
+
 
 @router.get("/me", response_model=AuthMeResponse)
 def me(auth=Depends(get_current_auth_context)):
@@ -1720,7 +1751,7 @@ def listar_modulos_empresa(
         items = _build_empresa_module_items(db, normalized_empresa_id)
         db.commit()
         response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
-        set_cache(cache_key, response.model_dump(), ttl=300)
+        set_cache(cache_key, response.model_dump(), ttl=cache_ttl("empresa_config", 300))
         return response
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL listando modulos de empresa", exc_info=True)
@@ -1764,7 +1795,7 @@ def actualizar_modulos_empresa(
         set_cache(
             f"empresa_config:{empresa_id}",
             EmpresaModuloListResponse(empresaID=empresa_id, items=updated_items).model_dump(),
-            ttl=300,
+            ttl=cache_ttl("empresa_config", 300),
         )
 
         return EmpresaModuloUpdateResponse(

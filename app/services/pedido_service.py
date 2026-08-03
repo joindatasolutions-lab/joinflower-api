@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.models.barrio import Barrio
 from app.models.cliente import Cliente
-from app.models.empleado import Empleado
 from app.models.empresa import Empresa
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido

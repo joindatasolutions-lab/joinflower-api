@@ -10,4 +10,3 @@ class PlanModulo(Base):
     planID = Column("plan_id", BigInteger, primary_key=True)
     modulo = Column("modulo", String(80), primary_key=True)
     activo = Column("activo", Boolean, nullable=False, default=True)
-    empresaID = Column("empresa_id", BigInteger, nullable=True, index=True)

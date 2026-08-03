@@ -635,10 +635,31 @@ def _build_courier_card(
     )
 
 
-def _visible_product_code(codigo_producto: str | None, codigo_catalogo: str | None, empresa_id: int) -> str | None:
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    column_exists = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'petalops' AND table_name = 'empresa' AND column_name = 'mostrar_codigo_catalogo'
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not column_exists:
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+def _visible_product_code(codigo_producto: str | None, codigo_catalogo: str | None, mostrar_codigo_catalogo: bool) -> str | None:
     catalog_code = str(codigo_catalogo or "").strip() or None
     product_code = str(codigo_producto or "").strip() or None
-    if int(empresa_id) == 3 and catalog_code:
+    if mostrar_codigo_catalogo and catalog_code:
         return catalog_code
     return product_code
 
@@ -648,13 +669,13 @@ def _product_label(
     cantidad,
     codigo_producto: str | None = None,
     codigo_catalogo: str | None = None,
-    empresa_id: int | None = None,
+    mostrar_codigo_catalogo: bool = False,
 ) -> str | None:
     nombre_limpio = str(nombre or "").strip()
     if not nombre_limpio:
         return None
 
-    codigo = _visible_product_code(codigo_producto, codigo_catalogo, int(empresa_id or 0))
+    codigo = _visible_product_code(codigo_producto, codigo_catalogo, mostrar_codigo_catalogo)
     product_text = f"{codigo} - {nombre_limpio}" if codigo else nombre_limpio
 
     try:
@@ -706,6 +727,7 @@ def _pedido_product_payload_map(
         },
     ).all()
 
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     payload_by_pedido: dict[int, dict] = {}
     for (
         detalle_id,
@@ -731,7 +753,7 @@ def _pedido_product_payload_map(
             cantidad,
             codigo_producto=codigo_producto,
             codigo_catalogo=codigo_catalogo,
-            empresa_id=empresa_id,
+            mostrar_codigo_catalogo=mostrar_codigo_catalogo,
         )
         if label:
             payload["productos"].append(label)
@@ -1041,6 +1063,7 @@ def _listar_pedidos_disponibles_api_rows(
     page: int,
     page_size: int,
 ) -> list[PedidoDisponibleItem]:
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
 
@@ -1139,11 +1162,11 @@ def _listar_pedidos_disponibles_api_rows(
                     (
                         CASE
                             WHEN COALESCE(
-                                CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                CASE WHEN :mostrar_codigo_catalogo THEN NULLIF(prod.codigo_catalogo, '') END,
                                 NULLIF(prod.codigo_producto, '')
                             ) IS NOT NULL
                                 THEN COALESCE(
-                                    CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                    CASE WHEN :mostrar_codigo_catalogo THEN NULLIF(prod.codigo_catalogo, '') END,
                                     NULLIF(prod.codigo_producto, '')
                                 ) || ' - '
                             ELSE ''
@@ -1186,6 +1209,7 @@ def _listar_pedidos_disponibles_api_rows(
         query,
         {
             "empresa_id": int(empresa_id),
+            "mostrar_codigo_catalogo": mostrar_codigo_catalogo,
             "sucursal_id": int(sucursal_id) if sucursal_id is not None else None,
             "estado_pendiente_id": int(estado_pendiente_id),
             "estado_para_entrega": int(estado_para_entrega),
