@@ -47,13 +47,29 @@ DATABASE_NAME=joinflower
 DATABASE_USER=tu_usuario
 DATABASE_PASSWORD=tu_password
 JWT_SECRET_KEY=cambia-esta-clave
-DB_POOL_SIZE=3
-DB_MAX_OVERFLOW=2
-DB_POOL_TIMEOUT=30
+DB_POOL_SIZE=8
+DB_MAX_OVERFLOW=4
+DB_POOL_TIMEOUT=15
 DB_POOL_RECYCLE=1800
 ```
 
-Para Cloud Run/Cloud SQL conviene mantener un pool pequeno por instancia y escalar por concurrencia del servicio, no por conexiones abiertas a PostgreSQL.
+Para Cloud Run/Cloud SQL conviene mantener un pool pequeno por instancia y escalar por concurrencia del servicio, no por conexiones abiertas a PostgreSQL. Para el arranque con 10 floristerias, la recomendacion inicial es `DB_POOL_SIZE=8`, `DB_MAX_OVERFLOW=4`, `DB_POOL_TIMEOUT=15` y `DB_POOL_RECYCLE=1800`, que permite hasta 12 conexiones por instancia.
+
+La capacidad maxima real contra PostgreSQL se calcula asi:
+
+```text
+instancias Cloud Run x (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+```
+
+Ejemplo: 3 instancias x (8 + 4) = 36 conexiones maximas potenciales.
+
+El backend valida estas variables al arrancar. Si un valor viene vacio, invalido o por debajo del minimo permitido, usa un valor seguro y deja un warning en logs en vez de tumbar la aplicacion con `ValueError`. En el arranque tambien registra la configuracion efectiva del pool sin imprimir credenciales.
+
+Monitoreo recomendado en produccion:
+
+- Cloud Logging: buscar `Configuracion pool BD` para confirmar la revision activa y `QueuePool limit` para detectar saturacion.
+- Cloud Run Metrics: revisar latencia p95/p99, conteo de requests y cantidad de instancias.
+- PostgreSQL/Cloud SQL: revisar conexiones activas y tiempo de espera. Si aparecen timeouts de pool, subir gradualmente `DB_POOL_SIZE`; si la BD se acerca al maximo de conexiones, bajar concurrencia/instancias o evaluar PgBouncer.
 
 ## 4) Instalacion y ejecucion
 

@@ -1,3 +1,4 @@
+import logging
 import os
 from urllib.parse import quote_plus, urlencode
 
@@ -7,6 +8,34 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 load_dotenv()
+
+
+database_logger = logging.getLogger("app.database")
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    try:
+        value = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        database_logger.warning(
+            "Valor invalido para %s=%r. Usando default %s.",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    if value < minimum:
+        database_logger.warning(
+            "Valor fuera de rango para %s=%s. Minimo permitido %s.",
+            name,
+            value,
+            minimum,
+        )
+        return minimum
+    return value
 
 
 # Permitir ambas convenciones de variables (DATABASE_* y DB_*).
@@ -21,10 +50,10 @@ INSTANCE_CONNECTION_NAME = (
     or os.getenv("DB_INSTANCE_CONNECTION_NAME")
 )
 DB_SOCKET_DIR = os.getenv("DB_SOCKET_DIR", "/cloudsql")
-DB_POOL_SIZE = max(1, int(os.getenv("DB_POOL_SIZE", "3")))
-DB_MAX_OVERFLOW = max(0, int(os.getenv("DB_MAX_OVERFLOW", "2")))
-DB_POOL_TIMEOUT = max(5, int(os.getenv("DB_POOL_TIMEOUT", "30")))
-DB_POOL_RECYCLE = max(60, int(os.getenv("DB_POOL_RECYCLE", "1800")))
+DB_POOL_SIZE = _env_int("DB_POOL_SIZE", default=3, minimum=1)
+DB_MAX_OVERFLOW = _env_int("DB_MAX_OVERFLOW", default=2, minimum=0)
+DB_POOL_TIMEOUT = _env_int("DB_POOL_TIMEOUT", default=30, minimum=5)
+DB_POOL_RECYCLE = _env_int("DB_POOL_RECYCLE", default=1800, minimum=60)
 
 
 def _build_database_url() -> str:
@@ -52,6 +81,15 @@ def _build_database_url() -> str:
 
 
 DATABASE_URL = _build_database_url()
+
+
+database_logger.info(
+    "Configuracion pool BD: pool_size=%s max_overflow=%s pool_timeout=%s pool_recycle=%s",
+    DB_POOL_SIZE,
+    DB_MAX_OVERFLOW,
+    DB_POOL_TIMEOUT,
+    DB_POOL_RECYCLE,
+)
 
 
 engine = create_engine(
