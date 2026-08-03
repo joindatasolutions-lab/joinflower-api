@@ -93,6 +93,8 @@ class DomicilioAdminItem(BaseModel):
     longitudDestino: float | None = None
     latitudEntrega: float | None = None
     longitudEntrega: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class DomicilioAdminListResponse(BaseModel):
@@ -133,6 +135,8 @@ class DomicilioCourierCard(BaseModel):
     latitudEntrega: float | None = None
     longitudEntrega: float | None = None
     distanciaKm: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class DomicilioCourierListResponse(BaseModel):
@@ -277,6 +281,8 @@ class PedidoDisponibleItem(BaseModel):
     prioridad: str | None = None
     latitudDestino: float | None = None
     longitudDestino: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class PedidoAsignadoResponse(PedidoDisponibleItem):

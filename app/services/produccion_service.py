@@ -199,10 +199,17 @@ def _resolve_estado_produccion_ids(db: Session) -> dict[str, int]:
     ).fetchall()
 
     by_code = {str(code): int(state_id) for state_id, code in rows}
+    para_entrega_id = (
+        by_code.get("paraentrega")
+        or by_code.get("para_entrega")
+        or by_code.get("terminado")
+        or by_code.get("listo")
+        or 4
+    )
     return {
         "pendiente": by_code.get("pendiente", 1),
         "en_proceso": by_code.get("en_proceso", 3),
-        "terminado": by_code.get("terminado", by_code.get("listo", 4)),
+        "terminado": para_entrega_id,
         "cancelado": by_code.get("cancelado", 5),
     }
 
@@ -230,7 +237,7 @@ def _resolve_estado_produccion_labels(db: Session) -> dict[int, str]:
             labels[int(state_id)] = ESTADO_PENDIENTE
         elif code == "en_proceso":
             labels[int(state_id)] = ESTADO_EN_PRODUCCION
-        elif code in {"terminado", "listo"}:
+        elif code in {"paraentrega", "para_entrega", "terminado", "listo"}:
             labels[int(state_id)] = ESTADO_PARA_ENTREGA
         elif code == "cancelado":
             labels[int(state_id)] = ESTADO_CANCELADO

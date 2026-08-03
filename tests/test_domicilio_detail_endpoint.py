@@ -158,6 +158,8 @@ def test_pedido_disponible_item_uses_codigo_pedido_column():
 
     assert item.codigoPedido == "FLR-96412"
     assert item.numeroPedido == "FLR-96412"
+    assert item.estadoProduccion == "ParaEntrega"
+    assert item.estado_produccion == "ParaEntrega"
 
 
 def test_pedido_disponible_item_can_include_product_names():

@@ -77,6 +77,7 @@ def test_domicilio_contadores_counts_disponibles_without_location_joins(monkeypa
         lambda *_args, **_kwargs: SimpleNamespace(c=SimpleNamespace(entrega_id=1)),
     )
     monkeypatch.setattr(domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(domicilios_router.produccion_service, "estado_produccion_id", lambda *_args, **_kwargs: 4)
     monkeypatch.setattr(domicilios_router, "_build_pedidos_sin_asignar_query", fake_sin_asignar_query)
 
     domicilios_router._domicilio_contadores(
@@ -89,3 +90,11 @@ def test_domicilio_contadores_counts_disponibles_without_location_joins(monkeypa
     )
 
     assert captured["include_location"] is False
+
+
+def test_metricas_where_filters_only_pedidos_with_all_producciones_ready():
+    sql = domicilios_router._metricas_where_sql()
+
+    assert "EXISTS" in sql
+    assert "NOT EXISTS" in sql
+    assert "estado_produccion_id IS DISTINCT FROM :estado_para_entrega" in sql

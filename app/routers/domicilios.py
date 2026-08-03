@@ -10,7 +10,7 @@ import os
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import String, and_, bindparam, cast, func, null, or_, text
+from sqlalchemy import String, and_, bindparam, cast, exists, func, null, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -80,6 +80,51 @@ router = APIRouter(
     dependencies=[Depends(require_module_access("domicilios", "puedeVer"))],
 )
 domicilios_logger = get_logger("domicilios")
+
+
+def _estado_produccion_delivery() -> str:
+    return produccion_service.ESTADO_PARA_ENTREGA
+
+
+def _pedido_producciones_para_entrega_condition(pedido_model, estado_para_entrega: int):
+    produccion_any = aliased(Produccion)
+    produccion_not_ready = aliased(Produccion)
+    return and_(
+        exists().where(
+            and_(
+                produccion_any.empresaID == pedido_model.empresaID,
+                produccion_any.pedidoID == pedido_model.idPedido,
+            )
+        ),
+        ~exists().where(
+            and_(
+                produccion_not_ready.empresaID == pedido_model.empresaID,
+                produccion_not_ready.pedidoID == pedido_model.idPedido,
+                or_(
+                    produccion_not_ready.estado == None,
+                    produccion_not_ready.estado != int(estado_para_entrega),
+                ),
+            )
+        ),
+    )
+
+
+def _pedido_producciones_para_entrega_sql(alias_pedido: str = "p") -> str:
+    return f"""
+        AND EXISTS (
+            SELECT 1
+            FROM petalops.produccion pr_any
+            WHERE pr_any.empresa_id = e.empresa_id
+              AND pr_any.pedido_id = {alias_pedido}.id_pedido
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM petalops.produccion pr_pending
+            WHERE pr_pending.empresa_id = e.empresa_id
+              AND pr_pending.pedido_id = {alias_pedido}.id_pedido
+              AND pr_pending.estado_produccion_id IS DISTINCT FROM :estado_para_entrega
+        )
+    """
 
 
 def _activo_truthy(column):
@@ -253,6 +298,8 @@ def _build_pedido_disponible_item(
         fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         **_location_payload(entrega, barrio, zona),
         estado=_estado_api(entrega),
+        estadoProduccion=_estado_produccion_delivery(),
+        estado_produccion=_estado_produccion_delivery(),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
     )
 
@@ -575,6 +622,8 @@ def _build_courier_card(
         mensaje=str(entrega.mensaje or "") or None,
         observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
         estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
+        estadoProduccion=_estado_produccion_delivery(),
+        estado_produccion=_estado_produccion_delivery(),
         horaEntrega=str(entrega.rangoHora or "") or None,
         fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
@@ -819,6 +868,7 @@ def _build_mis_entregas_query(
                 ]
             ),
             Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
             direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
@@ -883,6 +933,7 @@ def _build_pedidos_disponibles_query(
             ).between(start, end),
             entrega_actual.estadoEntregaID.in_([estado_pendiente_id, estado_no_entregado_id]),
             Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             or_(
                 entrega_actual.estadoEntregaID == estado_no_entregado_id,
                 entrega_actual.domiciliarioID == None,
@@ -945,6 +996,7 @@ def _build_pedidos_sin_asignar_query(
             entrega_actual.domiciliarioID == None,
             entrega_actual.estadoEntregaID == estado_pendiente_id,
             Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             func.coalesce(
                 entrega_actual.reprogramadaPara,
                 entrega_actual.fechaEntregaProgramada,
@@ -993,7 +1045,7 @@ def _listar_pedidos_disponibles_api_rows(
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
 
     query = text(
-        """
+        f"""
         WITH latest_attempt AS (
             SELECT pedido_id, MAX(intentonumero) AS max_intento
             FROM petalops.entrega
@@ -1058,6 +1110,7 @@ def _listar_pedidos_disponibles_api_rows(
               AND e.domiciliarioid IS NULL
               AND e.estadoentregaid = :estado_pendiente_id
               AND pr.estado_produccion_id = :estado_para_entrega
+              {_pedido_producciones_para_entrega_sql("p")}
               AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega)
                   BETWEEN :fecha_desde AND :fecha_hasta
               AND lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_'))
@@ -1187,6 +1240,8 @@ def _listar_pedidos_disponibles_api_rows(
                 nombreZona=nombre_zona,
                 zona=nombre_zona,
                 estado="SIN_ASIGNAR",
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 prioridad=(str(row.get("prioridad") or "") or None),
                 latitudDestino=(float(row["latituddestino"]) if row.get("latituddestino") is not None else None),
                 longitudDestino=(float(row["longituddestino"]) if row.get("longituddestino") is not None else None),
@@ -1203,13 +1258,17 @@ def _domicilio_contadores(
     fecha_desde: datetime,
     fecha_hasta: datetime,
 ) -> DomicilioContadoresResponse:
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
     base = (
         db.query(entrega_actual)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
+        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .filter(
             entrega_actual.empresaID == int(empresa_id),
+            Pedido.empresaID == int(empresa_id),
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             func.coalesce(
                 entrega_actual.reprogramadaPara,
                 entrega_actual.fechaEntregaProgramada,
@@ -1218,7 +1277,7 @@ def _domicilio_contadores(
         )
     )
     if sucursal_id is not None:
-        base = base.filter(entrega_actual.sucursalID == int(sucursal_id))
+        base = base.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
 
     assigned_states = {
         "asignados": domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO),
@@ -1250,6 +1309,7 @@ def _metricas_base_params(
     fecha_desde: date,
     fecha_hasta: date,
     domiciliario_id: int | None = None,
+    estado_para_entrega: int = 4,
 ) -> dict:
     return {
         "empresa_id": int(empresa_id),
@@ -1257,17 +1317,19 @@ def _metricas_base_params(
         "fecha_desde": datetime.combine(fecha_desde, datetime.min.time()),
         "fecha_hasta": datetime.combine(fecha_hasta + timedelta(days=1), datetime.min.time()),
         "domiciliario_id": (int(domiciliario_id) if domiciliario_id is not None else None),
+        "estado_para_entrega": int(estado_para_entrega),
     }
 
 
 def _metricas_where_sql() -> str:
-    return """
+    return f"""
         e.empresa_id = :empresa_id
         AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         AND (:domiciliario_id IS NULL OR e.domiciliarioid = :domiciliario_id)
         AND upper(COALESCE(ep.nombre_estado, '')) <> 'CREADO'
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
+        {_pedido_producciones_para_entrega_sql("p")}
     """
 
 
@@ -1943,6 +2005,7 @@ def listar_admin(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
 
@@ -1957,6 +2020,7 @@ def listar_admin(
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             func.upper(func.coalesce(EstadoPedido.nombreEstado, "")) != "CREADO",
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
         )
     )
 
@@ -2013,6 +2077,8 @@ def listar_admin(
                 domiciliarioID=(int(entrega.domiciliarioID) if entrega.domiciliarioID else None),
                 domiciliario=(str(domiciliario.nombre or "") if domiciliario else None),
                 estado=estado,
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 intentoNumero=max(int(entrega.intentoNumero or 1), 1),
                 tiempoRestanteHoras=domicilio_service.tiempo_restante_horas(entrega),
                 prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
@@ -2701,6 +2767,8 @@ def listar_pedidos_disponibles_api(
                 nombreZona=location["nombreZona"],
                 zona=location["zona"],
                 estado=_estado_api(entrega),
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
                 latitudDestino=lat_destino,
                 longitudDestino=lng_destino,
@@ -2783,6 +2851,7 @@ def obtener_metricas_domicilios(
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
         domiciliario_id=domiciliario_id,
+        estado_para_entrega=produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA),
     )
     return DomicilioMetricasResponse(
         empresaID=int(empresa_id),
