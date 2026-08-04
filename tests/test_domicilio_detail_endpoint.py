@@ -53,8 +53,31 @@ class FakeDb:
         raise AssertionError(f"Unexpected query entities: {entities}")
 
 
+class FakeMetricasResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class FakeMetricasDb:
+    def __init__(self, rows):
+        self.rows = rows
+        self.last_params = None
+
+    def execute(self, query, params):
+        self.last_query = str(query)
+        self.last_params = params
+        return FakeMetricasResult(self.rows)
+
+
 def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *args, **kwargs: None)
+    monkeypatch.setattr(domicilios_router, "_domicilio_auditoria", lambda *args, **kwargs: [])
 
     entrega = SimpleNamespace(
         idEntrega=10,
@@ -62,6 +85,7 @@ def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
         pedidoID=20,
         mensaje="Feliz cumple",
         domiciliarioID=48,
+        estadoEntregaID=4,
     )
     pedido = SimpleNamespace(
         idPedido=20,
@@ -90,9 +114,11 @@ def test_obtener_detalle_domicilio_returns_items_with_images(monkeypatch):
     response = domicilios_router.obtener_detalle_domicilio(10, db=db, auth=auth)
 
     assert response.idEntrega == 10
-    assert response.numeroPedido == "FLR-96412"
+    assert response.numeroPedido == "96412"
     assert response.cliente == "Cliente Demo"
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
     assert response.customerMessage == "Feliz cumple"
+    assert response.auditoria == []
     assert response.items[0].productId == 50
     assert response.items[0].name == "Ramo Primavera"
     assert response.items[0].qty == 2
@@ -132,6 +158,8 @@ def test_pedido_disponible_item_uses_codigo_pedido_column():
 
     assert item.codigoPedido == "FLR-96412"
     assert item.numeroPedido == "FLR-96412"
+    assert item.estadoProduccion == "ParaEntrega"
+    assert item.estado_produccion == "ParaEntrega"
 
 
 def test_pedido_disponible_item_can_include_product_names():
@@ -171,16 +199,28 @@ def test_pedido_disponible_item_can_include_product_names():
     assert item.imageUrl == "https://cdn.example.com/ramo.jpg"
 
 
-def test_product_label_prefers_catalog_code_for_flora_empresa():
+def test_product_label_prefers_catalog_code_when_mostrar_codigo_catalogo_activo():
     label = domicilios_router._product_label(
         "Bouquet 12 Rosas Rojas",
         Decimal("1"),
         codigo_producto="PROD-0052",
         codigo_catalogo="0052",
-        empresa_id=3,
+        mostrar_codigo_catalogo=True,
     )
 
     assert label == "0052 - Bouquet 12 Rosas Rojas"
+
+
+def test_product_label_uses_producto_code_when_mostrar_codigo_catalogo_inactivo():
+    label = domicilios_router._product_label(
+        "Bouquet 12 Rosas Rojas",
+        Decimal("1"),
+        codigo_producto="PROD-0052",
+        codigo_catalogo="0052",
+        mostrar_codigo_catalogo=False,
+    )
+
+    assert label == "PROD-0052 - Bouquet 12 Rosas Rojas"
 
 
 def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
@@ -207,6 +247,90 @@ def test_pedido_disponible_item_prefers_rango_hora_over_midnight_date():
     assert item.horaEntrega == "10:00"
 
 
+def test_metricas_novedades_detalle_returns_order_detail():
+    fecha_programada = datetime(2026, 7, 16, 10, 0, 0)
+    db = FakeMetricasDb(
+        [
+            {
+                "id_entrega": 10,
+                "pedido_id": 20,
+                "numero_pedido": 96412,
+                "codigo_pedido": "FLR-96412",
+                "cliente": "Cliente Demo",
+                "destinatario": "Maria Demo",
+                "telefonodestino": "3001234567",
+                "direccion": "Calle 123",
+                "barrio_id": 7,
+                "barrio": "El Prado",
+                "zona_id": 2,
+                "zona": "Zona 2",
+                "domiciliario_id": 48,
+                "domiciliario": "Domi Demo",
+                "estado_entrega": "No entregado",
+                "estado_pedido": "En despacho",
+                "novedad": "Dirección incorrecta",
+                "intentonumero": 1,
+                "fechaentregaprogramada": fecha_programada,
+                "fechaentrega": None,
+                "reprogramadapara": None,
+            }
+        ]
+    )
+    params = {
+        "empresa_id": 3,
+        "sucursal_id": None,
+        "fecha_desde": datetime(2026, 7, 1),
+        "fecha_hasta": datetime(2026, 8, 1),
+        "domiciliario_id": None,
+    }
+
+    detalles = domicilios_router._metricas_novedades_detalle(db, params)
+
+    assert db.last_params == params
+    assert "motivonoentregado" in db.last_query
+    assert "<> 'CREADO'" in db.last_query
+    assert detalles[0].idEntrega == 10
+    assert detalles[0].pedidoID == 20
+    assert detalles[0].numeroPedido == "96412"
+    assert detalles[0].cliente == "Cliente Demo"
+    assert detalles[0].domiciliario == "Domi Demo"
+    assert detalles[0].novedad == "Dirección incorrecta"
+    assert detalles[0].fechaEntregaProgramada == fecha_programada
+
+
+def test_novedad_audit_summary_tracks_resolution():
+    novedad_at = datetime(2026, 7, 23, 9, 30, 0)
+    resolved_at = datetime(2026, 7, 23, 11, 45, 0)
+    entrega = SimpleNamespace(motivoNoEntregado="Dirección incorrecta")
+    auditoria = [
+        domicilios_router.DomicilioAuditItem(
+            accion="MARCAR_NO_ENTREGADO",
+            estadoAnterior="en_ruta",
+            estadoNuevo="no_entregado",
+            actorLogin="mateo",
+            detalle={"motivo": "Dirección incorrecta"},
+            createdAt=novedad_at,
+        ),
+        domicilios_router.DomicilioAuditItem(
+            accion="RESOLVER_NOVEDAD",
+            estadoAnterior="no_entregado",
+            estadoNuevo="entregado",
+            actorLogin="admin",
+            detalle={"solucion": "Pedido entregado después de resolver la novedad"},
+            createdAt=resolved_at,
+        ),
+    ]
+
+    summary = domicilios_router._novedad_audit_summary(auditoria, entrega)
+
+    assert summary["novedad"] == "Dirección incorrecta"
+    assert summary["novedadRegistradaEn"] == novedad_at
+    assert summary["novedadRegistradaPor"] == "mateo"
+    assert summary["resolucion"] == "Pedido entregado después de resolver la novedad"
+    assert summary["resueltaEn"] == resolved_at
+    assert summary["resueltaPor"] == "admin"
+
+
 def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
     entrega = SimpleNamespace(
         idEntrega=10,
@@ -225,6 +349,7 @@ def test_devolver_entrega_returns_assigned_delivery_to_available(monkeypatch):
     monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_ASIGNADO)
     monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
 
     response = domicilios_router.devolver_entrega(
         10,
@@ -250,6 +375,7 @@ def test_devolver_entrega_rejects_en_ruta(monkeypatch):
     monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
 
     with pytest.raises(HTTPException) as exc:
         domicilios_router.devolver_entrega(
@@ -260,3 +386,164 @@ def test_devolver_entrega_rejects_en_ruta(monkeypatch):
         )
 
     assert exc.value.status_code == 400
+
+
+def test_marcar_entregado_resolves_novedad_without_signature(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        sucursalID=1,
+        domiciliarioID=48,
+        estadoEntregaID=5,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones=None,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Empresa Admin", userID=100, login="admin")
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_NO_ENTREGADO)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
+
+    response = domicilios_router.marcar_entregado(
+        10,
+        usuarioCambio="admin",
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones="Nueva dirección",
+        firmaImagen=None,
+        evidenciaFoto=None,
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
+    assert entrega.estadoEntregaID == 4
+    assert entrega.firmaNombre is None
+    assert entrega.firmaDocumento is None
+    assert entrega.latitudEntrega is None
+    assert entrega.longitudEntrega is None
+    assert entrega.observaciones == "Nueva dirección"
+    assert db.committed is True
+
+
+def test_resolver_novedad_endpoint_marks_delivered(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        sucursalID=1,
+        domiciliarioID=48,
+        estadoEntregaID=5,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones=None,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Empresa Admin", userID=100, login="admin")
+    audit_calls = []
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_NO_ENTREGADO)
+    def fail_transition(*_args, **_kwargs):
+        raise AssertionError("resolver_novedad should bypass transition table")
+
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", fail_transition)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda **kwargs: audit_calls.append(kwargs))
+
+    response = domicilios_router.resolver_novedad(
+        10,
+        usuarioCambio="admin",
+        observaciones="Nueva dirección",
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        firmaImagen=None,
+        evidenciaFoto=None,
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
+    assert entrega.estadoEntregaID == 4
+    assert entrega.observaciones == "Nueva dirección"
+    assert audit_calls[0]["accion"] == "RESOLVER_NOVEDAD"
+    assert db.committed is True
+
+
+def test_marcar_entregado_allows_optional_signature(monkeypatch):
+    entrega = SimpleNamespace(
+        idEntrega=10,
+        empresaID=3,
+        pedidoID=20,
+        sucursalID=1,
+        domiciliarioID=48,
+        estadoEntregaID=3,
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=None,
+        longitudEntrega=None,
+        observaciones=None,
+        updatedAt=None,
+    )
+    db = SimpleNamespace(committed=False, commit=lambda: setattr(db, "committed", True))
+    auth = SimpleNamespace(empresaID=3, esGlobalJoin=False, rol="Domiciliario", userID=100, login="domi")
+
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda *_args, **_kwargs: entrega)
+    monkeypatch.setattr(domicilios_router, "_assert_entrega_actor_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "estado_norm", lambda *_args, **_kwargs: domicilios_router.ESTADO_EN_RUTA)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "assert_transition_allowed_for_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(domicilios_router.domicilio_service, "resolve_estado_entrega_id", lambda *_args, **_kwargs: 4)
+    monkeypatch.setattr(domicilios_router, "_audit_domicilio_action", lambda *_args, **_kwargs: None)
+
+    response = domicilios_router.marcar_entregado(
+        10,
+        usuarioCambio="domi",
+        firmaNombre=None,
+        firmaDocumento=None,
+        firmaImagenUrl=None,
+        evidenciaFotoUrl=None,
+        latitudEntrega=4.7109,
+        longitudEntrega=-74.0721,
+        observaciones=None,
+        firmaImagen=None,
+        evidenciaFoto=None,
+        db=db,
+        auth=auth,
+    )
+
+    assert response.estado == domicilios_router.ESTADO_ENTREGADO
+    assert entrega.firmaNombre is None
+    assert entrega.firmaDocumento is None
+    assert entrega.latitudEntrega == 4.7109
+    assert entrega.longitudEntrega == -74.0721
+    assert db.committed is True

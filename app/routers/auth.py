@@ -1,16 +1,19 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 import json
 import os
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from jose import JWTError, jwt
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.core.security import (
+    JWT_ALGORITHM,
     JWT_EXPIRE_MINUTES,
+    JWT_SECRET,
     _quote_ident,
     _resolve_table_spec,
     auth_schema_error,
@@ -18,6 +21,7 @@ from app.core.security import (
     get_current_auth_context,
     load_empresa_auth_meta,
     load_usuario_module_overrides,
+    oauth2_scheme,
     pwd_context,
     require_admin_role,
     is_empresa_admin_context,
@@ -26,14 +30,17 @@ from app.core.security import (
     normalize_role_name,
     is_empresa_activa,
     require_global_join_user,
+    resolve_empresa_module_candidates,
+    revoke_token,
     verify_password,
 )
 from app.database import get_db
-from app.middlewares.rate_limit import limiter
+from app.middlewares.rate_limit import limiter, rate_limit
 from app.models.rol import Rol
 from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
-from app.services.cache import get_cache, set_cache
+from app.services.cache import cache_ttl, get_cache, set_cache
+from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.schemas.auth import (
     AuthMeResponse,
     EmpresaCreateRequest,
@@ -75,19 +82,6 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
 
 
 STRUCTURAL_ROLES = {"super_admin", "join_superadmin", "empresa_admin", "admin"}
-DEFAULT_MODULES = {
-    "pipeline",
-    "pedidos",
-    "produccion",
-    "domicilios",
-    "inventario",
-    "contabilidad",
-    "trazabilidad",
-    "clientes",
-    "usuarios",
-    "catalogo",
-    "reportes",
-}
 
 DEFAULT_ROLE_MODULE_POLICY = {
     "Admin": {
@@ -99,7 +93,6 @@ DEFAULT_ROLE_MODULE_POLICY = {
         "usuarios": (1, 1, 1, 1),
         "inventario": (1, 1, 1, 1),
         "contabilidad": (1, 1, 1, 1),
-        "trazabilidad": (1, 1, 1, 1),
         "clientes": (1, 1, 1, 1),
     },
     "Florista": {
@@ -276,73 +269,31 @@ def _load_empresa_columns(db: Session) -> set[str]:
 
 
 def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaModuloItem]:
-    empresa_meta = load_empresa_auth_meta(db, empresa_id)
-    effective_plan_id = empresa_meta.get("planID")
-
-    module_candidates = set(DEFAULT_MODULES)
-    has_plan_rows = False
-
-    if effective_plan_id is not None:
-        try:
-            plan_rows = db.execute(
-                text("SELECT modulo, activo FROM petalops.plan_modulo WHERE plan_id = :plan_id"),
-                {"plan_id": int(effective_plan_id)},
-            ).all()
-            has_plan_rows = len(plan_rows) > 0
-            for modulo, _activo in plan_rows:
-                module_candidates.add(normalize_module_name(modulo))
-        except SQLAlchemyError:
-            plan_rows = []
-
-    try:
-        permiso_rows = db.execute(
+    _ensure_empresa_modulo_table(db)
+    candidates = resolve_empresa_module_candidates(db, empresa_id)
+    for modulo, activo in candidates.items():
+        normalized = normalize_module_name(modulo)
+        if not normalized:
+            continue
+        db.execute(
             text(
                 """
-                SELECT DISTINCT pm.modulo
-                FROM petalops.permiso_modulo pm
-                JOIN petalops.rol r ON r.id_rol = pm.rol_id
-                WHERE r.empresa_id = :empresa_id
+                INSERT INTO petalops.empresa_modulo (empresa_id, modulo, activo, updatedat)
+                VALUES (:empresa_id, :modulo, :activo, CURRENT_TIMESTAMP)
+                ON CONFLICT (empresa_id, modulo) DO NOTHING
                 """
             ),
-            {"empresa_id": int(empresa_id)},
-        ).all()
-        for (modulo,) in permiso_rows:
-            module_candidates.add(normalize_module_name(modulo))
-    except SQLAlchemyError:
-        permiso_rows = []
-
-    _ensure_empresa_modulo_table(db)
-    override_rows = db.execute(
-        text("SELECT modulo, activo FROM petalops.empresa_modulo WHERE empresa_id = :empresa_id"),
-        {"empresa_id": int(empresa_id)},
-    ).all()
-    overrides = {}
-    for modulo, activo in override_rows:
-        key = normalize_module_name(modulo)
-        if not key:
-            continue
-        overrides[key] = bool(activo)
-        module_candidates.add(key)
-
-    active_from_plan = set()
-    if effective_plan_id is not None:
-        try:
-            active_rows = db.execute(
-                text("SELECT modulo FROM petalops.plan_modulo WHERE plan_id = :plan_id AND activo = TRUE"),
-                {"plan_id": int(effective_plan_id)},
-            ).all()
-            active_from_plan = {normalize_module_name(modulo) for (modulo,) in active_rows}
-        except SQLAlchemyError:
-            active_rows = []
-
-    if not has_plan_rows:
-        active_from_plan = set(DEFAULT_MODULES)
-
-    items = []
-    for modulo in sorted({m for m in module_candidates if m}):
-        activo = overrides.get(modulo, modulo in active_from_plan)
-        items.append(EmpresaModuloItem(modulo=modulo, activo=bool(activo)))
-    return items
+            {
+                "empresa_id": int(empresa_id),
+                "modulo": normalized,
+                "activo": 1 if activo else 0,
+            },
+        )
+    candidates = resolve_empresa_module_candidates(db, empresa_id)
+    return [
+        EmpresaModuloItem(modulo=modulo, activo=bool(activo))
+        for modulo, activo in candidates.items()
+    ]
 
 
 def _normalize_module_list(values: list[str] | None) -> list[str]:
@@ -516,6 +467,36 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
 
     empleado_id: int | None = int(empleado["id_empleado"]) if empleado else None
     activo_flag = 1 if str(usuario.estado or "").strip().lower() == "activo" else 0
+
+    if empleado_id is None:
+        login_value = str(usuario.login or "").strip().lower()
+        email_value = str(usuario.email or "").strip().lower()
+        empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND (usuario_id IS NULL OR usuario_id = :usuario_id)
+                  AND (
+                    lower(COALESCE(usuario, '')) = :login
+                    OR (:email <> '' AND lower(COALESCE(email, '')) = :email)
+                  )
+                ORDER BY
+                  CASE WHEN lower(COALESCE(usuario, '')) = :login THEN 0 ELSE 1 END,
+                  id_empleado ASC
+                LIMIT 1
+                """
+            ),
+            {
+                "empresa_id": int(usuario.empresaID),
+                "usuario_id": int(usuario.idusuario),
+                "login": login_value,
+                "email": email_value,
+            },
+        ).mappings().first()
+        empleado_id = int(empleado["id_empleado"]) if empleado else None
+
     employee_email = _employee_sync_email_value(db, usuario, empleado_id)
 
     if empleado_id is None:
@@ -525,11 +506,11 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     """
                     INSERT INTO petalops.empleado (
                         empresa_id, sucursal_id, nombre_empleado, cargo, activo,
-                        created_at, updated_at, usuario, email, password_hash, usuario_id, is_superuser
+                        created_at, updated_at, usuario, email, usuario_id, is_superuser
                     )
                     VALUES (
                         :empresa_id, :sucursal_id, :nombre_empleado, :cargo, :activo,
-                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :password_hash, :usuario_id, 0
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :usuario_id, 0
                     )
                     RETURNING id_empleado
                     """
@@ -542,7 +523,6 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     "activo": activo_flag,
                     "usuario_login": str(usuario.login or "").strip(),
                     "email": employee_email,
-                    "password_hash": str(usuario.passwordHash or "").strip(),
                     "usuario_id": int(usuario.idusuario),
                 },
             ).scalar()
@@ -559,8 +539,7 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                     activo = :activo,
                     updated_at = CURRENT_TIMESTAMP,
                     usuario = :usuario_login,
-                    email = :email,
-                    password_hash = :password_hash
+                    email = :email
                 WHERE id_empleado = :empleado_id
                 """
             ),
@@ -573,7 +552,19 @@ def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, r
                 "activo": activo_flag,
                 "usuario_login": str(usuario.login or "").strip(),
                 "email": employee_email,
-                "password_hash": str(usuario.passwordHash or "").strip(),
+            },
+        )
+        db.execute(
+            text(
+                """
+                UPDATE petalops.empleado
+                SET usuario_id = :usuario_id
+                WHERE id_empleado = :empleado_id
+                """
+            ),
+            {
+                "empleado_id": int(empleado_id),
+                "usuario_id": int(usuario.idusuario),
             },
         )
 
@@ -691,7 +682,7 @@ def _ensure_default_operational_roles(db: Session, empresa_id: int):
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit("30/minute")
+@limiter.limit(rate_limit("login", "10/minute"))
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     try:
         usuario = (
@@ -761,6 +752,32 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL en login", exc_info=True)
         raise _err("AUTH_LOGIN_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    auth=Depends(get_current_auth_context),
+    db: Session = Depends(get_db),
+):
+    """Revoca el token actual (ver punto 12 de mejoras-arquitectura.md). No requiere
+    desactivar la cuenta: solo este token deja de servir, aunque no haya expirado."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return {"status": "ok"}
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if jti and exp:
+        revoke_token(
+            db,
+            jti=jti,
+            usuario_id=int(auth.userID),
+            expira_en=datetime.fromtimestamp(exp, tz=timezone.utc),
+        )
+    return {"status": "ok"}
+
 
 @router.get("/me", response_model=AuthMeResponse)
 def me(auth=Depends(get_current_auth_context)):
@@ -854,6 +871,29 @@ def crear_usuario(
         existing_login = db.query(Usuario).filter(Usuario.login == login).first()
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
+
+        # petalops.empleado tiene un indice unico (usuario, empresa_id) que tambien
+        # usan los floristas/domiciliarios externos (sin cuenta de login). Si ya
+        # existe un empleado con este mismo "usuario" en la empresa, el INSERT de
+        # _sync_employee_profile_for_operational_user mas abajo revienta con un
+        # IntegrityError generico — se valida antes para dar un mensaje claro.
+        existing_empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND lower(usuario) = :login
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": target_empresa_id, "login": login},
+        ).first()
+        if existing_empleado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
+            )
 
         rol = (
             db.query(Rol)
@@ -1051,6 +1091,25 @@ def actualizar_usuario(
         )
         if existing_login:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Login ya existe")
+
+        existing_empleado = db.execute(
+            text(
+                """
+                SELECT id_empleado
+                FROM petalops.empleado
+                WHERE empresa_id = :empresa_id
+                  AND lower(usuario) = :login
+                  AND (usuario_id IS NULL OR usuario_id != :usuario_id)
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": target_empresa_id, "login": login, "usuario_id": int(usuario.idusuario)},
+        ).first()
+        if existing_empleado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
+            )
 
         rol = (
             db.query(Rol)
@@ -1286,8 +1345,37 @@ def listar_roles(
     rows = db.query(Rol).filter(Rol.empresaID == empresa_id).order_by(Rol.nombreRol.asc()).all()
     if not is_super_admin_context(auth):
         rows = [row for row in rows if normalize_role_name(row.nombreRol) not in STRUCTURAL_ROLES]
+
+    rol_ids = [int(row.idRol) for row in rows]
+    modulos_por_rol: dict[int, list[str]] = {rol_id: [] for rol_id in rol_ids}
+    if rol_ids:
+        # El check "seleccionar todos los modulos" del front no puede prometer mas
+        # modulos que los que el rol realmente tiene en permiso_modulo — eso es lo
+        # que de verdad usa el login para armar modulosActivosPlan (ver
+        # _build_auth_context). Sin esto el front solo puede adivinar el techo real.
+        permisos_rows = db.execute(
+            text(
+                """
+                SELECT rol_id, modulo
+                FROM petalops.permiso_modulo
+                WHERE rol_id = ANY(:rol_ids)
+                  AND puede_ver = TRUE
+                """
+            ),
+            {"rol_ids": rol_ids},
+        ).all()
+        for rol_id, modulo in permisos_rows:
+            modulos_por_rol.setdefault(int(rol_id), []).append(normalize_module_name(modulo))
+
     return RoleListResponse(
-        items=[RoleOption(rolID=int(row.idRol), nombreRol=str(row.nombreRol or "")) for row in rows]
+        items=[
+            RoleOption(
+                rolID=int(row.idRol),
+                nombreRol=str(row.nombreRol or ""),
+                modulosPermitidos=sorted(modulos_por_rol.get(int(row.idRol), [])),
+            )
+            for row in rows
+        ]
     )
 
 
@@ -1328,7 +1416,7 @@ def listar_empresas(
         rows = db.execute(
             text(
                 """
-                SELECT id_empresa, COALESCE(nombre_comercial, nombre_empresa) AS nombre
+                SELECT id_empresa, COALESCE(nombre_comercial, nombre_empresa) AS nombre, slug
                 FROM petalops.empresa
                 ORDER BY id_empresa ASC
                 """
@@ -1339,7 +1427,7 @@ def listar_empresas(
         rows = db.execute(
             text(
                 """
-                SELECT id_empresa, CONCAT('Empresa ', id_empresa) AS nombre
+                SELECT id_empresa, CONCAT('Empresa ', id_empresa) AS nombre, NULL AS slug
                 FROM petalops.empresa
                 ORDER BY id_empresa ASC
                 """
@@ -1348,7 +1436,11 @@ def listar_empresas(
 
     return EmpresaListResponse(
         items=[
-            EmpresaOption(empresaID=int(row[0]), nombre=str(row[1] or f"Empresa {int(row[0])}"))
+            EmpresaOption(
+                empresaID=int(row[0]),
+                nombre=str(row[1] or f"Empresa {int(row[0])}"),
+                empresaSlug=(str(row[2]).strip() if row[2] is not None else None),
+            )
             for row in rows
         ]
     )
@@ -1365,6 +1457,7 @@ def listar_empresas_modulos(
                 """
                 SELECT id_empresa,
                        COALESCE(nombre_comercial, nombre_empresa, CONCAT('Empresa ', id_empresa)) AS nombre,
+                       slug,
                        plan_id,
                        estado
                 FROM petalops.empresa
@@ -1379,6 +1472,7 @@ def listar_empresas_modulos(
                 """
                 SELECT id_empresa,
                        CONCAT('Empresa ', id_empresa) AS nombre,
+                       NULL AS slug,
                        NULL AS plan_id,
                        'Activo' AS "estado"
                 FROM petalops.empresa
@@ -1399,11 +1493,13 @@ def listar_empresas_modulos(
             EmpresaModuloResumenItem(
                 empresaID=empresa_id,
                 nombre=str(row[1] or f"Empresa {empresa_id}"),
-                planID=(int(row[2]) if row[2] is not None else None),
-                estado=(str(row[3]) if row[3] is not None else None),
+                empresaSlug=(str(row[2]).strip() if row[2] is not None else None),
+                planID=(int(row[3]) if row[3] is not None else None),
+                estado=(str(row[4]) if row[4] is not None else None),
                 items=modulos,
             )
         )
+    db.commit()
     return EmpresaModuloResumenResponse(items=items)
 
 
@@ -1426,11 +1522,44 @@ def crear_empresa(
         if plan_id < 1:
             raise HTTPException(status_code=400, detail="planID debe ser mayor o igual a 1")
 
+        requested_slug = str(payload.slug or "").strip().lower()
+        slug = re.sub(r"[^a-z0-9-]+", "-", requested_slug or nombre.lower()).strip("-")[:80]
+        if len(slug) < 3:
+            raise HTTPException(status_code=400, detail="slug debe tener al menos 3 caracteres validos")
+
+        admin_login = str(payload.adminLogin or "").strip().lower()
+        create_admin = bool(admin_login)
+        if create_admin:
+            admin_login = re.sub(r"[^a-z0-9._-]+", "", admin_login)[:80]
+            if len(admin_login) < 3:
+                raise HTTPException(status_code=400, detail="adminLogin debe tener al menos 3 caracteres validos")
+            if not payload.adminPassword:
+                raise HTTPException(status_code=400, detail="adminPassword es obligatorio para crear el admin inicial")
+            existing_login = db.query(Usuario).filter(func.lower(Usuario.login) == admin_login).first()
+            if existing_login:
+                raise HTTPException(status_code=409, detail="Ya existe un usuario con ese login")
+
         columns = _load_empresa_columns(db)
         if "id_empresa" not in columns:
             raise HTTPException(status_code=500, detail="Tabla empresa sin columna id_empresa")
         if "nombre_empresa" not in columns or "nit" not in columns:
             raise HTTPException(status_code=500, detail="Tabla empresa sin columnas obligatorias nombre_empresa/nit")
+
+        existing_empresa = db.execute(
+            text(
+                """
+                SELECT id_empresa
+                FROM petalops.empresa
+                WHERE lower(COALESCE(slug, '')) = :slug
+                   OR lower(COALESCE(nombre_empresa, '')) = lower(:nombre)
+                   OR lower(COALESCE(nombre_comercial, '')) = lower(:nombre)
+                LIMIT 1
+                """
+            ),
+            {"slug": slug, "nombre": nombre},
+        ).first()
+        if existing_empresa:
+            raise HTTPException(status_code=409, detail="Ya existe una empresa con ese nombre o slug")
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
@@ -1440,9 +1569,9 @@ def crear_empresa(
             text(
                 """
                 INSERT INTO petalops.empresa
-                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, created_at, updated_at)
+                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, slug, created_at, updated_at)
                 VALUES
-                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, :slug, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """
             ),
             {
@@ -1452,8 +1581,138 @@ def crear_empresa(
                 "estado": 1 if estado == "Activo" else 0,
                 "nombre_comercial": nombre,
                 "plan_id": plan_id,
+                "slug": slug,
             },
         )
+
+        next_sucursal_id = int(db.execute(text("SELECT COALESCE(MAX(id_sucursal), 0) + 1 FROM petalops.sucursal")).scalar_one())
+        sucursal_nombre = str(payload.sucursalNombre or f"Principal {nombre}").strip()[:120]
+        prefijo = re.sub(r"[^A-Z0-9]+", "", slug.upper())[:3] or "TEN"
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.sucursal
+                (id_sucursal, empresa_id, nombre_sucursal, direccion, telefono, estado, created_at, updated_at, prefijo_pedido)
+                VALUES
+                (:id_sucursal, :empresa_id, :nombre_sucursal, NULL, NULL, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :prefijo)
+                """
+            ),
+            {
+                "id_sucursal": next_sucursal_id,
+                "empresa_id": next_empresa_id,
+                "nombre_sucursal": sucursal_nombre,
+                "prefijo": prefijo,
+            },
+        )
+
+        _ensure_default_operational_roles(db, next_empresa_id)
+        admin_role = db.execute(
+            text(
+                """
+                SELECT id_rol
+                FROM petalops.rol
+                WHERE empresa_id = :empresa_id AND lower(nombre_rol) = 'admin'
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        ).first()
+        admin_role_id = int(admin_role[0]) if admin_role else None
+
+        _ensure_empresa_modulo_table(db)
+        default_modules = sorted({module for policy in DEFAULT_ROLE_MODULE_POLICY.values() for module in policy.keys()} | {"clientes", "reportes"})
+        for modulo in default_modules:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.empresa_modulo (empresa_id, modulo, activo, updatedat)
+                    VALUES (:empresa_id, :modulo, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT (empresa_id, modulo) DO UPDATE SET
+                      activo = EXCLUDED.activo,
+                      updatedat = EXCLUDED.updatedat
+                    """
+                ),
+                {"empresa_id": next_empresa_id, "modulo": normalize_module_name(modulo)},
+            )
+
+        if admin_role_id is not None:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.permiso_modulo
+                    (rol_id, modulo, puede_ver, puede_crear, puede_editar, puede_eliminar, empresa_id)
+                    VALUES (:rol_id, 'reportes', TRUE, TRUE, TRUE, TRUE, :empresa_id)
+                    ON CONFLICT (rol_id, modulo) DO UPDATE SET
+                      puede_ver = EXCLUDED.puede_ver,
+                      puede_crear = EXCLUDED.puede_crear,
+                      puede_editar = EXCLUDED.puede_editar,
+                      puede_eliminar = EXCLUDED.puede_eliminar,
+                      empresa_id = EXCLUDED.empresa_id
+                    """
+                ),
+                {"rol_id": admin_role_id, "empresa_id": next_empresa_id},
+            )
+
+        # Sin esto el formulario de pedidos arranca sin opciones base.
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.metodo_pago_catalogo (
+                    empresa_id, codigo, nombre, orden, activo, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, 'efectivo', 'Efectivo', 1, TRUE, NOW(), NOW()
+                )
+                ON CONFLICT DO NOTHING
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        )
+        sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_metodos_pago")
+
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.canal_venta (
+                    empresa_id, codigo, nombre, orden, activo, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, 'presencial', 'Presencial', 1, TRUE, NOW(), NOW()
+                )
+                ON CONFLICT DO NOTHING
+                """
+            ),
+            {"empresa_id": next_empresa_id},
+        )
+        sync_empresa_menu_opciones(db, empresa_id=next_empresa_id, campo="pedido_canal_venta")
+
+        admin_user_id = None
+        if create_admin and admin_role_id is not None:
+            email = _user_email_or_default(payload.adminEmail, admin_login)
+            admin_user_id = int(
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO petalops.usuario (
+                            empresa_id, sucursal_id, nombre, login, email, passwordhash,
+                            rolid, estado, created_at, updated_at, es_superadmin
+                        ) VALUES (
+                            :empresa_id, :sucursal_id, :nombre, :login, :email, :password_hash,
+                            :rol_id, 'Activo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, FALSE
+                        )
+                        RETURNING id_usuario
+                        """
+                    ),
+                    {
+                        "empresa_id": next_empresa_id,
+                        "sucursal_id": next_sucursal_id,
+                        "nombre": nombre,
+                        "login": admin_login,
+                        "email": email,
+                        "password_hash": pwd_context.hash(str(payload.adminPassword)),
+                        "rol_id": admin_role_id,
+                    },
+                ).scalar_one()
+            )
+
         db.commit()
 
         return EmpresaCreateResponse(
@@ -1462,12 +1721,13 @@ def crear_empresa(
             nombre=nombre,
             planID=plan_id,
             estado=estado,
+            sucursalID=next_sucursal_id,
+            adminUserID=admin_user_id,
         )
     except SQLAlchemyError as exc:
         db.rollback()
         auth_logger.error("Error SQL creando empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
-
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
 def listar_modulos_empresa(
@@ -1489,8 +1749,9 @@ def listar_modulos_empresa(
 
         _ensure_empresa_modulo_table(db)
         items = _build_empresa_module_items(db, normalized_empresa_id)
+        db.commit()
         response = EmpresaModuloListResponse(empresaID=normalized_empresa_id, items=items)
-        set_cache(cache_key, response.model_dump(), ttl=300)
+        set_cache(cache_key, response.model_dump(), ttl=cache_ttl("empresa_config", 300))
         return response
     except SQLAlchemyError as exc:
         auth_logger.error("Error SQL listando modulos de empresa", exc_info=True)
@@ -1523,7 +1784,7 @@ def actualizar_modulos_empresa(
                 {
                     "empresa_id": empresa_id,
                     "modulo": modulo,
-                    "activo": bool(activo),
+                    "activo": 1 if activo else 0,
                 },
             )
 
@@ -1534,7 +1795,7 @@ def actualizar_modulos_empresa(
         set_cache(
             f"empresa_config:{empresa_id}",
             EmpresaModuloListResponse(empresaID=empresa_id, items=updated_items).model_dump(),
-            ttl=300,
+            ttl=cache_ttl("empresa_config", 300),
         )
 
         return EmpresaModuloUpdateResponse(
@@ -1546,5 +1807,3 @@ def actualizar_modulos_empresa(
         db.rollback()
         auth_logger.error("Error SQL actualizando modulos de empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_MODULOS_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
-
-

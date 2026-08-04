@@ -14,13 +14,54 @@ ESTADO_CANCELADO = "Cancelado"
 class DomiciliarioItem(BaseModel):
     idDomiciliario: int
     usuarioID: int | None = None
+    login: str | None = None
     nombre: str
     telefono: str | None = None
+    tipo: str | None = None
+    estado: str | None = None
+    vehiculo: str | None = None
+    placa: str | None = None
+    detalleVehiculo: str | None = None
+    pedidosActivos: int = 0
     activo: bool
 
 
 class DomiciliarioListResponse(BaseModel):
     items: list[DomiciliarioItem]
+
+
+class DomiciliarioUpdateRequest(BaseModel):
+    nombre: str | None = Field(default=None, min_length=3)
+    sucursalID: int | None = None
+    telefono: str | None = Field(default=None, max_length=40)
+    tipo: str | None = Field(default=None, max_length=80)
+    estado: str | None = Field(default=None, max_length=20)
+    vehiculo: str | None = Field(default=None, max_length=80)
+    placa: str | None = Field(default=None, max_length=20)
+    detalleVehiculo: str | None = Field(default=None, max_length=160)
+    activo: bool | None = None
+
+
+class DomiciliarioCreateRequest(BaseModel):
+    nombre: str = Field(min_length=3)
+    sucursalID: int | None = None
+    telefono: str | None = Field(default=None, max_length=40)
+    tipo: str | None = Field(default="Interno", max_length=80)
+    estado: str | None = Field(default="Activo", max_length=20)
+    vehiculo: str | None = Field(default=None, max_length=80)
+    placa: str | None = Field(default=None, max_length=20)
+    detalleVehiculo: str | None = Field(default=None, max_length=160)
+    activo: bool = True
+
+
+class DomiciliarioCreateResponse(DomiciliarioItem):
+    passwordTemporal: str | None = None
+
+
+class DomiciliarioDeleteResponse(BaseModel):
+    status: str
+    idDomiciliario: int
+    estado: str
 
 
 class DomicilioAdminItem(BaseModel):
@@ -52,6 +93,8 @@ class DomicilioAdminItem(BaseModel):
     longitudDestino: float | None = None
     latitudEntrega: float | None = None
     longitudEntrega: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class DomicilioAdminListResponse(BaseModel):
@@ -92,6 +135,8 @@ class DomicilioCourierCard(BaseModel):
     latitudEntrega: float | None = None
     longitudEntrega: float | None = None
     distanciaKm: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class DomicilioCourierListResponse(BaseModel):
@@ -104,6 +149,102 @@ class DomicilioContadoresResponse(BaseModel):
     enCamino: int
     entregados: int
     disponibles: int
+
+
+class DomicilioMetricasResumen(BaseModel):
+    total: int
+    pendientes: int
+    asignados: int
+    enRuta: int
+    entregados: int
+    noEntregados: int
+    cancelados: int
+    novedades: int
+    tasaEntrega: float
+    tiempoPromedioEntregaMin: float | None = None
+    costoDomicilioTotal: float
+    costoDomicilioPromedio: float
+
+
+class DomicilioMetricasItem(BaseModel):
+    grupo: str
+    periodo: str | None = None
+    domiciliarioID: int | None = None
+    domiciliario: str | None = None
+    domiciliarioImagenUrl: str | None = None
+    fotoUrl: str | None = None
+    imageUrl: str | None = None
+    estadoEntrega: str | None = None
+    estadoPedido: str | None = None
+    novedad: str | None = None
+    barrioID: int | None = None
+    barrio: str | None = None
+    zonaID: int | None = None
+    zona: str | None = None
+    total: int
+    pendientes: int
+    asignados: int
+    enRuta: int
+    entregados: int
+    noEntregados: int
+    cancelados: int
+    novedades: int
+    tasaEntrega: float
+    tiempoPromedioEntregaMin: float | None = None
+    costoDomicilioTotal: float
+    costoDomicilioPromedio: float
+
+
+class DomicilioAuditItem(BaseModel):
+    accion: str
+    estadoAnterior: str | None = None
+    estadoNuevo: str | None = None
+    actorUserID: int | None = None
+    actorLogin: str | None = None
+    domiciliarioID: int | None = None
+    detalle: dict | None = None
+    createdAt: datetime
+
+
+class DomicilioMetricasNovedadDetalle(BaseModel):
+    idEntrega: int
+    pedidoID: int
+    numeroPedido: str
+    codigoPedido: str | None = None
+    cliente: str | None = None
+    destinatario: str | None = None
+    telefonoDestino: str | None = None
+    direccion: str | None = None
+    barrioID: int | None = None
+    barrio: str | None = None
+    zonaID: int | None = None
+    zona: str | None = None
+    domiciliarioID: int | None = None
+    domiciliario: str | None = None
+    estadoEntrega: str | None = None
+    estadoPedido: str | None = None
+    novedad: str
+    intentoNumero: int
+    fechaEntregaProgramada: datetime | None = None
+    fechaEntrega: datetime | None = None
+    reprogramadaPara: datetime | None = None
+
+
+class DomicilioMetricasResponse(BaseModel):
+    empresaID: int
+    sucursalID: int | None = None
+    fechaDesde: date
+    fechaHasta: date
+    agruparPor: str
+    resumen: DomicilioMetricasResumen
+    items: list[DomicilioMetricasItem]
+    porDomiciliario: list[DomicilioMetricasItem]
+    porEstadoEntrega: list[DomicilioMetricasItem]
+    porEstadoPedido: list[DomicilioMetricasItem]
+    porBarrio: list[DomicilioMetricasItem]
+    porZona: list[DomicilioMetricasItem]
+    novedades: list[DomicilioMetricasItem]
+    detalleNovedades: list[DomicilioMetricasNovedadDetalle]
 
 
 class PedidoDisponibleItem(BaseModel):
@@ -140,6 +281,8 @@ class PedidoDisponibleItem(BaseModel):
     prioridad: str | None = None
     latitudDestino: float | None = None
     longitudDestino: float | None = None
+    estadoProduccion: str | None = None
+    estado_produccion: str | None = None
 
 
 class PedidoAsignadoResponse(PedidoDisponibleItem):
@@ -204,5 +347,13 @@ class DomicilioDetailResponse(BaseModel):
     idEntrega: int
     numeroPedido: str
     cliente: str
+    estado: str | None = None
     items: list[OrderItemDetail]
     customerMessage: str | None = None  # Solo para usuarios autorizados
+    novedad: str | None = None
+    novedadRegistradaEn: datetime | None = None
+    novedadRegistradaPor: str | None = None
+    resolucion: str | None = None
+    resueltaEn: datetime | None = None
+    resueltaPor: str | None = None
+    auditoria: list[DomicilioAuditItem] = Field(default_factory=list)

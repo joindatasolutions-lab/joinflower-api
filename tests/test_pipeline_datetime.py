@@ -10,3 +10,39 @@ def test_minutes_left_accepts_timezone_aware_datetime():
     minutes = pipeline._minutes_left(target)
 
     assert isinstance(minutes, int)
+
+
+def test_rango_hora_deadline_uses_end_of_named_window():
+    assert pipeline._parse_rango_hora_deadline_time("Manana (8am - 12pm)").hour == 12
+
+
+def test_rango_hora_deadline_accepts_text_separator():
+    deadline = pipeline._parse_rango_hora_deadline_time("Manana (8am a 12pm)")
+
+    assert deadline.hour == 12
+    assert deadline.minute == 0
+
+
+def test_late_deadline_for_midnight_date_uses_delivery_window_end():
+    deadline = pipeline._late_deadline(datetime(2026, 7, 22, 0, 0, 0), "Manana (8am - 12pm)")
+
+    assert deadline == datetime(2026, 7, 22, 12, 0, 0)
+
+
+
+def test_resolve_stage_uses_delivery_catalog_key_before_numeric_id():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=4, entrega_estado=99, entrega_estado_key="entregado")
+
+    assert stage == "entregado"
+
+
+def test_resolve_stage_uses_production_catalog_key_before_numeric_id():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=99, entrega_estado=1, prod_estado_key="terminado", entrega_estado_key="pendiente")
+
+    assert stage == "listo"
+
+
+def test_resolve_stage_treats_inactive_pedido_operational_states_as_fallback_only():
+    stage = pipeline._resolve_stage("APROBADO", prod_estado=None, entrega_estado=None)
+
+    assert stage == "aprobado"

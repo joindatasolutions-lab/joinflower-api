@@ -7,16 +7,13 @@ class Categoria(Base):
     __tablename__ = "categoria"
     __table_args__ = {"schema": "petalops"}
 
-    idCategoria = Column("idcategoria", BigInteger, primary_key=True, index=True)
-    empresaID = Column("empresaid", BigInteger, ForeignKey("petalops.Empresa.idEmpresa"), nullable=False)
+    idCategoria = Column("id_categoria", BigInteger, primary_key=True, index=True)
+    empresaID = Column("empresa_id", BigInteger, ForeignKey("petalops.empresa.id_empresa"), nullable=False)
 
-    nombreCategoria = Column("nombrecategoria", String(100), nullable=False)
-    descripcion = Column("descripcion", String(250))
-    orden = Column("orden", BigInteger)
+    nombreCategoria = Column("nombre", String(100), nullable=False)
     activo = Column("activo", Boolean)
 
-    createdAt = Column("createdat", DateTime)
-    updatedAt = Column("updatedat", DateTime)
+    createdAt = Column("created_at", DateTime)
 
     # Relación inversa
     productos = relationship("Producto", back_populates="categoria")

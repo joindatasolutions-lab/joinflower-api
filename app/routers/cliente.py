@@ -80,6 +80,8 @@ def list_clientes(
     empresa_id: int | None = Query(default=None, alias="empresaID"),
     q: str = Query(default=""),
     solo_activos: bool = Query(default=False, alias="soloActivos"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=3000, ge=1, le=5000, alias="pageSize"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -103,15 +105,20 @@ def list_clientes(
             )
         )
 
+    total = query.count()
     clientes = (
         query
         .order_by(Cliente.updatedAt.desc().nullslast(), Cliente.idCliente.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
         .all()
     )
 
     return {
         "items": [_cliente_to_dict(cliente) for cliente in clientes],
-        "total": len(clientes),
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
     }
 
 

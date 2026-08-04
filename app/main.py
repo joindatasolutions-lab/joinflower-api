@@ -18,6 +18,7 @@ from app.routers import auth
 from app.routers import barrios
 from app.routers import catalogo
 from app.routers import cliente
+from app.routers import configuracion
 from app.routers import contabilidad
 from app.routers import domicilios
 from app.routers import entregas
@@ -90,12 +91,19 @@ app.add_middleware(
 app.include_router(catalogo.router)
 app.include_router(pedido.router)
 app.include_router(cliente.router)
+app.include_router(configuracion.router)
 app.include_router(contabilidad.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
 app.include_router(auth.router)
 app.include_router(domicilios.router)
-app.include_router(domicilios.router, prefix="/api")
+# NOTA: se elimino el registro duplicado "/api/domicilios" (2026-08-03).
+# ATENCION antes de desplegar esta rama a produccion: la app movil de
+# domiciliarios (DomiApp) llamaba a /api/domicilios/* con trafico activo
+# confirmado en logs de Cloud Run. Si esa app no fue actualizada para usar
+# /domicilios (sin prefijo) antes de este deploy, los repartidores van a
+# recibir 404 en todas sus llamadas. Ver
+# pendientes/Mejoras/domicilios-router-duplicado-punto17.md
 app.include_router(inventario.router)
 app.include_router(entregas.router)
 app.include_router(pipeline.router)

@@ -1,4 +1,5 @@
 ﻿import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
@@ -98,6 +99,98 @@ def normalize_module_name(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+DEFAULT_MODULES = {
+    "pipeline",
+    "pedidos",
+    "produccion",
+    "domicilios",
+    "inventario",
+    "contabilidad",
+    "clientes",
+    "usuarios",
+    "catalogo",
+    "reportes",
+}
+
+
+def resolve_empresa_module_candidates(db: Session, empresa_id: int) -> dict[str, bool]:
+    """Todos los modulos que la empresa podria tener activos, con su estado
+    real (empresa_id, modulo) -> activo. Es el techo real de la empresa:
+    DEFAULT_MODULES + lo que traiga su plan + lo que cualquiera de sus roles
+    tenga en permiso_modulo (no solo un rol puntual), filtrado por los
+    overrides de petalops.empresa_modulo (o el plan si no hay override).
+
+    Usada tanto para listar los modulos configurables de una empresa (ver
+    _build_empresa_module_items en app/routers/auth.py) como para calcular
+    modulosActivosPlan al iniciar sesion (_build_auth_context abajo) — antes
+    este segundo caso solo miraba el rol puntual del usuario, asi que un
+    admin no podia darle a un usuario mas modulos de los que su rol ya
+    traia de fabrica, aunque la empresa si los tuviera activos.
+    """
+    empresa_meta = load_empresa_auth_meta(db, empresa_id)
+    effective_plan_id = empresa_meta.get("planID")
+
+    module_candidates = set(DEFAULT_MODULES)
+    has_plan_rows = False
+
+    if effective_plan_id is not None:
+        try:
+            plan_rows = db.execute(
+                text("SELECT modulo, activo FROM petalops.plan_modulo WHERE plan_id = :plan_id"),
+                {"plan_id": int(effective_plan_id)},
+            ).all()
+            has_plan_rows = len(plan_rows) > 0
+            for modulo, _activo in plan_rows:
+                module_candidates.add(normalize_module_name(modulo))
+        except SQLAlchemyError:
+            plan_rows = []
+
+    try:
+        permiso_rows = db.execute(
+            text(
+                """
+                SELECT DISTINCT pm.modulo
+                FROM petalops.permiso_modulo pm
+                JOIN petalops.rol r ON r.id_rol = pm.rol_id
+                WHERE r.empresa_id = :empresa_id
+                """
+            ),
+            {"empresa_id": int(empresa_id)},
+        ).all()
+        for (modulo,) in permiso_rows:
+            module_candidates.add(normalize_module_name(modulo))
+    except SQLAlchemyError:
+        permiso_rows = []
+
+    overrides_raw = load_empresa_module_overrides(db, empresa_id) or {}
+    overrides = {}
+    for modulo, activo in overrides_raw.items():
+        key = normalize_module_name(modulo)
+        if not key:
+            continue
+        overrides[key] = bool(activo)
+        module_candidates.add(key)
+
+    active_from_plan = set()
+    if effective_plan_id is not None:
+        try:
+            active_rows = db.execute(
+                text("SELECT modulo FROM petalops.plan_modulo WHERE plan_id = :plan_id AND activo = TRUE"),
+                {"plan_id": int(effective_plan_id)},
+            ).all()
+            active_from_plan = {normalize_module_name(modulo) for (modulo,) in active_rows}
+        except SQLAlchemyError:
+            active_rows = []
+
+    if not has_plan_rows:
+        active_from_plan = set(DEFAULT_MODULES)
+
+    return {
+        modulo: overrides.get(modulo, modulo in active_from_plan)
+        for modulo in sorted({m for m in module_candidates if m})
+    }
+
+
 def normalize_role_name(value: str | None) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
 
@@ -165,14 +258,10 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     if not plain_password or not password_hash:
         return False
 
-    if password_hash.startswith("$2"):
-        try:
-            return pwd_context.verify(plain_password, password_hash)
-        except (exc.UnknownHashError, ValueError):
-            return False
-
-    # Transitional fallback for legacy records with plain passwords.
-    return plain_password == password_hash
+    try:
+        return pwd_context.verify(plain_password, password_hash)
+    except (exc.UnknownHashError, ValueError):
+        return False
 
 
 def is_empresa_activa(estado_value) -> bool:
@@ -216,12 +305,56 @@ def create_access_token(
         "sucursalID": (int(sucursal_id) if sucursal_id is not None else None),
         "rolID": int(rol_id),
         "planID": (int(plan_id) if plan_id is not None else None),
+        "jti": secrets.token_hex(16),
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
     if extra_claims:
         payload.update(extra_claims)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _token_revocado_table_exists(db: Session) -> bool:
+    """Defensivo: permite desplegar este codigo antes de correr la migracion
+    sql/alter_token_revocado.sql sin romper el login (ver mostrar_codigo_catalogo
+    en pedido.py para el mismo patron)."""
+    row = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'petalops' AND table_name = 'token_revocado'
+            LIMIT 1
+            """
+        )
+    ).first()
+    return bool(row)
+
+
+def is_token_revoked(db: Session, jti: str | None) -> bool:
+    if not jti or not _token_revocado_table_exists(db):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM petalops.token_revocado WHERE jti = :jti LIMIT 1"),
+        {"jti": jti},
+    ).first()
+    return bool(row)
+
+
+def revoke_token(db: Session, *, jti: str, usuario_id: int, expira_en: datetime) -> None:
+    """Revoca un JWT especifico (ej. logout explicito) sin desactivar la cuenta."""
+    if not jti or not _token_revocado_table_exists(db):
+        return
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.token_revocado (jti, usuario_id, expira_en)
+            VALUES (:jti, :usuario_id, :expira_en)
+            ON CONFLICT (jti) DO NOTHING
+            """
+        ),
+        {"jti": jti, "usuario_id": int(usuario_id), "expira_en": expira_en},
+    )
+    db.commit()
 
 
 def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
@@ -238,7 +371,7 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         )
     ).first()
     if not table_row:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
 
     table_name = str(table_row[0])
 
@@ -264,19 +397,34 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         else ("planid" if "planid" in cols else ("planID" if "planID" in cols else None))
     )
     estado_col = "estado" if "estado" in cols else None
+    slug_col = "slug" if "slug" in cols else None
+    nombre_comercial_col = "nombre_comercial" if "nombre_comercial" in cols else None
+    nombre_empresa_col = (
+        "nombre_empresa" if "nombre_empresa" in cols
+        else ("nombreempresa" if "nombreempresa" in cols else ("nombreEmpresa" if "nombreEmpresa" in cols else None))
+    )
 
     if id_col is None:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
 
     q_table = f'"{table_name}"'
     q_id_col = f'"{id_col}"'
     plan_select = f'"{plan_col}" AS plan_id' if plan_col else "NULL AS plan_id"
     estado_select = f'"{estado_col}" AS estado' if estado_col else "NULL AS estado"
+    slug_select = f'"{slug_col}" AS slug' if slug_col else "NULL AS slug"
+    if nombre_comercial_col and nombre_empresa_col:
+        nombre_select = f'COALESCE("{nombre_comercial_col}", "{nombre_empresa_col}") AS nombre'
+    elif nombre_comercial_col:
+        nombre_select = f'"{nombre_comercial_col}" AS nombre'
+    elif nombre_empresa_col:
+        nombre_select = f'"{nombre_empresa_col}" AS nombre'
+    else:
+        nombre_select = "NULL AS nombre"
 
     try:
         row = db.execute(
             text(
-                f"SELECT {q_id_col} AS empresa_id, {plan_select}, {estado_select} "
+                f"SELECT {q_id_col} AS empresa_id, {plan_select}, {estado_select}, {nombre_select}, {slug_select} "
                 f"FROM petalops.{q_table} WHERE {q_id_col} = :empresa_id LIMIT 1"
             ),
             {"empresa_id": int(empresa_id)},
@@ -287,11 +435,13 @@ def load_empresa_auth_meta(db: Session, empresa_id: int) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if not row:
-        return {"exists": False, "planID": None, "estado": None}
+        return {"exists": False, "planID": None, "estado": None, "nombre": None, "slug": None}
     return {
         "exists": True,
         "planID": (int(row.get("plan_id")) if row.get("plan_id") is not None else None),
         "estado": row.get("estado"),
+        "nombre": (str(row.get("nombre")).strip() if row.get("nombre") is not None else None),
+        "slug": (str(row.get("slug")).strip() if row.get("slug") is not None else None),
     }
 
 def load_empresa_module_overrides(db: Session, empresa_id: int) -> dict[str, bool] | None:
@@ -381,6 +531,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     rol_id = _safe_int(payload.get("rolID"), 0)
     sucursal_id = payload.get("sucursalID")
     plan_id = payload.get("planID")
+    empresa_nombre = None
+    empresa_slug = None
 
     usuario = (
         db.query(Usuario)
@@ -414,7 +566,6 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             "usuarios",
             "inventario",
             "contabilidad",
-            "trazabilidad",
             "reportes",
             "clientes",
         }
@@ -427,6 +578,10 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             }
             for modulo in modulos_plan
         }
+        if empresa_id:
+            empresa_meta = load_empresa_auth_meta(db, empresa_id)
+            empresa_nombre = empresa_meta.get("nombre")
+            empresa_slug = empresa_meta.get("slug")
     elif is_superadmin_user and impersonated:
         empresa_id = int(impersonated_empresa_id)
         rol_id = _safe_int(payload.get("impersonatedRolID"), 0)
@@ -434,6 +589,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         empresa_meta = load_empresa_auth_meta(db, empresa_id)
         if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+        empresa_nombre = empresa_meta.get("nombre")
+        empresa_slug = empresa_meta.get("slug")
 
         effective_plan_id = (
             empresa_meta["planID"]
@@ -481,7 +638,6 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
                 "usuarios",
                 "inventario",
                 "contabilidad",
-                "trazabilidad",
                 "reportes",
                 "clientes",
             }
@@ -512,6 +668,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         empresa_meta = load_empresa_auth_meta(db, empresa_id)
         if not empresa_meta["exists"] or not is_empresa_activa(empresa_meta.get("estado")):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa no activa")
+        empresa_nombre = empresa_meta.get("nombre")
+        empresa_slug = empresa_meta.get("slug")
 
         rol = (
             db.query(Rol)
@@ -566,46 +724,18 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             if empresa_meta["planID"] is not None
             else _safe_int(plan_id)
         )
-        plan_modules_rows = []
-        if effective_plan_id is not None:
-            plan_table, plan_columns = _resolve_table_spec(
-                db,
-                ["plan_modulo", "planmodulo", "PlanModulo"],
-                {
-                    "plan_id": ["plan_id", "planid", "planID"],
-                    "modulo": ["modulo"],
-                    "activo": ["activo"],
-                },
-            )
-            if plan_table and plan_columns:
-                plan_modules_rows = db.execute(
-                    text(
-                        f"""
-                        SELECT {_quote_ident(plan_columns["modulo"])} AS modulo,
-                               {_quote_ident(plan_columns["activo"])} AS activo
-                        FROM petalops.{_quote_ident(plan_table)}
-                        WHERE {_quote_ident(plan_columns["plan_id"])} = :plan_id
-                        """
-                    ),
-                    {"plan_id": int(effective_plan_id)},
-                ).mappings().all()
 
-        if plan_modules_rows:
-            modulos_plan = {
-                normalize_module_name(row.get("modulo"))
-                for row in plan_modules_rows
-                if bool(row.get("activo"))
-            }
-        else:
-            modulos_plan = set(permisos.keys())
-
-        overrides = load_empresa_module_overrides(db, empresa_id)
-        if overrides is not None:
-            for modulo, activo in overrides.items():
-                if bool(activo):
-                    modulos_plan.add(modulo)
-                else:
-                    modulos_plan.discard(modulo)
+        # El techo real de modulos disponibles para la empresa (plan + lo que
+        # cualquier rol de la empresa tenga en permiso_modulo + overrides de
+        # empresa_modulo) — no solo lo del rol puntual de este usuario. Antes
+        # se usaba unicamente permisos.keys() (el rol puntual) como base, asi
+        # que un admin no podia darle a un usuario mas modulos de los que su
+        # rol trajera de fabrica aunque la empresa si los tuviera activos.
+        modulos_plan = {
+            modulo
+            for modulo, activo in resolve_empresa_module_candidates(db, empresa_id).items()
+            if activo
+        }
 
         user_overrides = load_usuario_module_overrides(db, user_id)
         if user_overrides is not None:
@@ -640,6 +770,8 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     return AuthContext(
         userID=user_id,
         empresaID=empresa_id,
+        empresaNombre=empresa_nombre,
+        empresaSlug=empresa_slug,
         sucursalID=(_safe_int(usuario.sucursalID) if usuario.sucursalID is not None else _safe_int(sucursal_id)),
         rolID=rol_id,
         planID=effective_plan_id,
@@ -671,6 +803,8 @@ def get_current_auth_context(
         raise credentials_error
 
     try:
+        if is_token_revoked(db, payload.get("jti")):
+            raise credentials_error
         return _build_auth_context(db, payload)
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=500, detail=str(exc))

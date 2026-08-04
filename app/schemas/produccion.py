@@ -29,6 +29,9 @@ class ProduccionReasignarRequest(BaseModel):
 class ProduccionEstadoRequest(BaseModel):
     nuevoEstado: str
     observacionesInternas: Optional[str] = None
+    usuarioCambio: Optional[str] = None
+    origenCambio: Optional[str] = None
+    cambioAdministrativo: bool = False
 
 
 class FloristaEstadoRequest(BaseModel):

@@ -15,7 +15,13 @@ class FakeQuery:
     def join(self, *_args, **_kwargs):
         return self
 
+    def order_by(self, *_args, **_kwargs):
+        return self
+
     def first(self):
+        return self.result
+
+    def all(self):
         return self.result
 
 
@@ -40,6 +46,7 @@ def test_asignar_produccion_does_not_block_when_daily_capacity_is_exceeded(monke
         idProduccion=101,
         empresaID=3,
         sucursalID=3,
+        pedidoID=501,
         floristaID=None,
         fechaProgramadaProduccion=future_date,
         estado=1,
@@ -58,7 +65,7 @@ def test_asignar_produccion_does_not_block_when_daily_capacity_is_exceeded(monke
         activo=1,
         capacidadDiaria=1,
     )
-    db = FakeSession([produccion, florista])
+    db = FakeSession([produccion, [produccion], florista])
     payload = ProduccionAsignarRequest(
         floristaID=7,
         fechaProgramadaProduccion=future_date,
@@ -68,6 +75,8 @@ def test_asignar_produccion_does_not_block_when_daily_capacity_is_exceeded(monke
     auth = SimpleNamespace(empresaID=3)
 
     monkeypatch.setattr(produccion_router, "assert_same_empresa", lambda auth_ctx, empresa_id: None)
+    monkeypatch.setattr(produccion_router, "_bloquear_operacion_si_pedido_cancelado", lambda *args, **kwargs: None)
+    monkeypatch.setattr(produccion_router.produccion_service, "_resolve_estado_produccion_ids", lambda db: {"cancelado": 5})
     monkeypatch.setattr(produccion_router, "_estado_produccion_norm", lambda value, db=None: produccion_router.ESTADO_PENDIENTE)
     monkeypatch.setattr(produccion_router, "_is_florista_in_incapacity", lambda florista_arg, fecha_arg: False)
     monkeypatch.setattr(produccion_router, "_utc_now_naive", lambda: now_utc)

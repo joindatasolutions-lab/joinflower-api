@@ -25,12 +25,25 @@ from app.schemas.domicilios import (
 
 TRANSICIONES_VALIDAS = {
     ESTADO_PENDIENTE: {ESTADO_ASIGNADO, ESTADO_CANCELADO},
-    ESTADO_ASIGNADO: {ESTADO_EN_RUTA, ESTADO_CANCELADO},
+    ESTADO_ASIGNADO: {ESTADO_PENDIENTE, ESTADO_EN_RUTA, ESTADO_CANCELADO},
     ESTADO_EN_RUTA: {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO},
     ESTADO_ENTREGADO: set(),
-    ESTADO_NO_ENTREGADO: {ESTADO_ASIGNADO, ESTADO_CANCELADO},
+    ESTADO_NO_ENTREGADO: {ESTADO_PENDIENTE, ESTADO_ASIGNADO, ESTADO_CANCELADO},
     ESTADO_CANCELADO: set(),
 }
+
+DEFAULT_TRANSICIONES_ENTREGA = [
+    (ESTADO_PENDIENTE, ESTADO_ASIGNADO),
+    (ESTADO_PENDIENTE, ESTADO_CANCELADO),
+    (ESTADO_ASIGNADO, ESTADO_PENDIENTE),
+    (ESTADO_ASIGNADO, ESTADO_EN_RUTA),
+    (ESTADO_ASIGNADO, ESTADO_CANCELADO),
+    (ESTADO_EN_RUTA, ESTADO_ENTREGADO),
+    (ESTADO_EN_RUTA, ESTADO_NO_ENTREGADO),
+    (ESTADO_NO_ENTREGADO, ESTADO_PENDIENTE),
+    (ESTADO_NO_ENTREGADO, ESTADO_ASIGNADO),
+    (ESTADO_NO_ENTREGADO, ESTADO_CANCELADO),
+]
 
 # Fallback IDs when estado_entrega catalog is not seeded yet.
 ESTADO_ID_FALLBACK = {
@@ -172,6 +185,41 @@ def resolve_estado_entrega_id(db: Session, value: str | int | None) -> int:
     return fallback_id
 
 
+def _ensure_transiciones_entrega_defaults(db: Session, empresa_id: int):
+    if not _transicion_estado_entrega_table_exists(db):
+        return
+
+    existing_rows = db.execute(
+        text(
+            """
+            SELECT estado_origen_id, estado_destino_id
+            FROM petalops.transicion_estado_entrega
+            WHERE empresa_id = :empresa_id
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).all()
+    existing = {(int(row[0]), int(row[1])) for row in existing_rows}
+
+    now = now_utc().replace(tzinfo=None)
+    inserted = False
+    for origen, destino in DEFAULT_TRANSICIONES_ENTREGA:
+        origen_id = resolve_estado_entrega_id(db, origen)
+        destino_id = resolve_estado_entrega_id(db, destino)
+        if (origen_id, destino_id) in existing:
+            continue
+        db.add(
+            TransicionEstadoEntrega(
+                empresaID=int(empresa_id),
+                estadoOrigenID=origen_id,
+                estadoDestinoID=destino_id,
+                createdAt=now,
+            )
+        )
+        inserted = True
+    if inserted:
+        db.flush()
+
 def assert_transition_allowed_for_empresa(
     db: Session,
     empresa_id: int,
@@ -185,6 +233,7 @@ def assert_transition_allowed_for_empresa(
         return
 
     if _transicion_estado_entrega_table_exists(db):
+        _ensure_transiciones_entrega_defaults(db, empresa_id)
         row = (
             db.query(TransicionEstadoEntrega.idTrancisionEstadoEntrega)
             .filter(

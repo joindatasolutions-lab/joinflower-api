@@ -334,6 +334,27 @@ def _tipo_movimiento_historial(florista_anterior_id: int | None, florista_nuevo_
     return "MOVIMIENTO_MANUAL"
 
 
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    column_exists = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'petalops' AND table_name = 'empresa' AND column_name = 'mostrar_codigo_catalogo'
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not column_exists:
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
 def _build_producto_map(db: Session, empresa_id: int, produccion_ids: list[int]) -> dict[int, dict[str, str | int | None]]:
     if not produccion_ids:
         return {}
@@ -488,6 +509,7 @@ def _build_items(
     rows = q.order_by(Pedido.numeroPedido.asc(), Produccion.idProduccion.asc()).all()
     ids = [int(p.idProduccion) for p, _, _, _, _ in rows]
     producto_map = _build_producto_map(db, empresa_id, ids)
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
 
     now = colombia_now_naive()
     items: list[ProduccionItem] = []
@@ -511,7 +533,7 @@ def _build_items(
         observacion_entrega = str(entrega.observacionGeneral or "").strip() if entrega else ""
         observacion_entrega = observacion_entrega or None
         producto_id = producto_info.get("productoID")
-        codigo_base = codigo_catalogo if int(empresa_id) == 3 and codigo_catalogo else codigo_producto
+        codigo_base = codigo_catalogo if mostrar_codigo_catalogo and codigo_catalogo else codigo_producto
         codigo_arreglo = codigo_base or (str(producto_id) if producto_id is not None else None)
 
         items.append(
@@ -1025,12 +1047,26 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
     assert_same_empresa(auth, int(produccion.empresaID))
     _bloquear_operacion_si_pedido_cancelado(db, produccion, "produccion.asignar")
 
+    estados = produccion_service._resolve_estado_produccion_ids(db)
+    producciones_pedido = (
+        db.query(Produccion)
+        .filter(
+            Produccion.empresaID == int(produccion.empresaID),
+            Produccion.pedidoID == int(produccion.pedidoID),
+            Produccion.estado != estados["cancelado"],
+        )
+        .order_by(Produccion.idProduccion.asc())
+        .all()
+    )
+    if not producciones_pedido:
+        producciones_pedido = [produccion]
+
     fecha_programada = payload.fechaProgramadaProduccion or produccion.fechaProgramadaProduccion
     if not fecha_programada:
         raise HTTPException(status_code=400, detail="fechaProgramadaProduccion es obligatoria")
 
-    estado_actual = _estado_produccion_norm(produccion.estado, db=db)
-    if estado_actual == ESTADO_EN_PRODUCCION and not (payload.motivo and payload.usuarioCambio):
+    estados_actuales = {_estado_produccion_norm(item.estado, db=db) for item in producciones_pedido}
+    if ESTADO_EN_PRODUCCION in estados_actuales and not (payload.motivo and payload.usuarioCambio):
         raise HTTPException(status_code=400, detail="Para reasignar en EnProduccion debes indicar motivo y usuarioCambio")
 
     if payload.floristaID is not None:
@@ -1054,7 +1090,6 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
             empresa_id=int(produccion.empresaID),
             sucursal_id=int(produccion.sucursalID),
             fecha_programada=fecha_programada,
-            ignore_produccion_id=int(produccion.idProduccion),
         )
         if not florista:
             raise HTTPException(status_code=400, detail="No hay floristas disponibles para asignación automática")
@@ -1065,42 +1100,49 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
         fecha_programada=fecha_programada,
         empresa_id=int(produccion.empresaID),
         sucursal_id=int(produccion.sucursalID),
-        ignore_produccion_id=int(produccion.idProduccion),
     )
 
-    anterior = int(produccion.floristaID) if produccion.floristaID else None
     now = _utc_now_naive()
+    actualizadas = 0
+    for item in producciones_pedido:
+        anterior = int(item.floristaID) if item.floristaID else None
+        item.floristaID = int(florista.idFlorista)
+        item.fechaProgramadaProduccion = fecha_programada
+        item.fechaAsignacion = now
+        item.updatedAt = now
 
-    produccion.floristaID = int(florista.idFlorista)
-    produccion.fechaProgramadaProduccion = fecha_programada
-    produccion.fechaAsignacion = now
-    produccion.updatedAt = now
+        if payload.prioridad:
+            item.prioridad = str(payload.prioridad).upper().strip()
+        if payload.observacionesInternas:
+            item.observacionesInternas = payload.observacionesInternas.strip()
 
-    if payload.prioridad:
-        produccion.prioridad = str(payload.prioridad).upper().strip()
-    if payload.observacionesInternas:
-        produccion.observacionesInternas = payload.observacionesInternas.strip()
+        if anterior != int(florista.idFlorista):
+            _log_historial(
+                db,
+                produccion=item,
+                florista_anterior_id=anterior,
+                florista_nuevo_id=int(florista.idFlorista),
+                motivo=(payload.motivo or "Reasignacion"),
+                usuario=(payload.usuarioCambio or "system"),
+            )
+            actualizadas += 1
 
-    if anterior != int(florista.idFlorista):
-        _log_historial(
-            db,
-            produccion=produccion,
-            florista_anterior_id=anterior,
-            florista_nuevo_id=int(florista.idFlorista),
-            motivo=(payload.motivo or "Reasignación"),
-            usuario=(payload.usuarioCambio or "system"),
-        )
+    try:
+        produccion_service.validar_unico_florista_por_pedido(producciones_pedido)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     db.commit()
 
     return {
         "status": "ok",
         "idProduccion": produccion_id,
+        "pedidoID": int(produccion.pedidoID),
+        "produccionesActualizadas": actualizadas,
         "floristaID": int(florista.idFlorista),
         "florista": florista.nombre,
-        "fechaProgramadaProduccion": str(produccion.fechaProgramadaProduccion),
+        "fechaProgramadaProduccion": str(fecha_programada),
     }
-
 
 @router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
@@ -1120,7 +1162,11 @@ def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest
 
 @router.put("/{produccion_id}/estado", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
-    if is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+    es_cambio_administrativo = bool(payload.cambioAdministrativo) or str(payload.origenCambio or "").strip().lower() == "administrador"
+    es_admin_produccion = is_empresa_admin_context(auth) or is_super_admin_context(auth)
+    if es_cambio_administrativo and not es_admin_produccion:
+        raise HTTPException(status_code=403, detail="Solo administradores pueden ejecutar cambios administrativos de produccion")
+    if is_empresa_admin_context(auth) and not is_super_admin_context(auth) and not es_cambio_administrativo:
         raise HTTPException(status_code=403, detail="Acción no disponible para rol Administrador")
 
     produccion = db.query(Produccion).filter(Produccion.idProduccion == produccion_id).first()
@@ -1165,12 +1211,16 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
     if domicilio_service.is_produccion_bloqueada_por_entrega_en_ruta(db, int(produccion.idProduccion)):
         raise HTTPException(status_code=400, detail="No se permite modificar Producción cuando el domicilio está EnRuta")
 
+    transicion_administrativa_permitida = es_cambio_administrativo and (estado_actual, nuevo_estado) in {
+        (ESTADO_PENDIENTE, ESTADO_EN_PRODUCCION),
+        (ESTADO_EN_PRODUCCION, ESTADO_PARA_ENTREGA),
+    }
     if not produccion_service.transicion_produccion_permitida(
         db=db,
         empresa_id=int(produccion.empresaID),
         origen=produccion.estado,
         destino=nuevo_estado,
-    ):
+    ) and not transicion_administrativa_permitida:
         raise HTTPException(status_code=400, detail=f"Transición no permitida: {estado_actual} -> {nuevo_estado}")
 
     if nuevo_estado == ESTADO_EN_PRODUCCION:
@@ -1215,6 +1265,17 @@ def cambiar_estado_produccion(produccion_id: int, payload: ProduccionEstadoReque
 
     if payload.observacionesInternas:
         produccion.observacionesInternas = payload.observacionesInternas.strip()
+
+    usuario_cambio = str(payload.usuarioCambio or auth.login or auth.nombre or "system").strip() or "system"
+    if es_cambio_administrativo:
+        _log_historial(
+            db=db,
+            produccion=produccion,
+            florista_anterior_id=(int(produccion.floristaID) if produccion.floristaID is not None else None),
+            florista_nuevo_id=(int(produccion.floristaID) if produccion.floristaID is not None else None),
+            motivo=f"Cambio administrativo de estado: {estado_actual} -> {nuevo_estado}",
+            usuario=usuario_cambio,
+        )
 
     produccion.updatedAt = now
     db.commit()
@@ -1345,6 +1406,11 @@ def recalcular_produccion_por_pedido(pedido_id: int, payload: ProduccionRecalcul
 
             produccion.updatedAt = now
 
+        try:
+            produccion_service.validar_unico_florista_por_pedido(producciones)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         pedido.version = int(pedido.version or 1) + 1
         db.commit()
         return {
@@ -1468,108 +1534,6 @@ def historial_reasignaciones(
     ]
 
     return ReasignacionHistorialResponse(items=items, total=len(items))
-
-
-@router.get("/trazabilidad/usuarios", dependencies=[Depends(require_module_access("trazabilidad", "puedeVer"))])
-def trazabilidad_usuarios_produccion(
-    empresa_id: int = Query(..., alias="empresaID"),
-    sucursal_id: int | None = Query(None, alias="sucursalID"),
-    fecha_desde: date = Query(..., alias="fechaDesde"),
-    fecha_hasta: date = Query(..., alias="fechaHasta"),
-    db: Session = Depends(get_db),
-    auth=Depends(get_current_auth_context),
-):
-    assert_same_empresa(auth, int(empresa_id))
-
-    q = (
-        db.query(
-            ProduccionHistorial,
-            Produccion.pedidoID,
-            Pedido.numeroPedido,
-            Pedido.codigoPedido,
-            Cliente.nombreCompleto,
-        )
-        .join(
-            Produccion,
-            (Produccion.idProduccion == ProduccionHistorial.produccionID)
-            & (Produccion.empresaID == ProduccionHistorial.empresaID),
-        )
-        .outerjoin(
-            Pedido,
-            (Pedido.idPedido == Produccion.pedidoID)
-            & (Pedido.empresaID == Produccion.empresaID),
-        )
-        .outerjoin(
-            Cliente,
-            (Cliente.idCliente == Pedido.clienteID)
-            & (Cliente.empresaID == Pedido.empresaID),
-        )
-        .filter(
-            ProduccionHistorial.empresaID == int(empresa_id),
-            ProduccionHistorial.fechaCambio >= datetime.combine(fecha_desde, datetime.min.time()),
-            ProduccionHistorial.fechaCambio <= datetime.combine(fecha_hasta, datetime.max.time()),
-        )
-    )
-    if sucursal_id is not None:
-        q = q.filter(ProduccionHistorial.sucursalID == int(sucursal_id))
-
-    rows = q.order_by(ProduccionHistorial.fechaCambio.desc()).all()
-
-    resumen: dict[str, dict] = {}
-    detalle = []
-    for historial, pedido_id, numero_pedido, codigo_pedido, cliente_nombre in rows:
-        usuario = str(historial.usuarioCambio or "system").strip() or "system"
-        bucket = resumen.setdefault(
-            usuario,
-            {
-                "usuario": usuario,
-                "acciones": 0,
-                "producciones": set(),
-                "pedidos": set(),
-                "ultimoMovimiento": None,
-            },
-        )
-        bucket["acciones"] += 1
-        bucket["producciones"].add(int(historial.produccionID))
-        if pedido_id is not None:
-            bucket["pedidos"].add(int(pedido_id))
-        if bucket["ultimoMovimiento"] is None or historial.fechaCambio > bucket["ultimoMovimiento"]:
-            bucket["ultimoMovimiento"] = historial.fechaCambio
-
-        detalle.append(
-            {
-                "usuario": usuario,
-                "produccionID": int(historial.produccionID),
-                "pedidoID": (int(pedido_id) if pedido_id is not None else None),
-                "numeroPedido": (int(numero_pedido) if numero_pedido is not None else None),
-                "codigoPedido": (str(codigo_pedido or "").strip() or None),
-                "cliente": str(cliente_nombre or "-"),
-                "motivo": str(historial.motivo or "").strip(),
-                "fechaAccion": historial.fechaCambio,
-                "floristaAnteriorID": (int(historial.floristaAnteriorID) if historial.floristaAnteriorID is not None else None),
-                "floristaNuevoID": (int(historial.floristaNuevoID) if historial.floristaNuevoID is not None else None),
-            }
-        )
-
-    resumen_items = sorted(
-        [
-            {
-                "usuario": data["usuario"],
-                "accionesRegistradas": int(data["acciones"]),
-                "produccionesImpactadas": len(data["producciones"]),
-                "pedidosImpactados": len(data["pedidos"]),
-                "ultimoMovimiento": data["ultimoMovimiento"],
-            }
-            for data in resumen.values()
-        ],
-        key=lambda item: (-int(item["accionesRegistradas"]), item["usuario"]),
-    )
-
-    return {
-        "resumen": resumen_items,
-        "detalle": detalle,
-        "total": len(detalle),
-    }
 
 
 @router.get("/metricas/productividad", response_model=FloristaProductividadResponse)

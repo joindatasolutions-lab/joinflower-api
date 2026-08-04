@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -23,7 +23,6 @@ from app.models.empresa import Empresa
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.produccion import Produccion
-from app.models.transicionestadopedido import TransicionEstadoPedido
 from app.models.estadopedido import EstadoPedido
 from app.models.entrega import Entrega
 from app.models.sucursal import Sucursal
@@ -32,8 +31,11 @@ from app.schemas.pedido import (
     PedidoCheckoutRequest,
     PedidoCheckoutResponse,
     PedidoCreate,
+    PedidoManualRequest,
+    PedidoManualResponse,
     PedidoListResponse,
     PedidoListItem,
+    PedidoListKpiSummary,
     PedidoListProducto,
     PedidoDetalleResponse,
     PedidoDetalleProducto,
@@ -41,6 +43,7 @@ from app.schemas.pedido import (
 )
 from app.services import caja_service
 from app.services import domicilio_service
+from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
@@ -53,61 +56,23 @@ from app.core.security import (
     is_super_admin_context,
     require_module_access,
 )
-from app.middlewares.rate_limit import limiter
+from app.middlewares.rate_limit import limiter, rate_limit
 
 router = APIRouter()
 pedido_logger = get_logger("pedido")
 
 FLORA_EMPRESA_ID = 3
-FLORA_PAYMENT_METHODS = {
-    "Cuenta por cobrar",
-    "Efectivo",
-    "Canje",
-    "Contraentrega",
-    "Cotizacion",
-    "Obsequio",
-    "Paypal",
-    "Link bold",
-    "Link payu",
-    "Link wompi",
-    "Datafono credibanco",
-    "Datafono Bold",
-    "Transferencia 0257",
-    "Transferencia 0005",
-    "Transferencia 3220",
-    "Transferencia 4038",
-    "Transferencia 4966",
-    "Transferencia 3671",
-    "Transferencia 6913",
-    "Transferencia 5431",
-    "Transferencia 1340",
-    "Transferencia Jaque",
-    "Transferencia QR",
-    "RAPPI",
-    "Anulado",
-}
-FLORA_SALES_CHANNELS = {
-    "Huawei",
-    "Samsung",
-    "Andrea",
-    "Página Web",
-    "Presencial",
-    "Rappi",
-}
+
+STORE_PICKUP_DELIVERY_VALUES = (
+    "recogida_en_tienda",
+    "recoger_en_tienda",
+    "retiro_en_tienda",
+    "tienda",
+    "recogida",
+    "recoger",
+)
 LINK_PAYMENT_METHODS = {"link bold", "link payu", "link wompi"}
 LINK_SURCHARGE_PCT = Decimal("5.00")
-
-
-def _tenant_order_rules(empresa_id: int) -> dict:
-    if int(empresa_id) == FLORA_EMPRESA_ID:
-        return {
-            "require_payment_before_approval": True,
-            "require_sales_channel_before_approval": True,
-        }
-    return {
-        "require_payment_before_approval": False,
-        "require_sales_channel_before_approval": False,
-    }
 
 
 def _activo_truthy(column):
@@ -206,6 +171,21 @@ def _ticket_wrap_lines(raw_line: str, width: int) -> list[str]:
     return chunks or [""]
 
 
+def _factura_empresa_labels(empresa, sucursal, empresa_id: int) -> tuple[str, str]:
+    nombre_empresa = str(
+        (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "")
+    ).strip()
+    if not nombre_empresa:
+        nombre_empresa = str(getattr(sucursal, "nombreSucursal", None) or "PetalOps").strip() or "PetalOps"
+
+    partes = [part.strip() for part in nombre_empresa.split(" - ", 1) if part.strip()]
+    titulo = partes[0] if partes else nombre_empresa
+    subtitulo = partes[1] if len(partes) > 1 else ""
+    if not subtitulo and int(empresa_id) == FLORA_EMPRESA_ID:
+        subtitulo = "Tienda de Flores"
+    return titulo, subtitulo
+
+
 def _render_factura_pdf(lines: list[str]) -> bytes:
     page_width = 80 * mm
     margin_x = 4 * mm
@@ -292,6 +272,47 @@ def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
     return str((estado.nombreEstado if estado else "") or "").strip().upper()
 
 
+def _ensure_transiciones_pedido_defaults(db: Session, empresa_id: int) -> None:
+    db.execute(
+        text(
+            """
+            WITH estados AS (
+                SELECT id_estado_pedido, UPPER(TRIM(nombre_estado)) AS nombre_estado
+                FROM petalops.estado_pedido
+            ), pares(origen, destino) AS (
+                VALUES
+                    ('CREADO', 'APROBADO'),
+                    ('CREADO', 'CANCELADO'),
+                    ('PENDIENTE', 'APROBADO'),
+                    ('PENDIENTE', 'CANCELADO'),
+                    ('APROBADO', 'CANCELADO')
+            )
+            INSERT INTO petalops.transicion_estado_pedido (
+                empresa_id,
+                estado_origen_id,
+                estado_destino_id,
+                created_at
+            )
+            SELECT
+                :empresa_id,
+                eo.id_estado_pedido,
+                ed.id_estado_pedido,
+                CURRENT_TIMESTAMP
+            FROM pares p
+            JOIN estados eo ON eo.nombre_estado = p.origen
+            JOIN estados ed ON ed.nombre_estado = p.destino
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM petalops.transicion_estado_pedido tep
+                WHERE tep.empresa_id = :empresa_id
+            )
+            ON CONFLICT (empresa_id, estado_origen_id, estado_destino_id) DO NOTHING
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    )
+
+
 def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | None, destino_id: int | None) -> bool:
     if origen_id is None or destino_id is None:
         return False
@@ -301,28 +322,25 @@ def _transicion_pedido_permitida(db: Session, empresa_id: int, origen_id: int | 
     if origen_id == destino_id:
         return True
 
-    transitions = db.execute(
+    _ensure_transiciones_pedido_defaults(db, int(empresa_id))
+    transition = db.execute(
         text(
             """
-            SELECT estado_origen_id, estado_destino_id
+            SELECT 1
             FROM petalops.transicion_estado_pedido
             WHERE empresa_id = :empresa_id
+              AND estado_origen_id = :origen_id
+              AND estado_destino_id = :destino_id
+            LIMIT 1
             """
         ),
-        {"empresa_id": int(empresa_id)},
-    ).fetchall()
-    if transitions:
-        return any(int(row[0]) == origen_id and int(row[1]) == destino_id for row in transitions)
-
-    origen = _estado_pedido_nombre(db, origen_id)
-    destino = _estado_pedido_nombre(db, destino_id)
-    fallback = {
-        "CREADO": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
-        "PENDIENTE": {"APROBADO", "PAGADO", "RECHAZADO", "CANCELADO"},
-        "APROBADO": {"CANCELADO", "PAGADO"},
-        "PAGADO": {"CANCELADO"},
-    }
-    return destino in fallback.get(origen, set())
+        {
+            "empresa_id": int(empresa_id),
+            "origen_id": origen_id,
+            "destino_id": destino_id,
+        },
+    ).first()
+    return transition is not None
 
 
 def _estado_pedido_editable(db: Session, estado_pedido_id: int | None) -> bool:
@@ -512,6 +530,75 @@ def _cliente_identificacion_fallback(identificacion: str | None, telefono: str |
     return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
 
 
+def _normalizar_telefono_completo_pedido(indicativo: str | None, telefono: str | None) -> str | None:
+    prefijo = str(indicativo or "").strip().replace(" ", "")
+    numero = str(telefono or "").strip().replace(" ", "")
+    if not prefijo and not numero:
+        return None
+    if prefijo and not prefijo.startswith("+"):
+        prefijo = f"+{prefijo}"
+    return f"{prefijo}{numero}"
+
+
+def _upsert_cliente_pedido_manual(
+    db: Session,
+    *,
+    empresa_id: int,
+    tipo_ident: str | None,
+    identificacion: str | None,
+    indicativo: str | None,
+    nombre_completo: str,
+    telefono: str,
+    email: str | None,
+) -> Cliente:
+    telefono_text = str(telefono or "").strip()
+    identificacion_text = str(identificacion or "").strip()
+    filters = []
+    if telefono_text:
+        filters.extend([Cliente.telefono == telefono_text, Cliente.telefonoCompleto == telefono_text])
+    if identificacion_text:
+        filters.append(Cliente.identificacion == identificacion_text)
+
+    cliente = None
+    if filters:
+        cliente = (
+            db.query(Cliente)
+            .filter(Cliente.empresaID == int(empresa_id), or_(*filters))
+            .order_by(Cliente.updatedAt.desc().nullslast(), Cliente.idCliente.desc())
+            .first()
+        )
+    if not cliente:
+        cliente = Cliente(
+            empresaID=int(empresa_id),
+            tipoIdent=tipo_ident or "CC",
+            identificacion=_cliente_identificacion_fallback(identificacion_text, telefono_text),
+            indicativo=indicativo,
+            telefonoCompleto=_normalizar_telefono_completo_pedido(indicativo, telefono_text) or telefono_text or None,
+            nombreCompleto=nombre_completo,
+            telefono=telefono_text or None,
+            email=email,
+            activo=1,
+            createdAt=colombia_now_naive(),
+        )
+        db.add(cliente)
+        db.flush()
+        return cliente
+
+    cliente.tipoIdent = tipo_ident or cliente.tipoIdent or "CC"
+    cliente.identificacion = identificacion_text or cliente.identificacion or _cliente_identificacion_fallback(None, telefono_text or cliente.telefono)
+    cliente.indicativo = indicativo or cliente.indicativo
+    cliente.nombreCompleto = nombre_completo or cliente.nombreCompleto
+    cliente.telefono = telefono_text or cliente.telefono
+    cliente.telefonoCompleto = (
+        _normalizar_telefono_completo_pedido(indicativo or cliente.indicativo, telefono_text or cliente.telefono)
+        or cliente.telefonoCompleto
+    )
+    cliente.email = email if email is not None else cliente.email
+    cliente.updatedAt = colombia_now_naive()
+    db.flush()
+    return cliente
+
+
 def _numero_pedido_temporal() -> int:
     return -int(datetime.now(timezone.utc).timestamp() * 1000000)
 
@@ -628,7 +715,11 @@ def _recalculate_pedido_financials(db: Session, *, pedido: Pedido, aplica_iva: b
     ajustes = _build_pedido_adjustments(
         subtotal=Decimal(str(pedido.totalBruto or 0)),
         iva=Decimal(str(pedido.totalIva or 0)),
-        domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
+        domicilio=(
+            Decimal("0.00")
+            if _pedido_omite_costo_domicilio(pedido)
+            else Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+        ),
         metodos_pago=list(pago_resumen.get("metodosPago") or []),
         omitir_recargo_link=bool(pago_resumen.get("omitirRecargoLink")),
         descuento_monto=Decimal(str(pago_resumen.get("descuentoMonto") or 0)),
@@ -808,12 +899,24 @@ def _sanitize_producto_observacion(value: str | None, producto: Producto | None 
     return text
 
 
-def _codigo_producto_visible(producto: Producto | None, empresa_id: int) -> str | None:
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    if not _column_exists(db, "empresa", "mostrar_codigo_catalogo"):
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+def _codigo_producto_visible(producto: Producto | None, mostrar_codigo_catalogo: bool) -> str | None:
     if not producto:
         return None
     codigo_producto = _codigo_producto_base(producto)
     codigo_catalogo = _codigo_catalogo_base(producto)
-    if int(empresa_id) == 3 and codigo_catalogo:
+    if mostrar_codigo_catalogo and codigo_catalogo:
         return codigo_catalogo
     return codigo_producto
 
@@ -830,18 +933,18 @@ def _codigo_catalogo_base(producto: Producto | None) -> str | None:
     return str(getattr(producto, "codigoCatalogo", "") or "").strip() or None
 
 
-def _producto_listado_texto(producto: Producto | None, empresa_id: int) -> str:
+def _producto_listado_texto(producto: Producto | None, mostrar_codigo_catalogo: bool) -> str:
     nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
-    codigo = _codigo_producto_visible(producto, empresa_id)
+    codigo = _codigo_producto_visible(producto, mostrar_codigo_catalogo)
     return f"{codigo} - {nombre}" if codigo else nombre
 
 
-def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, empresa_id: int) -> PedidoListProducto:
+def _producto_listado_detalle(detalle: PedidoDetalle, producto: Producto | None, mostrar_codigo_catalogo: bool) -> PedidoListProducto:
     nombre = str(getattr(producto, "nombreProducto", None) or "Producto").strip() or "Producto"
     producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
     return PedidoListProducto(
         productoID=producto_id,
-        codigoProducto=_codigo_producto_visible(producto, empresa_id),
+        codigoProducto=_codigo_producto_visible(producto, mostrar_codigo_catalogo),
         codigoCatalogo=_codigo_catalogo_base(producto),
         nombreProducto=nombre,
         cantidad=float(detalle.cantidad or 0),
@@ -910,6 +1013,10 @@ def _normalize_delivery_type_from_barrio_name(barrio_nombre: str | None) -> str:
     return "recogida_en_tienda" if nombre == "recoger en tienda" else "domicilio"
 
 
+def _normalize_store_pickup_value(value: str | None) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def _find_barrio_by_name(db: Session, *, empresa_id: int, sucursal_id: int, barrio_nombre: str | None) -> Barrio | None:
     nombre = str(barrio_nombre or "").strip()
     if not nombre or nombre.lower() == "recoger en tienda":
@@ -933,6 +1040,107 @@ def _pedido_domicilio_valor(pedido: Pedido) -> Decimal:
     arreglos = Decimal(str(pedido.totalBruto or 0)) + Decimal(str(pedido.totalIva or 0))
     diferencia = (total - arreglos).quantize(Decimal("0.01"))
     return diferencia if diferencia > 0 else Decimal("0.00")
+
+
+def _pedido_omite_costo_domicilio(pedido: Pedido) -> bool:
+    return bool(
+        getattr(pedido, "omitirCostoDomicilio", False)
+        or getattr(pedido, "domicilioObsequiado", False)
+    )
+
+
+def _manual_money(value: float | int | Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
+def _manual_domicilio_amounts(
+    *,
+    domicilio: float | int | Decimal | None,
+    domicilio_original: float | int | Decimal | None,
+    descuento_domicilio: float | int | Decimal | None,
+    domicilio_obsequiado: bool,
+    omitir_costo_domicilio: bool,
+    resolved_domicilio: Decimal,
+) -> dict[str, Decimal | bool | None]:
+    resolved = _round_money_decimal(resolved_domicilio)
+    domicilio_solicitado = _manual_money(domicilio)
+    original = _manual_money(domicilio_original)
+    descuento = _manual_money(descuento_domicilio)
+    omitido = bool(omitir_costo_domicilio or domicilio_obsequiado)
+
+    if original is None:
+        original = resolved
+        if domicilio_solicitado is not None and domicilio_solicitado > 0:
+            original = domicilio_solicitado
+
+    cobrado = Decimal("0.00") if omitido else (domicilio_solicitado if domicilio_solicitado is not None else resolved)
+    cobrado = _round_money_decimal(cobrado)
+
+    if descuento is None:
+        descuento = _round_money_decimal(max(original - cobrado, Decimal("0.00")))
+    elif descuento < 0:
+        descuento = Decimal("0.00")
+
+    return {
+        "cobrado": cobrado,
+        "original": original,
+        "descuento": descuento,
+        "domicilioObsequiado": bool(domicilio_obsequiado),
+        "omitirCostoDomicilio": bool(omitir_costo_domicilio),
+    }
+
+
+def _payload_field_value(payload: BaseModel, name: str, missing):
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    if name in fields_set:
+        return getattr(payload, name)
+    financiero_payload = getattr(payload, "financiero", None)
+    if isinstance(financiero_payload, dict) and name in financiero_payload:
+        return financiero_payload.get(name)
+    return missing
+
+
+def _invalidate_factura_impresa(db: Session, *, pedido_id: int, empresa_id: int) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT id_pago, raw_respuesta
+            FROM petalops.pago
+            WHERE pedido_id = :pedido_id
+              AND empresa_id = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
+    ).mappings().first()
+    if not row:
+        return
+
+    raw_respuesta = _serialize_pago_metadata(
+        row.get("raw_respuesta"),
+        canal_flora=_extract_canal_flora(row.get("raw_respuesta")),
+        factura_impresa=False,
+    )
+    db.execute(
+        text(
+            """
+            UPDATE petalops.pago
+            SET raw_respuesta = :raw_respuesta,
+                updated_at = NOW()
+            WHERE id_pago = :id_pago
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "id_pago": int(row["id_pago"]),
+            "empresa_id": int(empresa_id),
+            "raw_respuesta": raw_respuesta,
+        },
+    )
 
 
 def _tenant_order_rules(db: Session, empresa_id: int) -> dict:
@@ -1292,8 +1500,33 @@ def _mark_factura_impresa(
         ),
         {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
     ).mappings().first()
+
     if not row:
-        return
+        # Empresas sin flujo de pago Flora (sin metodo_pago/canal capturados
+        # al guardar el pedido) nunca tienen fila en petalops.pago, asi que
+        # antes esto no hacia nada y el aviso de "factura pendiente" quedaba
+        # pegado para siempre. Se crea una fila minima solo para poder
+        # persistir la marca de "impresa" — no representa un pago real.
+        # metodo_pago='' (no NULL, la columna es NOT NULL) a proposito: una
+        # cadena vacia la ignoran _parse_payment_methods/_load_pago_resumen*,
+        # asi que esta fila placeholder no aparece como si fuera un metodo de
+        # pago real capturado.
+        id_pago = db.execute(
+            text(
+                """
+                INSERT INTO petalops.pago (
+                    empresa_id, pedido_id, proveedor, moneda, monto,
+                    metodo_pago, raw_respuesta, fecha_pago, created_at, updated_at
+                ) VALUES (
+                    :empresa_id, :pedido_id, 'manual', 'COP', 0,
+                    '', NULL, NOW(), NOW(), NOW()
+                )
+                RETURNING id_pago
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+        ).scalar()
+        row = {"id_pago": id_pago, "raw_respuesta": None}
 
     raw_respuesta = _serialize_pago_metadata(
         row.get("raw_respuesta"),
@@ -1438,9 +1671,21 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
     return result
 
 
-def _approval_gate_summary(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
-    rules = _tenant_order_rules(db, int(empresa_id))
-    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
+def _approval_gate_summary(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    rules: dict | None = None,
+    pago_resumen: dict | None = None,
+) -> dict:
+    # rules/pago_resumen pueden precalcularse (una sola vez / en lote) cuando se
+    # evalua esto para muchos pedidos a la vez (ej. listar_pedidos), para evitar
+    # repetir las mismas consultas por cada fila.
+    if rules is None:
+        rules = _tenant_order_rules(db, int(empresa_id))
+    if pago_resumen is None:
+        pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido_id), empresa_id=int(empresa_id))
 
     missing = []
     if rules["require_payment_before_approval"] and not pago_resumen["metodosPago"]:
@@ -1507,7 +1752,11 @@ def _upsert_pago_flora(
         {"pedido_id": int(pedido_id), "empresa_id": int(empresa_id)},
     ).mappings().first()
 
-    metodo_pago = " | ".join(metodos_pago) if metodos_pago else None
+    # petalops.pago.metodo_pago es NOT NULL: cuando no hay metodos capturados
+    # (empresas sin metodo_pago_catalogo configurado, ver /configuracion) se
+    # usa '' en vez de None — _parse_payment_methods('') resuelve a lista
+    # vacia igual que None, asi que no cambia como se lee este dato despues.
+    metodo_pago = " | ".join(metodos_pago) if metodos_pago else ""
     raw_respuesta = _serialize_pago_metadata(
         row.get("raw_respuesta") if row else None,
         canal_flora=canal_flora,
@@ -1673,6 +1922,13 @@ def _upsert_pago_flora(
         ).first()
         if inserted and inserted[0] is not None:
             metodo_by_name[str(metodo).strip().lower()] = int(inserted[0])
+
+    if missing_methods:
+        # Sin esto, el metodo nuevo queda en metodo_pago_catalogo pero nunca
+        # aparece en el formulario de pedido — empresa_menu.opciones_json
+        # (la fuente real de las opciones que muestra el front) no se toca
+        # aqui arriba, solo el catalogo.
+        sync_empresa_menu_opciones(db, empresa_id=int(empresa_id), campo="pedido_metodos_pago")
 
     db.execute(
         text(
@@ -1883,8 +2139,58 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
     caja_service.refresh_caja_por_pedido(db, pedido=pedido)
 
 
+def _build_pedido_list_kpis(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_ids: list[int],
+    estado_map: dict[int, str],
+    facturas_pendientes_impresion: int,
+) -> PedidoListKpiSummary:
+    if not pedido_ids:
+        return PedidoListKpiSummary(sinImprimir=int(facturas_pendientes_impresion))
+
+    rows = (
+        db.query(Pedido.idPedido, Pedido.totalBruto, Pedido.totalIva)
+        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(pedido_ids))
+        .all()
+    )
+
+    venta_hoy = Decimal("0.00")
+    pedidos_hoy = 0
+    aprobados = 0
+    pendientes = 0
+    cancelados = 0
+    cancelado_estados = {"CANCELADO", "RECHAZADO"}
+    aprobado_estados = {"APROBADO", "PAGADO"}
+    pendiente_estados = {"CREADO", "PENDIENTE"}
+
+    for pedido_id, total_bruto, total_iva in rows:
+        estado_nombre = str(estado_map.get(int(pedido_id), "SIN_ESTADO") or "SIN_ESTADO").strip().upper()
+        if estado_nombre in cancelado_estados:
+            cancelados += 1
+            continue
+
+        if estado_nombre in aprobado_estados:
+            aprobados += 1
+            pedidos_hoy += 1
+            venta_hoy += Decimal(str(total_bruto or 0)) + Decimal(str(total_iva or 0))
+        elif estado_nombre in pendiente_estados:
+            pendientes += 1
+            pedidos_hoy += 1
+
+    return PedidoListKpiSummary(
+        ventaHoy=float(venta_hoy.quantize(Decimal("0.01"))),
+        pedidosHoy=int(pedidos_hoy),
+        aprobados=int(aprobados),
+        pendientes=int(pendientes),
+        cancelados=int(cancelados),
+        sinImprimir=int(facturas_pendientes_impresion),
+    )
+
+
 @router.get("/pedidos", response_model=PedidoListResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
-@limiter.limit("100/minute")
+@limiter.limit(rate_limit("pedidos_list", "100/minute"))
 def listar_pedidos(
     request: Request,
     empresa_id: int = Query(..., alias="empresaID"),
@@ -1973,9 +2279,24 @@ def listar_pedidos(
         base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
+        tipo_entrega_norm = func.lower(
+            func.replace(
+                func.replace(func.coalesce(Entrega.tipoEntrega, ""), "-", "_"),
+                " ",
+                "_",
+            )
+        )
+        barrio_nombre_norm = func.lower(
+            func.replace(
+                func.replace(func.coalesce(Entrega.barrioNombre, ""), "-", "_"),
+                " ",
+                "_",
+            )
+        )
         base = base.filter(
             or_(
-                func.lower(func.coalesce(Entrega.tipoEntrega, "")).in_(("recogida_en_tienda", "tienda")),
+                tipo_entrega_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
+                barrio_nombre_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
                 func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
             )
         )
@@ -2077,7 +2398,14 @@ def listar_pedidos(
     )
     candidate_ids = [int(row[0]) for row in candidate_rows]
     if not candidate_ids:
-        return PedidoListResponse(items=[], total=0, page=page, pageSize=page_size, facturasPendientesImpresion=0)
+        return PedidoListResponse(
+            items=[],
+            total=0,
+            page=page,
+            pageSize=page_size,
+            facturasPendientesImpresion=0,
+            kpis=PedidoListKpiSummary(),
+        )
 
     estado_rows = (
         db.query(Pedido.idPedido, EstadoPedido.nombreEstado)
@@ -2097,6 +2425,13 @@ def listar_pedidos(
         and not bool((pago_resumen_map.get(int(pedido_id)) or {}).get("facturaImpresa"))
     ]
     facturas_pendientes_impresion = len(pending_invoice_ids)
+    kpis = _build_pedido_list_kpis(
+        db,
+        empresa_id=int(empresa_id),
+        pedido_ids=candidate_ids,
+        estado_map=estado_map,
+        facturas_pendientes_impresion=facturas_pendientes_impresion,
+    )
     filtered_ids = pending_invoice_ids if sin_imprimir else candidate_ids
     total = len(filtered_ids)
 
@@ -2108,9 +2443,11 @@ def listar_pedidos(
             page=page,
             pageSize=page_size,
             facturasPendientesImpresion=facturas_pendientes_impresion,
+            kpis=kpis,
         )
 
     pago_resumen_page = {int(pedido_id): pago_resumen_map.get(int(pedido_id), {}) for pedido_id in pedido_ids}
+    tenant_rules = _tenant_order_rules(db, int(empresa_id))
 
     pedido_rows = (
         db.query(Pedido, Cliente, Entrega, EstadoPedido)
@@ -2156,15 +2493,16 @@ def listar_pedidos(
         .all()
     )
 
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     productos_por_pedido: dict[int, list[str]] = {}
     productos_detalle_por_pedido: dict[int, list[PedidoListProducto]] = {}
     for detalle, producto in detalles_rows:
         pedido_id = int(detalle.pedidoID)
         productos_por_pedido.setdefault(pedido_id, []).append(
-            _producto_listado_texto(producto, int(empresa_id))
+            _producto_listado_texto(producto, mostrar_codigo_catalogo)
         )
         productos_detalle_por_pedido.setdefault(pedido_id, []).append(
-            _producto_listado_detalle(detalle, producto, int(empresa_id))
+            _producto_listado_detalle(detalle, producto, mostrar_codigo_catalogo)
         )
 
     rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
@@ -2177,6 +2515,8 @@ def listar_pedidos(
             db,
             pedido_id=pedido_id,
             empresa_id=int(pedido.empresaID),
+            rules=tenant_rules,
+            pago_resumen=pago_resumen_page.get(pedido_id) or {},
         )
 
         items.append(
@@ -2234,6 +2574,7 @@ def listar_pedidos(
         page=page,
         pageSize=page_size,
         facturasPendientesImpresion=facturas_pendientes_impresion,
+        kpis=kpis,
     )
 
 
@@ -2273,6 +2614,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         )
 
         has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
+        mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, int(pedido.empresaID))
 
         detalles = (
             db.query(PedidoDetalle, Producto)
@@ -2295,7 +2637,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
             PedidoDetalleProducto(
                 detalleID=int(detalle.idPedidoDetalle),
                 productoID=int((producto.idProducto if producto else detalle.productoID) or 0),
-                codigoProducto=_codigo_producto_visible(producto, int(pedido.empresaID)),
+                codigoProducto=_codigo_producto_visible(producto, mostrar_codigo_catalogo),
                 codigoCatalogo=_codigo_catalogo_base(producto),
                 nombreProducto=str((producto.nombreProducto if producto else None) or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
@@ -2357,6 +2699,18 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "subtotal": float(pedido.totalBruto or 0),
                 "iva": float(pedido.totalIva or 0),
                 "domicilio": float(_pedido_domicilio_valor(pedido)),
+                "domicilioObsequiado": bool(getattr(pedido, "domicilioObsequiado", False)),
+                "omitirCostoDomicilio": bool(getattr(pedido, "omitirCostoDomicilio", False)),
+                "domicilioOriginal": (
+                    float(pedido.domicilioOriginal)
+                    if getattr(pedido, "domicilioOriginal", None) is not None
+                    else None
+                ),
+                "descuentoDomicilio": (
+                    float(pedido.descuentoDomicilio)
+                    if getattr(pedido, "descuentoDomicilio", None) is not None
+                    else None
+                ),
                 "total": float(pedido.totalNeto or 0),
                 "estadoPago": None,
                 "metodoPago": pago_resumen["metodoPago"],
@@ -2434,6 +2788,20 @@ class ActualizarDetallePedidoRequest(BaseModel):
     saldoFavorMonto: float | None = None
     saldoFavorNota: str | None = None
     canalFlora: str | None = None
+    domicilio: float | None = None
+    costoDomicilio: float | None = None
+    costo_domicilio: float | None = None
+    domicilioOriginal: float | None = None
+    descuentoDomicilio: float | None = None
+    domicilioObsequiado: bool | None = None
+    domicilio_obsequiado: bool | None = None
+    omitirCostoDomicilio: bool | None = None
+    omitir_costo_domicilio: bool | None = None
+    subtotal: float | None = None
+    iva: float | None = None
+    total: float | None = None
+    forzarRecalculoFinanciero: bool | None = None
+    financiero: dict | None = None
 
 
 class AgregarDetallePedidoRequest(BaseModel):
@@ -2683,7 +3051,7 @@ def actualizar_detalle_pedido(
                         barrio_nombre=entrega.barrioNombre,
                     )
                     entrega.barrioID = int(barrio_actualizado.idBarrio) if barrio_actualizado else None
-                    pedido.costoDomicilio = _resolve_costo_domicilio(
+                    domicilio_recalculado = _resolve_costo_domicilio(
                         db,
                         empresa_id=int(pedido.empresaID),
                         sucursal_id=int(pedido.sucursalID),
@@ -2691,6 +3059,13 @@ def actualizar_detalle_pedido(
                         barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
                         barrio_nombre=entrega.barrioNombre,
                     )
+                    if _pedido_omite_costo_domicilio(pedido):
+                        pedido.domicilioOriginal = _round_money_decimal(
+                            getattr(pedido, "domicilioOriginal", None) or domicilio_recalculado
+                        )
+                        pedido.costoDomicilio = Decimal("0.00")
+                    else:
+                        pedido.costoDomicilio = domicilio_recalculado
                     needs_totals_recalc = True
                 if payload.latitudDestino is not None:
                     entrega.latitudDestino = payload.latitudDestino
@@ -2723,6 +3098,77 @@ def actualizar_detalle_pedido(
                         produccion.fechaProgramadaProduccion = fecha_programada
                         produccion.updatedAt = colombia_now_naive()
 
+        missing_financial = object()
+
+        domicilio_payload = _payload_field_value(payload, "domicilio", missing_financial)
+        costo_domicilio_payload = _payload_field_value(payload, "costoDomicilio", missing_financial)
+        if costo_domicilio_payload is missing_financial:
+            costo_domicilio_payload = _payload_field_value(payload, "costo_domicilio", missing_financial)
+        domicilio_original_payload = _payload_field_value(payload, "domicilioOriginal", missing_financial)
+        descuento_domicilio_payload = _payload_field_value(payload, "descuentoDomicilio", missing_financial)
+        domicilio_obsequiado_payload = _payload_field_value(payload, "domicilioObsequiado", missing_financial)
+        if domicilio_obsequiado_payload is missing_financial:
+            domicilio_obsequiado_payload = _payload_field_value(payload, "domicilio_obsequiado", missing_financial)
+        omitir_costo_domicilio_payload = _payload_field_value(payload, "omitirCostoDomicilio", missing_financial)
+        if omitir_costo_domicilio_payload is missing_financial:
+            omitir_costo_domicilio_payload = _payload_field_value(payload, "omitir_costo_domicilio", missing_financial)
+        forzar_recalculo_payload = _payload_field_value(payload, "forzarRecalculoFinanciero", missing_financial)
+
+        if any(
+            value is not missing_financial
+            for value in (
+                domicilio_payload,
+                costo_domicilio_payload,
+                domicilio_original_payload,
+                descuento_domicilio_payload,
+                domicilio_obsequiado_payload,
+                omitir_costo_domicilio_payload,
+                forzar_recalculo_payload,
+            )
+        ):
+            if domicilio_obsequiado_payload is not missing_financial:
+                pedido.domicilioObsequiado = bool(domicilio_obsequiado_payload)
+            if omitir_costo_domicilio_payload is not missing_financial:
+                pedido.omitirCostoDomicilio = bool(omitir_costo_domicilio_payload)
+            if domicilio_original_payload not in (missing_financial, None):
+                pedido.domicilioOriginal = _round_money_decimal(domicilio_original_payload)
+            if descuento_domicilio_payload not in (missing_financial, None):
+                pedido.descuentoDomicilio = _round_money_decimal(descuento_domicilio_payload)
+
+            domicilio_cobrado_payload = (
+                costo_domicilio_payload
+                if costo_domicilio_payload not in (missing_financial, None)
+                else domicilio_payload
+            )
+            omite_domicilio = _pedido_omite_costo_domicilio(pedido)
+            if omite_domicilio:
+                domicilio_original = _round_money_decimal(
+                    (
+                        domicilio_original_payload
+                        if domicilio_original_payload not in (missing_financial, None)
+                        else getattr(pedido, "domicilioOriginal", None)
+                    )
+                    or (
+                        domicilio_cobrado_payload
+                        if domicilio_cobrado_payload not in (missing_financial, None)
+                        else getattr(pedido, "costoDomicilio", None)
+                    )
+                    or 0
+                )
+                pedido.domicilioOriginal = domicilio_original
+                pedido.costoDomicilio = Decimal("0.00")
+                pedido.descuentoDomicilio = domicilio_original
+            else:
+                if domicilio_cobrado_payload not in (missing_financial, None):
+                    pedido.costoDomicilio = _round_money_decimal(domicilio_cobrado_payload)
+                elif domicilio_original_payload not in (missing_financial, None):
+                    pedido.costoDomicilio = _round_money_decimal(domicilio_original_payload)
+                pedido.descuentoDomicilio = Decimal("0.00")
+                if getattr(pedido, "domicilioOriginal", None) is None:
+                    pedido.domicilioOriginal = _round_money_decimal(getattr(pedido, "costoDomicilio", None) or 0)
+
+            needs_totals_recalc = True
+
         if needs_totals_recalc:
             _recalculate_pedido_financials(
                 db,
@@ -2730,6 +3176,7 @@ def actualizar_detalle_pedido(
                 aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
             )
             _sync_existing_pago_total(db, pedido=pedido)
+            _invalidate_factura_impresa(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
 
         if (
             payload.metodosPago is not None
@@ -2767,12 +3214,12 @@ def actualizar_detalle_pedido(
             if channel_field and not canal_flora:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "FLORA_CHANNEL_REQUIRED", "message": "Celular Flora es obligatorio"},
+                    detail={"code": "FLORA_CHANNEL_REQUIRED", "message": f"{channel_field['titulo'] or 'Canal de venta'} es obligatorio"},
                 )
             if canal_flora and allowed_channels and canal_flora not in allowed_channels:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "FLORA_CHANNEL_INVALID", "message": "Canal de venta Flora inválido"},
+                    detail={"code": "FLORA_CHANNEL_INVALID", "message": f"{channel_field['titulo'] or 'Canal de venta'} inválido"},
                 )
 
             descuento_monto = Decimal(str(
@@ -2804,7 +3251,11 @@ def actualizar_detalle_pedido(
             ajustes = _build_pedido_adjustments(
                 subtotal=Decimal(str(pedido.totalBruto or 0)),
                 iva=Decimal(str(pedido.totalIva or 0)),
-                domicilio=Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0)),
+                domicilio=(
+                    Decimal("0.00")
+                    if _pedido_omite_costo_domicilio(pedido)
+                    else Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+                ),
                 metodos_pago=metodos_pago,
                 omitir_recargo_link=omitir_recargo_link,
                 descuento_monto=descuento_monto,
@@ -3241,6 +3692,14 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         .first()
     )
     empresa = db.query(Empresa).filter(Empresa.idEmpresa == int(pedido.empresaID)).first()
+    sucursal = (
+        db.query(Sucursal)
+        .filter(
+            Sucursal.idSucursal == int(pedido.sucursalID),
+            Sucursal.empresaID == int(pedido.empresaID),
+        )
+        .first()
+    )
     barrio = None
     if entrega and getattr(entrega, "barrioID", None) is not None:
         barrio = (
@@ -3287,12 +3746,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Observaciones entrega: {observacion_entrega}" if observacion_entrega else None,
     ]
     observaciones = "\n".join([item for item in observaciones_factura if item]) or "Sin observaciones"
-    empresa_nombre = str(
-        (getattr(empresa, "nombreComercial", None) or getattr(empresa, "nombreEmpresa", None) or "FLORA - TIENDA DE FLORES")
-    ).strip()
-    empresa_partes = [part.strip() for part in empresa_nombre.split(" - ", 1) if part.strip()]
-    empresa_titulo = empresa_partes[0] if empresa_partes else empresa_nombre
-    empresa_subtitulo = empresa_partes[1] if len(empresa_partes) > 1 else "Tienda de Flores"
+    empresa_titulo, empresa_subtitulo = _factura_empresa_labels(empresa, sucursal, int(pedido.empresaID))
     forma_pago = str(pago_resumen.get("metodoPago") or "No especificada").strip() or "No especificada"
     metodos_pago = [str(item or "").strip().lower() for item in (pago_resumen.get("metodosPago") or []) if str(item or "").strip()]
     detalle_pago = pago_resumen.get("detallePago") or []
@@ -3312,7 +3766,11 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
     mensaje_final = "Gracias por su compra ✿"
     numero_legible = str(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else _numero_pedido_humano(pedido)
-    celular_flora = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
+    # Titulo real configurado por empresa para el canal de venta (ver empresa_menu / sql/alter_empresa_menu.sql).
+    # Para Flora esta sembrado como "Celular Flora"; otras empresas ven su propio titulo si lo configuran.
+    canal_venta_field = _load_empresa_menu_config(db, empresa_id=int(pedido.empresaID)).get("pedido_canal_venta")
+    canal_venta_titulo = str(canal_venta_field["titulo"]).strip() if canal_venta_field else None
+    canal_venta_valor = str(pago_resumen.get("canalFlora") or "No especificada").strip() or "No especificada"
 
     recargo_link_monto = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0))
     descuento_monto = Decimal(str(pago_resumen.get("descuentoMonto") or 0))
@@ -3331,7 +3789,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
 
     contenido_lineas = [
         empresa_titulo.upper(),
-        empresa_subtitulo,
+        *([empresa_subtitulo] if empresa_subtitulo else []),
         "----------------------------------------",
         f"Pedido: #{numero_legible}",
         f"Registro: {_fecha_hora_humano(pedido.fechaPedido)}",
@@ -3370,7 +3828,7 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         f"Total: {_money_cop(pedido.totalNeto)}",
         "----------------------------------------",
         f"Operador: {operador_nombre}",
-        f"Celular Flora: {celular_flora}",
+        *([f"{canal_venta_titulo}: {canal_venta_valor}"] if canal_venta_field else []),
         "----------------------------------------",
         mensaje_final,
     ]
@@ -3557,6 +4015,19 @@ def resumen_contabilidad(
     for detalle, producto in detalle_rows:
         detalles_por_pedido.setdefault(int(detalle.pedidoID), []).append((detalle, producto))
 
+    entrega_obs_rows = (
+        db.query(Entrega.pedidoID, Entrega.observacionGeneral, Entrega.observaciones)
+        .filter(Entrega.empresaID == int(empresa_id), Entrega.pedidoID.in_(pedido_ids))
+        .all()
+    )
+    entrega_obs_por_pedido: dict[int, list[str]] = {}
+    for entrega_pedido_id, observacion_general, observaciones in entrega_obs_rows:
+        bucket = entrega_obs_por_pedido.setdefault(int(entrega_pedido_id), [])
+        for value in (observacion_general, observaciones):
+            cleaned = str(value or "").strip()
+            if cleaned:
+                bucket.append(cleaned)
+
     pagos_por_pedido = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
     _ensure_pedido_auditoria_table(db)
     auditoria_rows = db.execute(
@@ -3585,6 +4056,7 @@ def resumen_contabilidad(
     cuentas_map: dict[str, dict] = {}
     detalles_contables: list[dict] = []
     total_recaudo_global = Decimal("0.00")
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
 
     for pedido, estado in order_rows:
         pedido_id = int(pedido.idPedido)
@@ -3649,16 +4121,7 @@ def resumen_contabilidad(
             observacion_detalle = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
             if observacion_detalle:
                 observaciones_pedido.append(observacion_detalle)
-        entrega_obs_rows = (
-            db.query(Entrega.observacionGeneral, Entrega.observaciones)
-            .filter(Entrega.empresaID == int(empresa_id), Entrega.pedidoID == pedido_id)
-            .all()
-        )
-        for observacion_general, observaciones in entrega_obs_rows:
-            for value in (observacion_general, observaciones):
-                cleaned = str(value or "").strip()
-                if cleaned:
-                    observaciones_pedido.append(cleaned)
+        observaciones_pedido.extend(entrega_obs_por_pedido.get(pedido_id, []))
 
         detalles_contables.append({
             "pedidoID": pedido_id,
@@ -3680,7 +4143,7 @@ def resumen_contabilidad(
         })
 
         for detalle, producto in detalles_por_pedido.get(pedido_id, []):
-            codigo = _codigo_producto_visible(producto, int(empresa_id)) or ""
+            codigo = _codigo_producto_visible(producto, mostrar_codigo_catalogo) or ""
             nombre = str(getattr(producto, "nombreProducto", None) or "Arreglo").strip() or "Arreglo"
             producto_id = int(detalle.productoID or 0) if detalle.productoID is not None else 0
             key = f"{producto_id or 'na'}::{codigo or 'sin-codigo'}::{nombre}"
@@ -3954,15 +4417,274 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
 
 
 @router.post("/pedido/checkout", response_model=PedidoCheckoutResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
-@limiter.limit("60/minute")
+@limiter.limit(rate_limit("pedido_checkout", "60/minute"))
 def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     """Endpoint de checkout: delega la lógica transaccional al servicio de pedidos."""
     assert_same_empresa(auth, int(data.empresaID))
-    return checkout_pedido(db=db, payload=data)
+    result = checkout_pedido(db=db, payload=data)
+    pedido_id = int(result.get("pedidoID") or 0)
+    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id, Pedido.empresaID == int(data.empresaID)).first()
+    if pedido:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_CHECKOUT",
+            estado_origen_id=None,
+            estado_destino_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
+            extra={
+                "numeroPedido": int(pedido.numeroPedido or 0),
+                "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+                "total": float(pedido.totalNeto or 0),
+            },
+        )
+        db.commit()
+    return result
+
+
+@router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
+@limiter.limit(rate_limit("pedido_manual", "60/minute"))
+def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    empresa_id = int(data.empresaID if data.empresaID is not None else data.empresaId or 0)
+    sucursal_id = int(data.sucursalID if data.sucursalID is not None else data.sucursalId or 0)
+    if empresa_id <= 0 or sucursal_id <= 0:
+        raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_SCOPE_INVALID", "message": "empresaID y sucursalID son obligatorios"})
+    assert_same_empresa(auth, empresa_id)
+
+    productos_payload = data.productos if data.productos is not None else data.items
+    if not productos_payload:
+        raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_PRODUCTS_EMPTY", "message": "productos no puede estar vacío"})
+
+    productos_normalizados = []
+    for item in productos_payload:
+        producto_id = item.productoID if item.productoID is not None else item.productoId
+        if producto_id is None:
+            raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_PRODUCT_INVALID", "message": "Cada producto debe incluir productoID"})
+        cantidad = Decimal(str(item.cantidad or 0))
+        if cantidad <= 0:
+            raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_QUANTITY_INVALID", "message": "cantidad debe ser mayor que 0"})
+        precio = item.productoPrecio if item.productoPrecio is not None else item.precioUnitario
+        productos_normalizados.append(
+            {
+                "productoID": int(producto_id),
+                "cantidad": cantidad,
+                "precio": (_round_money_decimal(Decimal(str(precio))) if precio is not None else None),
+                "observaciones": item.productoObservaciones if item.productoObservaciones is not None else item.observaciones,
+            }
+        )
+
+    producto_ids = list({item["productoID"] for item in productos_normalizados})
+
+    try:
+        estado_inicial = _buscar_estado_inicial_pedido(db)
+        if not estado_inicial:
+            raise HTTPException(status_code=400, detail="No existe un estado inicial activo 'CREADO' o 'PENDIENTE'")
+
+        productos_db = (
+            db.query(Producto)
+            .filter(
+                Producto.idProducto.in_(producto_ids),
+                _activo_truthy(Producto.activo),
+                Producto.empresaID == empresa_id,
+            )
+            .all()
+        )
+        productos_map = {int(producto.idProducto): producto for producto in productos_db}
+        if len(productos_map) != len(producto_ids):
+            raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_PRODUCT_NOT_FOUND", "message": "Uno o más productos no existen o están inactivos"})
+
+        cliente_id_payload = data.cliente.clienteID if data.cliente.clienteID is not None else data.cliente.clienteId
+        if cliente_id_payload is not None:
+            cliente = (
+                db.query(Cliente)
+                .filter(
+                    Cliente.idCliente == int(cliente_id_payload),
+                    Cliente.empresaID == empresa_id,
+                )
+                .first()
+            )
+            if not cliente:
+                raise HTTPException(status_code=404, detail={"code": "CLIENTE_NOT_FOUND", "message": "Cliente no encontrado"})
+            cliente_nombre_payload = str(data.cliente.nombreCompleto or data.cliente.nombres or "").strip()
+            if cliente_nombre_payload:
+                cliente.nombreCompleto = cliente_nombre_payload
+            if data.cliente.telefono is not None:
+                cliente.telefono = str(data.cliente.telefono).strip() or cliente.telefono
+                cliente.telefonoCompleto = (
+                    _normalizar_telefono_completo_pedido(data.cliente.indicativo or cliente.indicativo, cliente.telefono)
+                    or cliente.telefonoCompleto
+                )
+            if data.cliente.email is not None:
+                cliente.email = data.cliente.email
+            if data.cliente.tipoIdent is not None:
+                cliente.tipoIdent = _normalize_ident_type(data.cliente.tipoIdent) or cliente.tipoIdent
+            if data.cliente.identificacion is not None:
+                cliente.identificacion = str(data.cliente.identificacion).strip() or cliente.identificacion
+            if data.cliente.indicativo is not None:
+                cliente.indicativo = data.cliente.indicativo
+            cliente.updatedAt = colombia_now_naive()
+            db.flush()
+        else:
+            cliente_nombre = str(data.cliente.nombreCompleto or data.cliente.nombres or "").strip()
+            telefono_cliente = str(data.cliente.telefono or "").strip()
+            if not cliente_nombre:
+                raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_CLIENT_NAME_REQUIRED", "message": "El nombre del cliente es obligatorio"})
+            if not telefono_cliente:
+                raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_CLIENT_PHONE_REQUIRED", "message": "El teléfono del cliente es obligatorio"})
+            cliente = _upsert_cliente_pedido_manual(
+                db,
+                empresa_id=empresa_id,
+                tipo_ident=_normalize_ident_type(data.cliente.tipoIdent) or "CC",
+                identificacion=data.cliente.identificacion,
+                indicativo=data.cliente.indicativo,
+                nombre_completo=cliente_nombre,
+                telefono=telefono_cliente,
+                email=data.cliente.email,
+            )
+
+        entrega_barrio_id = data.entrega.barrioID if data.entrega.barrioID is not None else data.entrega.barrioId
+        tipo_entrega = data.entrega.tipoEntrega or _normalize_delivery_type_from_barrio_name(data.entrega.barrioNombre)
+        domicilio_resuelto = _resolve_costo_domicilio(
+            db,
+            empresa_id=empresa_id,
+            sucursal_id=sucursal_id,
+            tipo_entrega=tipo_entrega,
+            barrio_id=(int(entrega_barrio_id) if entrega_barrio_id is not None else None),
+            barrio_nombre=data.entrega.barrioNombre,
+        )
+        domicilio_amounts = _manual_domicilio_amounts(
+            domicilio=data.domicilio,
+            domicilio_original=data.domicilioOriginal,
+            descuento_domicilio=data.descuentoDomicilio,
+            domicilio_obsequiado=bool(data.domicilioObsequiado),
+            omitir_costo_domicilio=bool(data.omitirCostoDomicilio),
+            resolved_domicilio=domicilio_resuelto,
+        )
+
+        fecha_pedido = colombia_now_naive()
+        pedido = Pedido(
+            empresaID=empresa_id,
+            sucursalID=sucursal_id,
+            numeroPedido=_numero_pedido_temporal(),
+            codigoPedido=None,
+            clienteID=int(cliente.idCliente),
+            fechaPedido=fecha_pedido,
+            estadoPedidoID=int(estado_inicial.idEstadoPedido),
+            totalBruto=Decimal("0.00"),
+            totalIva=Decimal("0.00"),
+            costoDomicilio=domicilio_amounts["cobrado"],
+            domicilioObsequiado=bool(domicilio_amounts["domicilioObsequiado"]),
+            omitirCostoDomicilio=bool(domicilio_amounts["omitirCostoDomicilio"]),
+            domicilioOriginal=domicilio_amounts["original"],
+            descuentoDomicilio=domicilio_amounts["descuento"],
+            totalNeto=Decimal("0.00"),
+            createdAt=fecha_pedido,
+        )
+        db.add(pedido)
+        db.flush()
+        pedido.numeroPedido = -int(pedido.idPedido)
+
+        total_bruto = Decimal("0.00")
+        for item in productos_normalizados:
+            producto = productos_map[int(item["productoID"])]
+            precio_unitario = item["precio"] or _find_branch_product_price(
+                db,
+                empresa_id=empresa_id,
+                sucursal_id=sucursal_id,
+                producto_id=int(producto.idProducto),
+            )
+            cantidad = Decimal(str(item["cantidad"]))
+            subtotal = (precio_unitario * cantidad).quantize(Decimal("0.01"))
+            total_bruto += subtotal
+            db.add(
+                PedidoDetalle(
+                    empresaID=empresa_id,
+                    sucursalID=sucursal_id,
+                    pedidoID=int(pedido.idPedido),
+                    productoID=int(producto.idProducto),
+                    cantidad=cantidad,
+                    precioUnitario=precio_unitario,
+                    ivaUnitario=Decimal("0.00"),
+                    subtotal=subtotal,
+                    observacionesPersonalizados=_sanitize_producto_observacion(item["observaciones"], producto),
+                )
+            )
+
+        pedido.totalBruto = total_bruto.quantize(Decimal("0.01"))
+        pedido.totalIva = Decimal("0.00")
+        pedido.totalNeto = (pedido.totalBruto + pedido.totalIva + Decimal(str(pedido.costoDomicilio or 0))).quantize(Decimal("0.01"))
+
+        fecha_entrega = data.entrega.fechaEntrega
+        if isinstance(fecha_entrega, datetime):
+            fecha_entrega_dt = fecha_entrega
+        elif fecha_entrega:
+            fecha_entrega_dt = _parse_iso_date(str(fecha_entrega))
+        else:
+            fecha_entrega_dt = fecha_pedido
+
+        db.add(
+            Entrega(
+                empresaID=empresa_id,
+                sucursalID=sucursal_id,
+                pedidoID=int(pedido.idPedido),
+                estadoEntregaID=1,
+                tipoEntrega=tipo_entrega,
+                destinatario=data.entrega.destinatario or data.entrega.destinatarioNombre,
+                telefonoDestino=data.entrega.telefonoDestino,
+                direccion=data.entrega.direccion,
+                barrioID=(int(entrega_barrio_id) if entrega_barrio_id is not None else None),
+                barrioNombre=data.entrega.barrioNombre,
+                rangoHora=data.entrega.rangoHora or data.entrega.horaEntrega,
+                mensaje=data.entrega.mensaje if data.entrega.mensaje is not None else data.entrega.mensajeTarjeta,
+                firma=data.entrega.firma,
+                observacionGeneral=data.entrega.observacionGeneral,
+                fechaEntregaProgramada=fecha_entrega_dt,
+                fechaEntrega=fecha_entrega_dt,
+                latitudDestino=data.entrega.latitudDestino,
+                longitudDestino=data.entrega.longitudDestino,
+                intentoNumero=1,
+                createdAt=fecha_pedido,
+            )
+        )
+
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_MANUAL",
+            estado_origen_id=None,
+            estado_destino_id=int(estado_inicial.idEstadoPedido),
+            extra={
+                "total": float(pedido.totalNeto or 0),
+                "cantidadProductos": len(productos_normalizados),
+            },
+        )
+        db.commit()
+        total_general = Decimal(str(pedido.totalNeto or 0)).quantize(Decimal("0.01"))
+        return {
+            "pedidoID": int(pedido.idPedido),
+            "numeroPedido": None,
+            "codigoPedido": None,
+            "pedidoIDs": [int(pedido.idPedido)],
+            "cantidadPedidos": 1,
+            "total": float(total_general),
+            "estado": str(estado_inicial.nombreEstado or "CREADO"),
+            "domicilioObsequiado": bool(pedido.domicilioObsequiado),
+            "omitirCostoDomicilio": bool(pedido.omitirCostoDomicilio),
+            "domicilio": float(pedido.costoDomicilio or 0),
+            "domicilioOriginal": float(pedido.domicilioOriginal or 0),
+            "descuentoDomicilio": float(pedido.descuentoDomicilio or 0),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error registrando pedido manual: {exc}")
 
 
 @router.post("/pedido", dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
-@limiter.limit("60/minute")
+@limiter.limit(rate_limit("pedido_crear", "60/minute"))
 def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
 
     assert_same_empresa(auth, int(data.empresaId))
@@ -4077,12 +4799,24 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                 cantidad=cantidad,
                 precioUnitario=precio_unitario,
                 ivaUnitario=Decimal("0.00"),
-                totalLinea=(precio_unitario * cantidad).quantize(Decimal("0.01")),
+                subtotal=(precio_unitario * cantidad).quantize(Decimal("0.01")),
                 observacionesPersonalizados=None,
             )
 
             db.add(detalle)
 
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_PEDIDO_LEGACY",
+            estado_origen_id=None,
+            estado_destino_id=int(estado_inicial.idEstadoPedido),
+            extra={
+                "total": float(pedido.totalNeto or 0),
+                "cantidadProductos": len(data.items),
+            },
+        )
         db.commit()
 
         return {
@@ -4205,6 +4939,26 @@ def cambiar_estado(
             motivo=pedido.motivoRechazo,
         )
         producciones_estado_5 = int(cancelacion_operativa.get("produccionesCanceladas", 0))
+
+    if str(estado_destino.nombreEstado or "").strip().upper() in {"CANCELADO", "RECHAZADO"}:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CANCELAR_PEDIDO_PIPELINE",
+            estado_origen_id=int(estado_actual),
+            estado_destino_id=int(nuevo_estado_id),
+            extra={"motivo": pedido.motivoRechazo},
+        )
+    elif str(estado_destino.nombreEstado or "").strip().upper() not in {"APROBADO", "PAGADO"}:
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CAMBIAR_ESTADO_PEDIDO",
+            estado_origen_id=int(estado_actual),
+            estado_destino_id=int(nuevo_estado_id),
+        )
 
     db.commit()
 

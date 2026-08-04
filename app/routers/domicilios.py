@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timezone
+import unicodedata
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 import os
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import String, and_, bindparam, cast, func, null, or_, text
+from sqlalchemy import String, and_, bindparam, cast, exists, func, null, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -20,6 +21,7 @@ from app.core.security import (
     get_current_auth_context,
     is_empresa_admin_context,
     is_super_admin_context,
+    pwd_context,
     require_module_access,
 )
 from app.core.timezone import colombia_today
@@ -27,23 +29,37 @@ from app.database import get_db
 from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
+from app.models.empresa import Empresa
 from app.models.entrega import Entrega
+from app.models.estadopedido import EstadoPedido
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.produccion import Produccion
+from app.models.sucursal import Sucursal
 from app.models.zona import Zona
+from app.models.rol import Rol
+from app.models.usuario import Usuario
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
+    DomiciliarioCreateRequest,
+    DomiciliarioCreateResponse,
+    DomiciliarioDeleteResponse,
     DomiciliarioItem,
     DomiciliarioListResponse,
+    DomiciliarioUpdateRequest,
     DomicilioActionResponse,
+    DomicilioAuditItem,
     DomicilioAdminItem,
     DomicilioAdminListResponse,
     DomicilioContadoresResponse,
     DomicilioCourierCard,
     DomicilioCourierListResponse,
+    DomicilioMetricasItem,
+    DomicilioMetricasNovedadDetalle,
+    DomicilioMetricasResponse,
+    DomicilioMetricasResumen,
     PedidoAsignadoResponse,
     PedidoDisponibleItem,
     ESTADO_ASIGNADO,
@@ -64,6 +80,51 @@ router = APIRouter(
     dependencies=[Depends(require_module_access("domicilios", "puedeVer"))],
 )
 domicilios_logger = get_logger("domicilios")
+
+
+def _estado_produccion_delivery() -> str:
+    return produccion_service.ESTADO_PARA_ENTREGA
+
+
+def _pedido_producciones_para_entrega_condition(pedido_model, estado_para_entrega: int):
+    produccion_any = aliased(Produccion)
+    produccion_not_ready = aliased(Produccion)
+    return and_(
+        exists().where(
+            and_(
+                produccion_any.empresaID == pedido_model.empresaID,
+                produccion_any.pedidoID == pedido_model.idPedido,
+            )
+        ),
+        ~exists().where(
+            and_(
+                produccion_not_ready.empresaID == pedido_model.empresaID,
+                produccion_not_ready.pedidoID == pedido_model.idPedido,
+                or_(
+                    produccion_not_ready.estado == None,
+                    produccion_not_ready.estado != int(estado_para_entrega),
+                ),
+            )
+        ),
+    )
+
+
+def _pedido_producciones_para_entrega_sql(alias_pedido: str = "p") -> str:
+    return f"""
+        AND EXISTS (
+            SELECT 1
+            FROM petalops.produccion pr_any
+            WHERE pr_any.empresa_id = e.empresa_id
+              AND pr_any.pedido_id = {alias_pedido}.id_pedido
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM petalops.produccion pr_pending
+            WHERE pr_pending.empresa_id = e.empresa_id
+              AND pr_pending.pedido_id = {alias_pedido}.id_pedido
+              AND pr_pending.estado_produccion_id IS DISTINCT FROM :estado_para_entrega
+        )
+    """
 
 
 def _activo_truthy(column):
@@ -237,6 +298,8 @@ def _build_pedido_disponible_item(
         fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         **_location_payload(entrega, barrio, zona),
         estado=_estado_api(entrega),
+        estadoProduccion=_estado_produccion_delivery(),
+        estado_produccion=_estado_produccion_delivery(),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
     )
 
@@ -324,6 +387,110 @@ def _audit_domicilio_action(
             "detalle_json": json.dumps(extra or {}, ensure_ascii=True),
         },
     )
+
+
+def _parse_audit_detail(value) -> dict | None:
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _domicilio_auditoria(db: Session, entrega: Entrega) -> list[DomicilioAuditItem]:
+    _ensure_domicilio_auditoria_table(db)
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                accion,
+                estado_anterior,
+                estado_nuevo,
+                actor_user_id,
+                actor_login,
+                domiciliario_id,
+                detalle_json,
+                created_at
+            FROM petalops.domicilio_auditoria
+            WHERE empresa_id = :empresa_id
+              AND pedido_id = :pedido_id
+            ORDER BY created_at ASC, id_audit ASC
+            """
+        ),
+        {
+            "empresa_id": int(entrega.empresaID),
+            "pedido_id": int(entrega.pedidoID),
+            "entrega_id": int(entrega.idEntrega),
+        },
+    ).mappings().all()
+
+    return [
+        DomicilioAuditItem(
+            accion=str(row.get("accion") or ""),
+            estadoAnterior=(str(row.get("estado_anterior")).strip() if row.get("estado_anterior") else None),
+            estadoNuevo=(str(row.get("estado_nuevo")).strip() if row.get("estado_nuevo") else None),
+            actorUserID=(int(row["actor_user_id"]) if row.get("actor_user_id") is not None else None),
+            actorLogin=(str(row.get("actor_login")).strip() if row.get("actor_login") else None),
+            domiciliarioID=(int(row["domiciliario_id"]) if row.get("domiciliario_id") is not None else None),
+            detalle=_parse_audit_detail(row.get("detalle_json")),
+            createdAt=row.get("created_at"),
+        )
+        for row in rows
+        if row.get("created_at") is not None
+    ]
+
+
+def _novedad_audit_summary(
+    auditoria: list[DomicilioAuditItem],
+    entrega: Entrega,
+) -> dict:
+    def norm(value: str | None) -> str:
+        return str(value or "").strip().lower().replace("_", "").replace(" ", "")
+
+    novedad_event = None
+    for item in auditoria:
+        accion = norm(item.accion)
+        estado_nuevo = norm(item.estadoNuevo)
+        if estado_nuevo == norm(ESTADO_NO_ENTREGADO) or accion in {"noentregado", "marcarnoentregado"}:
+            novedad_event = item
+
+    resolution_event = None
+    if novedad_event:
+        for item in auditoria:
+            if item.createdAt <= novedad_event.createdAt:
+                continue
+            accion = norm(item.accion)
+            estado_nuevo = norm(item.estadoNuevo)
+            if accion == "resolvernovedad" or (estado_nuevo and estado_nuevo != norm(ESTADO_NO_ENTREGADO)):
+                resolution_event = item
+                break
+
+    detalle_novedad = novedad_event.detalle if novedad_event else None
+    detalle_resolucion = resolution_event.detalle if resolution_event else None
+    motivo = (
+        (detalle_novedad or {}).get("motivo")
+        or getattr(entrega, "motivoNoEntregado", None)
+    )
+    resolucion = None
+    if resolution_event:
+        resolucion = (
+            (detalle_resolucion or {}).get("solucion")
+            or (detalle_resolucion or {}).get("observaciones")
+            or resolution_event.accion
+        )
+
+    return {
+        "novedad": (str(motivo).strip() if motivo else None),
+        "novedadRegistradaEn": (novedad_event.createdAt if novedad_event else None),
+        "novedadRegistradaPor": (novedad_event.actorLogin if novedad_event else None),
+        "resolucion": (str(resolucion).strip() if resolucion else None),
+        "resueltaEn": (resolution_event.createdAt if resolution_event else None),
+        "resueltaPor": (resolution_event.actorLogin if resolution_event else None),
+    }
 
 
 def _latest_entrega_id_subquery(db: Session, empresa_id: int):
@@ -455,6 +622,8 @@ def _build_courier_card(
         mensaje=str(entrega.mensaje or "") or None,
         observacion=(str(entrega.observacionGeneral or entrega.observaciones or "").strip() or None),
         estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
+        estadoProduccion=_estado_produccion_delivery(),
+        estado_produccion=_estado_produccion_delivery(),
         horaEntrega=str(entrega.rangoHora or "") or None,
         fechaEntregaProgramada=_fecha_entrega_programada(entrega),
         prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
@@ -466,10 +635,31 @@ def _build_courier_card(
     )
 
 
-def _visible_product_code(codigo_producto: str | None, codigo_catalogo: str | None, empresa_id: int) -> str | None:
+def _mostrar_codigo_catalogo(db: Session, empresa_id: int) -> bool:
+    """Config real por empresa (ver sql/alter_empresa_mostrar_codigo_catalogo.sql).
+    Si la migracion aun no corrio en esta BD, mantiene el comportamiento legado (solo Flora)."""
+    column_exists = db.execute(
+        text(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'petalops' AND table_name = 'empresa' AND column_name = 'mostrar_codigo_catalogo'
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not column_exists:
+        return int(empresa_id) == 3
+    row = db.execute(
+        text("SELECT mostrar_codigo_catalogo FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return bool(row[0]) if row and row[0] is not None else False
+
+
+def _visible_product_code(codigo_producto: str | None, codigo_catalogo: str | None, mostrar_codigo_catalogo: bool) -> str | None:
     catalog_code = str(codigo_catalogo or "").strip() or None
     product_code = str(codigo_producto or "").strip() or None
-    if int(empresa_id) == 3 and catalog_code:
+    if mostrar_codigo_catalogo and catalog_code:
         return catalog_code
     return product_code
 
@@ -479,13 +669,13 @@ def _product_label(
     cantidad,
     codigo_producto: str | None = None,
     codigo_catalogo: str | None = None,
-    empresa_id: int | None = None,
+    mostrar_codigo_catalogo: bool = False,
 ) -> str | None:
     nombre_limpio = str(nombre or "").strip()
     if not nombre_limpio:
         return None
 
-    codigo = _visible_product_code(codigo_producto, codigo_catalogo, int(empresa_id or 0))
+    codigo = _visible_product_code(codigo_producto, codigo_catalogo, mostrar_codigo_catalogo)
     product_text = f"{codigo} - {nombre_limpio}" if codigo else nombre_limpio
 
     try:
@@ -537,6 +727,7 @@ def _pedido_product_payload_map(
         },
     ).all()
 
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     payload_by_pedido: dict[int, dict] = {}
     for (
         detalle_id,
@@ -562,7 +753,7 @@ def _pedido_product_payload_map(
             cantidad,
             codigo_producto=codigo_producto,
             codigo_catalogo=codigo_catalogo,
-            empresa_id=empresa_id,
+            mostrar_codigo_catalogo=mostrar_codigo_catalogo,
         )
         if label:
             payload["productos"].append(label)
@@ -660,6 +851,7 @@ def _build_mis_entregas_query(
 ):
     start = datetime.combine(fecha, datetime.min.time())
     end = datetime.combine(fecha, datetime.max.time())
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
     tipo_entrega_norm = func.lower(
@@ -682,7 +874,7 @@ def _build_mis_entregas_query(
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             entrega_actual.domiciliarioID == int(domiciliario_id),
@@ -697,7 +889,10 @@ def _build_mis_entregas_query(
                     domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA),
                 ]
             ),
+            Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
         )
         .order_by(
             func.coalesce(
@@ -735,6 +930,13 @@ def _build_pedidos_disponibles_query(
             "_",
         )
     )
+    direccion_norm = func.lower(
+        func.replace(
+            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
@@ -753,6 +955,7 @@ def _build_pedidos_disponibles_query(
             ).between(start, end),
             entrega_actual.estadoEntregaID.in_([estado_pendiente_id, estado_no_entregado_id]),
             Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             or_(
                 entrega_actual.estadoEntregaID == estado_no_entregado_id,
                 entrega_actual.domiciliarioID == None,
@@ -815,6 +1018,7 @@ def _build_pedidos_sin_asignar_query(
             entrega_actual.domiciliarioID == None,
             entrega_actual.estadoEntregaID == estado_pendiente_id,
             Produccion.estado == estado_para_entrega,
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             func.coalesce(
                 entrega_actual.reprogramadaPara,
                 entrega_actual.fechaEntregaProgramada,
@@ -859,11 +1063,12 @@ def _listar_pedidos_disponibles_api_rows(
     page: int,
     page_size: int,
 ) -> list[PedidoDisponibleItem]:
+    mostrar_codigo_catalogo = _mostrar_codigo_catalogo(db, empresa_id)
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
 
     query = text(
-        """
+        f"""
         WITH latest_attempt AS (
             SELECT pedido_id, MAX(intentonumero) AS max_intento
             FROM petalops.entrega
@@ -928,9 +1133,12 @@ def _listar_pedidos_disponibles_api_rows(
               AND e.domiciliarioid IS NULL
               AND e.estadoentregaid = :estado_pendiente_id
               AND pr.estado_produccion_id = :estado_para_entrega
+              {_pedido_producciones_para_entrega_sql("p")}
               AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega)
                   BETWEEN :fecha_desde AND :fecha_hasta
               AND lower(replace(replace(COALESCE(e.tipoentrega, ''), '-', '_'), ' ', '_'))
+                  NOT IN :store_pickup_values
+              AND lower(replace(replace(COALESCE(e.direccion, ''), '-', '_'), ' ', '_'))
                   NOT IN :store_pickup_values
               AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
         ),
@@ -954,11 +1162,11 @@ def _listar_pedidos_disponibles_api_rows(
                     (
                         CASE
                             WHEN COALESCE(
-                                CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                CASE WHEN :mostrar_codigo_catalogo THEN NULLIF(prod.codigo_catalogo, '') END,
                                 NULLIF(prod.codigo_producto, '')
                             ) IS NOT NULL
                                 THEN COALESCE(
-                                    CASE WHEN :empresa_id = 3 THEN NULLIF(prod.codigo_catalogo, '') END,
+                                    CASE WHEN :mostrar_codigo_catalogo THEN NULLIF(prod.codigo_catalogo, '') END,
                                     NULLIF(prod.codigo_producto, '')
                                 ) || ' - '
                             ELSE ''
@@ -1001,6 +1209,7 @@ def _listar_pedidos_disponibles_api_rows(
         query,
         {
             "empresa_id": int(empresa_id),
+            "mostrar_codigo_catalogo": mostrar_codigo_catalogo,
             "sucursal_id": int(sucursal_id) if sucursal_id is not None else None,
             "estado_pendiente_id": int(estado_pendiente_id),
             "estado_para_entrega": int(estado_para_entrega),
@@ -1055,6 +1264,8 @@ def _listar_pedidos_disponibles_api_rows(
                 nombreZona=nombre_zona,
                 zona=nombre_zona,
                 estado="SIN_ASIGNAR",
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 prioridad=(str(row.get("prioridad") or "") or None),
                 latitudDestino=(float(row["latituddestino"]) if row.get("latituddestino") is not None else None),
                 longitudDestino=(float(row["longituddestino"]) if row.get("longituddestino") is not None else None),
@@ -1071,13 +1282,17 @@ def _domicilio_contadores(
     fecha_desde: datetime,
     fecha_hasta: datetime,
 ) -> DomicilioContadoresResponse:
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
     base = (
         db.query(entrega_actual)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
+        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .filter(
             entrega_actual.empresaID == int(empresa_id),
+            Pedido.empresaID == int(empresa_id),
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
             func.coalesce(
                 entrega_actual.reprogramadaPara,
                 entrega_actual.fechaEntregaProgramada,
@@ -1086,7 +1301,7 @@ def _domicilio_contadores(
         )
     )
     if sucursal_id is not None:
-        base = base.filter(entrega_actual.sucursalID == int(sucursal_id))
+        base = base.filter(func.coalesce(entrega_actual.sucursalID, Pedido.sucursalID) == int(sucursal_id))
 
     assigned_states = {
         "asignados": domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO),
@@ -1112,11 +1327,410 @@ def _domicilio_contadores(
     )
 
 
+def _metricas_base_params(
+    empresa_id: int,
+    sucursal_id: int | None,
+    fecha_desde: date,
+    fecha_hasta: date,
+    domiciliario_id: int | None = None,
+    estado_para_entrega: int = 4,
+) -> dict:
+    return {
+        "empresa_id": int(empresa_id),
+        "sucursal_id": (int(sucursal_id) if sucursal_id is not None else None),
+        "fecha_desde": datetime.combine(fecha_desde, datetime.min.time()),
+        "fecha_hasta": datetime.combine(fecha_hasta + timedelta(days=1), datetime.min.time()),
+        "domiciliario_id": (int(domiciliario_id) if domiciliario_id is not None else None),
+        "estado_para_entrega": int(estado_para_entrega),
+    }
+
+
+def _metricas_where_sql() -> str:
+    return f"""
+        e.empresa_id = :empresa_id
+        AND (:sucursal_id IS NULL OR COALESCE(e.sucursalid, p.sucursal_id) = :sucursal_id)
+        AND (:domiciliario_id IS NULL OR e.domiciliarioid = :domiciliario_id)
+        AND upper(COALESCE(ep.nombre_estado, '')) <> 'CREADO'
+        AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
+        AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
+        {_pedido_producciones_para_entrega_sql("p")}
+    """
+
+
+def _metricas_select_sql(group_expr: str, extra_select: str = "") -> str:
+    return f"""
+        SELECT
+            {group_expr} AS grupo,
+            {extra_select}
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE ee.codigo = 'pendiente')::int AS pendientes,
+            COUNT(*) FILTER (WHERE ee.codigo = 'asignado')::int AS asignados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'en_ruta')::int AS en_ruta,
+            COUNT(*) FILTER (WHERE ee.codigo = 'entregado')::int AS entregados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'no_entregado')::int AS no_entregados,
+            COUNT(*) FILTER (WHERE ee.codigo = 'cancelado')::int AS cancelados,
+            COUNT(*) FILTER (WHERE NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL)::int AS novedades,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE ee.codigo = 'entregado') / NULLIF(COUNT(*), 0),
+                2
+            )::float AS tasa_entrega,
+            ROUND(
+                AVG(EXTRACT(EPOCH FROM (e.fechaentrega - e.fechaasignacion)) / 60.0)
+                FILTER (WHERE ee.codigo = 'entregado' AND e.fechaentrega IS NOT NULL AND e.fechaasignacion IS NOT NULL),
+                2
+            )::float AS tiempo_promedio_entrega_min,
+            ROUND(SUM(COALESCE(p.costo_domicilio, b.costo_domicilio, 0)), 2)::float AS costo_domicilio_total,
+            ROUND(AVG(COALESCE(p.costo_domicilio, b.costo_domicilio, 0)), 2)::float AS costo_domicilio_promedio
+        FROM petalops.entrega e
+        JOIN petalops.pedido p
+          ON p.id_pedido = e.pedido_id
+         AND p.empresa_id = e.empresa_id
+        LEFT JOIN petalops.estado_entrega ee
+          ON ee.id_estado_entrega = e.estadoentregaid
+        LEFT JOIN petalops.estado_pedido ep
+          ON ep.id_estado_pedido = p.estado_pedido_id
+        LEFT JOIN petalops.empleado emp
+          ON emp.id_empleado = e.domiciliarioid
+         AND emp.empresa_id = e.empresa_id
+        LEFT JOIN petalops.barrio b
+          ON b.id_barrio = e.barrioid
+         AND b.empresa_id = e.empresa_id
+        WHERE {_metricas_where_sql()}
+        GROUP BY {group_expr}
+    """
+
+
+def _metricas_item(row, *, group_by: str) -> DomicilioMetricasItem:
+    data = dict(row)
+    grupo = str(data.get("grupo") or "Sin dato")
+    if group_by == "domiciliario" and data.get("domiciliario"):
+        grupo = str(data.get("domiciliario"))
+    if group_by == "barrio" and data.get("barrio"):
+        grupo = str(data.get("barrio"))
+    if group_by == "zona" and data.get("zona"):
+        grupo = str(data.get("zona"))
+    return DomicilioMetricasItem(
+        grupo=grupo,
+        periodo=str(data.get("periodo")) if data.get("periodo") is not None else (grupo if group_by in {"anio", "mes", "dia"} else None),
+        domiciliarioID=(int(data["domiciliario_id"]) if data.get("domiciliario_id") is not None else None),
+        domiciliario=data.get("domiciliario"),
+        domiciliarioImagenUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
+        fotoUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
+        imageUrl=(str(data.get("domiciliario_imagen_url")) if data.get("domiciliario_imagen_url") else None),
+        estadoEntrega=data.get("estado_entrega"),
+        estadoPedido=data.get("estado_pedido"),
+        novedad=data.get("novedad"),
+        barrioID=(int(data["barrio_id"]) if data.get("barrio_id") is not None else None),
+        barrio=data.get("barrio"),
+        zonaID=(int(data["zona_id"]) if data.get("zona_id") is not None else None),
+        zona=data.get("zona"),
+        total=int(data.get("total") or 0),
+        pendientes=int(data.get("pendientes") or 0),
+        asignados=int(data.get("asignados") or 0),
+        enRuta=int(data.get("en_ruta") or 0),
+        entregados=int(data.get("entregados") or 0),
+        noEntregados=int(data.get("no_entregados") or 0),
+        cancelados=int(data.get("cancelados") or 0),
+        novedades=int(data.get("novedades") or 0),
+        tasaEntrega=float(data.get("tasa_entrega") or 0),
+        tiempoPromedioEntregaMin=(float(data["tiempo_promedio_entrega_min"]) if data.get("tiempo_promedio_entrega_min") is not None else None),
+        costoDomicilioTotal=float(data.get("costo_domicilio_total") or 0),
+        costoDomicilioPromedio=float(data.get("costo_domicilio_promedio") or 0),
+    )
+
+
+def _metricas_rows(
+    db: Session,
+    params: dict,
+    group_by: str,
+) -> list[DomicilioMetricasItem]:
+    group_specs = {
+        "anio": (
+            "to_char(date_trunc('year', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY')",
+            "to_char(date_trunc('year', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY') AS periodo, ",
+            "grupo ASC",
+        ),
+        "mes": (
+            "to_char(date_trunc('month', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM')",
+            "to_char(date_trunc('month', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM') AS periodo, ",
+            "grupo ASC",
+        ),
+        "dia": (
+            "to_char(date_trunc('day', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM-DD')",
+            "to_char(date_trunc('day', COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat)), 'YYYY-MM-DD') AS periodo, ",
+            "grupo ASC",
+        ),
+        "domiciliario": (
+            "COALESCE(e.domiciliarioid::text, 'sin_domiciliario')",
+            "MIN(e.domiciliarioid) AS domiciliario_id, COALESCE(MAX(emp.nombre_empleado), 'Sin domiciliario') AS domiciliario, MAX(emp.foto_url) AS domiciliario_imagen_url, ",
+            "total DESC, grupo ASC",
+        ),
+        "estadoEntrega": (
+            "COALESCE(ee.nombre, ee.codigo, 'Sin estado')",
+            "COALESCE(ee.nombre, ee.codigo, 'Sin estado') AS estado_entrega, ",
+            "total DESC, grupo ASC",
+        ),
+        "estadoPedido": (
+            "COALESCE(ep.nombre_estado, 'Sin estado')",
+            "COALESCE(ep.nombre_estado, 'Sin estado') AS estado_pedido, ",
+            "total DESC, grupo ASC",
+        ),
+        "novedad": (
+            "COALESCE(NULLIF(TRIM(e.motivonoentregado), ''), 'Sin novedad')",
+            "COALESCE(NULLIF(TRIM(e.motivonoentregado), ''), 'Sin novedad') AS novedad, ",
+            "total DESC, grupo ASC",
+        ),
+        "barrio": (
+            "COALESCE(e.barrioid::text, LOWER(COALESCE(e.barrionombre, b.nombre_barrio, 'sin_barrio')))",
+            "MIN(e.barrioid) AS barrio_id, COALESCE(MAX(e.barrionombre), MAX(b.nombre_barrio), 'Sin barrio') AS barrio, ",
+            "total DESC, grupo ASC",
+        ),
+        "zona": (
+            "COALESCE(b.zona_id::text, 'sin_zona')",
+            "MIN(b.zona_id) AS zona_id, CASE WHEN MIN(b.zona_id) IS NULL THEN 'Sin zona' ELSE CONCAT('Zona ', MIN(b.zona_id)) END AS zona, ",
+            "total DESC, grupo ASC",
+        ),
+    }
+    group_expr, extra_select, order_by = group_specs[group_by]
+    rows = db.execute(
+        text(f"{_metricas_select_sql(group_expr, extra_select)} ORDER BY {order_by}"),
+        params,
+    ).mappings().all()
+    return [_metricas_item(row, group_by=group_by) for row in rows]
+
+
+def _metricas_resumen(db: Session, params: dict) -> DomicilioMetricasResumen:
+    row = db.execute(
+        text(
+            f"""
+            SELECT *
+            FROM (
+                {_metricas_select_sql("1", "")}
+            ) s
+            """
+        ),
+        params,
+    ).mappings().first()
+    item = _metricas_item(row or {}, group_by="total")
+    return DomicilioMetricasResumen(
+        total=item.total,
+        pendientes=item.pendientes,
+        asignados=item.asignados,
+        enRuta=item.enRuta,
+        entregados=item.entregados,
+        noEntregados=item.noEntregados,
+        cancelados=item.cancelados,
+        novedades=item.novedades,
+        tasaEntrega=item.tasaEntrega,
+        tiempoPromedioEntregaMin=item.tiempoPromedioEntregaMin,
+        costoDomicilioTotal=item.costoDomicilioTotal,
+        costoDomicilioPromedio=item.costoDomicilioPromedio,
+    )
+
+
+def _metricas_novedades_detalle(db: Session, params: dict) -> list[DomicilioMetricasNovedadDetalle]:
+    rows = db.execute(
+        text(
+            f"""
+            SELECT
+                e.id_entrega,
+                e.pedido_id,
+                p.numero_pedido,
+                p.codigo_pedido,
+                c.nombre_completo AS cliente,
+                e.destinatario,
+                e.telefonodestino,
+                e.direccion,
+                e.barrioid AS barrio_id,
+                COALESCE(e.barrionombre, b.nombre_barrio) AS barrio,
+                b.zona_id,
+                CASE WHEN b.zona_id IS NULL THEN NULL ELSE CONCAT('Zona ', b.zona_id) END AS zona,
+                e.domiciliarioid AS domiciliario_id,
+                emp.nombre_empleado AS domiciliario,
+                COALESCE(ee.nombre, ee.codigo) AS estado_entrega,
+                ep.nombre_estado AS estado_pedido,
+                TRIM(e.motivonoentregado) AS novedad,
+                e.intentonumero,
+                e.fechaentregaprogramada,
+                e.fechaentrega,
+                e.reprogramadapara
+            FROM petalops.entrega e
+            JOIN petalops.pedido p
+              ON p.id_pedido = e.pedido_id
+             AND p.empresa_id = e.empresa_id
+            LEFT JOIN petalops.cliente c
+              ON c.cliente_id = p.cliente_id
+             AND c.empresa_id = p.empresa_id
+            LEFT JOIN petalops.estado_entrega ee
+              ON ee.id_estado_entrega = e.estadoentregaid
+            LEFT JOIN petalops.estado_pedido ep
+              ON ep.id_estado_pedido = p.estado_pedido_id
+            LEFT JOIN petalops.empleado emp
+              ON emp.id_empleado = e.domiciliarioid
+             AND emp.empresa_id = e.empresa_id
+            LEFT JOIN petalops.barrio b
+              ON b.id_barrio = e.barrioid
+             AND b.empresa_id = e.empresa_id
+            WHERE {_metricas_where_sql()}
+              AND NULLIF(TRIM(COALESCE(e.motivonoentregado, '')), '') IS NOT NULL
+            ORDER BY
+                COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) DESC,
+                e.id_entrega DESC
+            """
+        ),
+        params,
+    ).mappings().all()
+
+    detalles: list[DomicilioMetricasNovedadDetalle] = []
+    for row in rows:
+        data = dict(row)
+        codigo_pedido = str(data["codigo_pedido"]).strip() if data.get("codigo_pedido") else None
+        numero_pedido_base = str(data.get("numero_pedido") or data.get("pedido_id"))
+        numero_pedido = numero_pedido_base if int(params.get("empresa_id") or 0) == 3 else (codigo_pedido or numero_pedido_base)
+        detalles.append(
+            DomicilioMetricasNovedadDetalle(
+                idEntrega=int(data["id_entrega"]),
+                pedidoID=int(data["pedido_id"]),
+                numeroPedido=numero_pedido,
+                codigoPedido=codigo_pedido,
+                cliente=(str(data.get("cliente")).strip() if data.get("cliente") else None),
+                destinatario=(str(data.get("destinatario")).strip() if data.get("destinatario") else None),
+                telefonoDestino=(str(data.get("telefonodestino")).strip() if data.get("telefonodestino") else None),
+                direccion=(str(data.get("direccion")).strip() if data.get("direccion") else None),
+                barrioID=(int(data["barrio_id"]) if data.get("barrio_id") is not None else None),
+                barrio=(str(data.get("barrio")).strip() if data.get("barrio") else None),
+                zonaID=(int(data["zona_id"]) if data.get("zona_id") is not None else None),
+                zona=(str(data.get("zona")).strip() if data.get("zona") else None),
+                domiciliarioID=(int(data["domiciliario_id"]) if data.get("domiciliario_id") is not None else None),
+                domiciliario=(str(data.get("domiciliario")).strip() if data.get("domiciliario") else None),
+                estadoEntrega=(str(data.get("estado_entrega")).strip() if data.get("estado_entrega") else None),
+                estadoPedido=(str(data.get("estado_pedido")).strip() if data.get("estado_pedido") else None),
+                novedad=str(data.get("novedad") or "").strip(),
+                intentoNumero=int(data.get("intentonumero") or 1),
+                fechaEntregaProgramada=data.get("fechaentregaprogramada"),
+                fechaEntrega=data.get("fechaentrega"),
+                reprogramadaPara=data.get("reprogramadapara"),
+            )
+        )
+    return detalles
+
+
+def _domiciliario_estado(row: Domiciliario) -> str:
+    estado = str(getattr(row, "estado", "") or "").strip()
+    if estado:
+        return estado
+    return "Activo" if bool(row.activo) else "Inactivo"
+
+
+def _domiciliario_item(row: Domiciliario, pedidos_activos: int = 0) -> DomiciliarioItem:
+    return DomiciliarioItem(
+        idDomiciliario=int(row.idDomiciliario),
+        usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
+        login=(str(row.usuario).strip() if getattr(row, "usuario", None) else None),
+        nombre=str(row.nombre or ""),
+        telefono=(str(row.telefono).strip() if getattr(row, "telefono", None) else None),
+        tipo=(str(row.tipo).strip() if getattr(row, "tipo", None) else "Interno"),
+        estado=_domiciliario_estado(row),
+        vehiculo=(str(row.vehiculo).strip() if getattr(row, "vehiculo", None) else None),
+        placa=(str(row.placa).strip() if getattr(row, "placa", None) else None),
+        detalleVehiculo=(str(row.detalleVehiculo).strip() if getattr(row, "detalleVehiculo", None) else None),
+        pedidosActivos=int(pedidos_activos),
+        activo=bool(row.activo),
+    )
+
+
+def _assert_admin_can_manage_domiciliarios(auth):
+    if not _actor_can_override_delivery(auth):
+        raise _err(
+            "DOMICILIARIO_ADMIN_REQUIRED",
+            "Solo un administrador puede editar domiciliarios",
+            status_code=403,
+        )
+
+
+def _normalize_login_part(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", ascii_value.lower())
+
+
+def _base_login_from_name(nombre: str) -> str:
+    parts = [_normalize_login_part(part) for part in str(nombre or "").strip().split()]
+    parts = [part for part in parts if part]
+    if len(parts) >= 2:
+        return f"{parts[0][0]}{parts[1]}"[:70]
+    if parts:
+        return parts[0][:70]
+    return "domiciliario"
+
+
+def _default_domiciliario_password(nombre: str) -> str:
+    first_name = str(nombre or "").strip().split()[0]
+    normalized = unicodedata.normalize("NFKD", first_name)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    clean = re.sub(r"[^A-Za-z0-9]+", "", ascii_value)
+    if not clean:
+        clean = "Domiciliario"
+    return f"{clean[:1].upper()}{clean[1:].lower()}123"
+
+
+def _next_unique_domiciliario_login(db: Session, empresa_id: int, nombre: str) -> str:
+    base = _base_login_from_name(nombre)
+    login = base
+    suffix = 1
+    while True:
+        existing_user = (
+            db.query(Usuario.idusuario)
+            .filter(func.lower(Usuario.login) == login.lower())
+            .first()
+        )
+        existing_employee = (
+            db.query(Domiciliario.idDomiciliario)
+            .filter(
+                Domiciliario.empresaID == int(empresa_id),
+                func.lower(func.coalesce(Domiciliario.usuario, "")) == login.lower(),
+            )
+            .first()
+        )
+        if not existing_user and not existing_employee:
+            return login
+        suffix += 1
+        login = f"{base}{suffix}"
+
+
+def _validate_domiciliario_estado(raw_estado: str | None, activo: bool | None = None) -> tuple[str, int]:
+    estado = str(raw_estado or "").strip().title()
+    if not estado:
+        estado = "Activo" if activo is not False else "Inactivo"
+    if estado not in {"Activo", "Inactivo", "Eliminado"}:
+        raise _err("DOMICILIARIO_ESTADO_INVALID", "Estado debe ser Activo, Inactivo o Eliminado", status_code=400)
+    if activo is not None:
+        return ("Activo" if activo else "Inactivo") if raw_estado is None else estado, (1 if activo else 0)
+    return estado, (1 if estado == "Activo" else 0)
+
+
+def _resolve_domiciliario_role(db: Session, empresa_id: int) -> Rol:
+    rol = (
+        db.query(Rol)
+        .filter(Rol.empresaID == int(empresa_id), func.lower(Rol.nombreRol) == "domiciliario")
+        .first()
+    )
+    if rol:
+        return rol
+
+    rol = Rol(empresaID=int(empresa_id), nombreRol="Domiciliario")
+    db.add(rol)
+    db.flush()
+    return rol
+
+
 @router.get("/domiciliarios", response_model=DomiciliarioListResponse)
 def listar_domiciliarios(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     solo_activos: bool = Query(True, alias="soloActivos"),
+    estado: str | None = Query(None),
+    search_term: str | None = Query(None, alias="q"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -1125,21 +1739,283 @@ def listar_domiciliarios(
     q = q.filter(func.upper(Domiciliario.cargo) == "DOMICILIARIO")
     if sucursal_id is not None:
         q = q.filter(Domiciliario.sucursalID == int(sucursal_id))
-    if solo_activos:
+
+    estado_filter = str(estado or "").strip().lower()
+    if solo_activos and not estado_filter:
         q = q.filter(_activo_truthy(Domiciliario.activo))
+        q = q.filter(func.lower(func.coalesce(Domiciliario.estado, "Activo")) != "eliminado")
+
+    if estado_filter and estado_filter not in {"todos", "todos los estados"}:
+        if estado_filter == "activo":
+            q = q.filter(_activo_truthy(Domiciliario.activo))
+            q = q.filter(func.lower(func.coalesce(Domiciliario.estado, "Activo")) != "eliminado")
+        elif estado_filter == "inactivo":
+            q = q.filter(or_(Domiciliario.activo == 0, func.lower(Domiciliario.estado) == "inactivo"))
+        elif estado_filter == "eliminado":
+            q = q.filter(func.lower(Domiciliario.estado) == "eliminado")
+        else:
+            raise _err("DOMICILIARIO_ESTADO_FILTER_INVALID", "Filtro de estado invalido", status_code=400)
+
+    search = str(search_term or "").strip()
+    if search:
+        pattern = f"%{search}%"
+        q = q.filter(
+            or_(
+                cast(Domiciliario.idDomiciliario, String).ilike(pattern),
+                Domiciliario.nombre.ilike(pattern),
+                Domiciliario.telefono.ilike(pattern),
+                Domiciliario.tipo.ilike(pattern),
+                Domiciliario.vehiculo.ilike(pattern),
+            )
+        )
 
     rows = q.order_by(Domiciliario.nombre.asc()).all()
     return DomiciliarioListResponse(
         items=[
-            DomiciliarioItem(
-                idDomiciliario=int(row.idDomiciliario),
-                usuarioID=(int(row.usuarioID) if getattr(row, "usuarioID", None) is not None else None),
-                nombre=str(row.nombre or ""),
-                telefono=None,
-                activo=bool(row.activo),
+            _domiciliario_item(
+                row,
+                domicilio_service.count_entregas_activas(
+                    db=db,
+                    empresa_id=int(empresa_id),
+                    sucursal_id=(int(row.sucursalID) if row.sucursalID is not None else None),
+                    domiciliario_id=int(row.idDomiciliario),
+                ),
             )
             for row in rows
         ]
+    )
+
+
+@router.post(
+    "/domiciliarios",
+    response_model=DomiciliarioCreateResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def crear_domiciliario(
+    payload: DomiciliarioCreateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    nombre = payload.nombre.strip()
+    if not nombre:
+        raise _err("DOMICILIARIO_NOMBRE_INVALID", "Nombre de domiciliario invalido", status_code=400)
+
+    sucursal_id = int(payload.sucursalID if payload.sucursalID is not None else (auth.sucursalID or 0))
+    if not sucursal_id:
+        raise _err("DOMICILIARIO_SUCURSAL_REQUIRED", "Sucursal requerida para crear domiciliario", status_code=400)
+
+    sucursal = (
+        db.query(Sucursal)
+        .filter(Sucursal.idSucursal == int(sucursal_id), Sucursal.empresaID == int(empresa_id))
+        .first()
+    )
+    if not sucursal:
+        raise _err("DOMICILIARIO_SUCURSAL_INVALID", "Sucursal invalida para la empresa", status_code=400)
+
+    estado, activo_flag = _validate_domiciliario_estado(payload.estado, payload.activo)
+    login = _next_unique_domiciliario_login(db, int(empresa_id), nombre)
+    email = f"{login}@petalops.local"
+    password_temporal = _default_domiciliario_password(nombre)
+    password_hash = pwd_context.hash(password_temporal)
+    rol = _resolve_domiciliario_role(db, int(empresa_id))
+
+    usuario = Usuario(
+        empresaID=int(empresa_id),
+        sucursalID=int(sucursal_id),
+        nombre=nombre,
+        login=login,
+        email=email,
+        passwordHash=password_hash,
+        rolID=int(rol.idRol),
+        estado=estado,
+        esSuperadmin=False,
+        createdAt=datetime.now(timezone.utc),
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db.add(usuario)
+    db.flush()
+
+    domiciliario = Domiciliario(
+        empresaID=int(empresa_id),
+        sucursalID=int(sucursal_id),
+        usuarioID=int(usuario.idusuario),
+        nombre=nombre,
+        cargo="Domiciliario",
+        usuario=login,
+        email=email,
+        telefono=(payload.telefono.strip() if payload.telefono else None),
+        tipo=(payload.tipo.strip() if payload.tipo else "Interno"),
+        estado=estado,
+        vehiculo=(payload.vehiculo.strip() if payload.vehiculo else None),
+        placa=(payload.placa.strip() if payload.placa else None),
+        detalleVehiculo=(payload.detalleVehiculo.strip() if payload.detalleVehiculo else None),
+        activo=activo_flag,
+        createdAt=datetime.now(timezone.utc),
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db.add(domiciliario)
+    db.commit()
+    db.refresh(domiciliario)
+
+    item = _domiciliario_item(domiciliario, pedidos_activos=0)
+    return DomiciliarioCreateResponse(**item.model_dump(), passwordTemporal=password_temporal)
+
+
+@router.put(
+    "/domiciliarios/{domiciliario_id}",
+    response_model=DomiciliarioItem,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def actualizar_domiciliario(
+    domiciliario_id: int,
+    payload: DomiciliarioUpdateRequest,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    domiciliario = (
+        db.query(Domiciliario)
+        .filter(
+            Domiciliario.idDomiciliario == int(domiciliario_id),
+            Domiciliario.empresaID == int(empresa_id),
+            func.upper(Domiciliario.cargo) == "DOMICILIARIO",
+        )
+        .first()
+    )
+    if not domiciliario:
+        raise _err("DOMICILIARIO_NOT_FOUND", "Domiciliario no encontrado", status_code=404)
+
+    has_changes = False
+
+    if payload.nombre is not None:
+        nombre = payload.nombre.strip()
+        if not nombre:
+            raise _err("DOMICILIARIO_NOMBRE_INVALID", "Nombre de domiciliario invalido", status_code=400)
+        domiciliario.nombre = nombre
+        has_changes = True
+
+    if payload.sucursalID is not None:
+        sucursal = (
+            db.query(Sucursal)
+            .filter(
+                Sucursal.idSucursal == int(payload.sucursalID),
+                Sucursal.empresaID == int(empresa_id),
+            )
+            .first()
+        )
+        if not sucursal:
+            raise _err("DOMICILIARIO_SUCURSAL_INVALID", "Sucursal invalida para la empresa", status_code=400)
+        domiciliario.sucursalID = int(payload.sucursalID)
+        has_changes = True
+
+    if payload.telefono is not None:
+        telefono = payload.telefono.strip()
+        domiciliario.telefono = telefono or None
+        has_changes = True
+
+    if payload.tipo is not None:
+        tipo = payload.tipo.strip()
+        domiciliario.tipo = tipo or None
+        has_changes = True
+
+    if payload.estado is not None:
+        estado, activo_flag = _validate_domiciliario_estado(payload.estado)
+        domiciliario.estado = estado
+        domiciliario.activo = activo_flag
+        has_changes = True
+
+    if payload.vehiculo is not None:
+        vehiculo = payload.vehiculo.strip()
+        domiciliario.vehiculo = vehiculo or None
+        has_changes = True
+
+    if payload.placa is not None:
+        placa = payload.placa.strip()
+        domiciliario.placa = placa or None
+        has_changes = True
+
+    if payload.detalleVehiculo is not None:
+        detalle_vehiculo = payload.detalleVehiculo.strip()
+        domiciliario.detalleVehiculo = detalle_vehiculo or None
+        has_changes = True
+
+    if payload.activo is not None:
+        domiciliario.activo = 1 if payload.activo else 0
+        if payload.estado is None:
+            domiciliario.estado = "Activo" if payload.activo else "Inactivo"
+        has_changes = True
+
+    if not has_changes:
+        raise _err("DOMICILIARIO_UPDATE_EMPTY", "No hay campos para actualizar", status_code=400)
+
+    domiciliario.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(domiciliario)
+
+    pedidos_activos = domicilio_service.count_entregas_activas(
+        db=db,
+        empresa_id=int(empresa_id),
+        sucursal_id=(int(domiciliario.sucursalID) if domiciliario.sucursalID is not None else None),
+        domiciliario_id=int(domiciliario.idDomiciliario),
+    )
+    return _domiciliario_item(domiciliario, pedidos_activos=pedidos_activos)
+
+
+@router.delete(
+    "/domiciliarios/{domiciliario_id}",
+    response_model=DomiciliarioDeleteResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def eliminar_domiciliario(
+    domiciliario_id: int,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    _assert_admin_can_manage_domiciliarios(auth)
+
+    domiciliario = (
+        db.query(Domiciliario)
+        .filter(
+            Domiciliario.idDomiciliario == int(domiciliario_id),
+            Domiciliario.empresaID == int(empresa_id),
+            func.upper(Domiciliario.cargo) == "DOMICILIARIO",
+        )
+        .first()
+    )
+    if not domiciliario:
+        raise _err("DOMICILIARIO_NOT_FOUND", "Domiciliario no encontrado", status_code=404)
+
+    pedidos_activos = domicilio_service.count_entregas_activas(
+        db=db,
+        empresa_id=int(empresa_id),
+        sucursal_id=(int(domiciliario.sucursalID) if domiciliario.sucursalID is not None else None),
+        domiciliario_id=int(domiciliario.idDomiciliario),
+    )
+    if pedidos_activos > 0:
+        raise _err(
+            "DOMICILIARIO_DELETE_HAS_ACTIVE_ORDERS",
+            "No se puede eliminar un domiciliario con pedidos activos",
+            status_code=409,
+        )
+
+    domiciliario.activo = 0
+    domiciliario.estado = "Eliminado"
+    domiciliario.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+
+    return DomiciliarioDeleteResponse(
+        status="ok",
+        idDomiciliario=int(domiciliario.idDomiciliario),
+        estado="Eliminado",
     )
 
 
@@ -1153,6 +2029,7 @@ def listar_admin(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
 
@@ -1161,9 +2038,14 @@ def listar_admin(
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
         .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
         .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
         .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
-        .filter(entrega_actual.empresaID == int(empresa_id))
+        .filter(
+            entrega_actual.empresaID == int(empresa_id),
+            func.upper(func.coalesce(EstadoPedido.nombreEstado, "")) != "CREADO",
+            _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
+        )
     )
 
     q = _with_location_joins(q, entrega_actual, Pedido)
@@ -1219,6 +2101,8 @@ def listar_admin(
                 domiciliarioID=(int(entrega.domiciliarioID) if entrega.domiciliarioID else None),
                 domiciliario=(str(domiciliario.nombre or "") if domiciliario else None),
                 estado=estado,
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 intentoNumero=max(int(entrega.intentoNumero or 1), 1),
                 tiempoRestanteHoras=domicilio_service.tiempo_restante_horas(entrega),
                 prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
@@ -1252,6 +2136,8 @@ def asignar_domiciliario(
     assert_same_empresa(auth, int(entrega.empresaID))
 
     estado_actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    accion_auditoria = "DESASIGNAR_DOMICILIARIO"
+    estado_nuevo = ESTADO_PENDIENTE
     if payload.domiciliarioID is None:
         domicilio_service.assert_transition_allowed_for_empresa(
             db=db,
@@ -1294,8 +2180,19 @@ def asignar_domiciliario(
         entrega.domiciliarioID = int(domiciliario.idDomiciliario)
         entrega.fechaAsignacion = datetime.now(timezone.utc)
         entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
+        accion_auditoria = "ASIGNAR_DOMICILIARIO"
+        estado_nuevo = ESTADO_ASIGNADO
 
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion=accion_auditoria,
+        estado_anterior=estado_actual,
+        estado_nuevo=estado_nuevo,
+        extra={"domiciliarioID": int(entrega.domiciliarioID) if entrega.domiciliarioID is not None else None},
+    )
     db.commit()
 
     return DomicilioActionResponse(
@@ -1345,6 +2242,7 @@ def tomar_entrega(
             current=actual,
             target=ESTADO_ASIGNADO,
         )
+        assigned_at = datetime.now(timezone.utc)
         updated_rows = (
             db.query(Entrega)
             .filter(
@@ -1356,8 +2254,8 @@ def tomar_entrega(
             .update(
                 {
                     Entrega.domiciliarioID: int(domiciliario_id),
-                    Entrega.fechaAsignacion: datetime.now(timezone.utc),
-                    Entrega.updatedAt: datetime.now(timezone.utc),
+                    Entrega.fechaAsignacion: assigned_at,
+                    Entrega.updatedAt: assigned_at,
                     Entrega.estadoEntregaID: domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO),
                 },
                 synchronize_session=False,
@@ -1370,6 +2268,19 @@ def tomar_entrega(
                 "La entrega ya fue tomada por otro domiciliario",
                 status_code=409,
             )
+        entrega.domiciliarioID = int(domiciliario_id)
+        entrega.fechaAsignacion = assigned_at
+        entrega.updatedAt = assigned_at
+        entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
+        _audit_domicilio_action(
+            db=db,
+            auth=auth,
+            entrega=entrega,
+            accion="AUTOASIGNACION",
+            estado_anterior=actual,
+            estado_nuevo=ESTADO_ASIGNADO,
+            extra={"domiciliarioID": int(domiciliario_id)},
+        )
         db.commit()
         return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ASIGNADO)
 
@@ -1385,6 +2296,16 @@ def tomar_entrega(
         previous=entrega,
         domiciliario_id=domiciliario_id,
         next_state=ESTADO_ASIGNADO,
+    )
+    db.flush()
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=next_entrega,
+        accion="REINTENTO_ASIGNADO",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_ASIGNADO,
+        extra={"entregaAnteriorID": int(entrega.idEntrega), "domiciliarioID": int(domiciliario_id)},
     )
     db.commit()
     return DomicilioActionResponse(status="ok", idEntrega=int(next_entrega.idEntrega), estado=ESTADO_ASIGNADO)
@@ -1418,6 +2339,15 @@ def devolver_entrega(
     entrega.fechaSalida = None
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="DEVOLUCION",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_PENDIENTE,
+        extra={"motivoPrevio": str(getattr(entrega, "motivoNoEntregado", None) or "").strip() or None},
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_PENDIENTE)
@@ -1452,9 +2382,99 @@ def marcar_en_ruta(
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA)
     entrega.fechaSalida = datetime.now(timezone.utc)
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="EN_RUTA",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_EN_RUTA,
+        extra={"fechaSalida": entrega.fechaSalida.isoformat() if entrega.fechaSalida else None},
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_EN_RUTA)
+
+
+def _marcar_entregado_impl(
+    entrega_id: int,
+    usuarioCambio: str,
+    firmaNombre: str | None,
+    firmaDocumento: str | None,
+    firmaImagenUrl: str | None,
+    evidenciaFotoUrl: str | None,
+    latitudEntrega: float | None,
+    longitudEntrega: float | None,
+    observaciones: str | None,
+    firmaImagen: UploadFile | None,
+    evidenciaFoto: UploadFile | None,
+    db: Session,
+    auth,
+    *,
+    accion_auditoria: str = "ENTREGADO",
+    requiere_novedad: bool = False,
+) -> DomicilioActionResponse:
+    entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
+    assert_same_empresa(auth, int(entrega.empresaID))
+    _assert_entrega_actor_scope(entrega, auth, db)
+
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if requiere_novedad and actual != ESTADO_NO_ENTREGADO:
+        raise _err(
+            "DOMICILIO_NOVEDAD_REQUIRED",
+            "Solo se pueden resolver novedades en entregas no entregadas",
+            status_code=400,
+        )
+    resuelve_novedad = actual == ESTADO_NO_ENTREGADO
+    if not (requiere_novedad and resuelve_novedad):
+        domicilio_service.assert_transition_allowed_for_empresa(
+            db=db,
+            empresa_id=int(entrega.empresaID),
+            current=actual,
+            target=ESTADO_ENTREGADO,
+        )
+    if not resuelve_novedad:
+        if latitudEntrega is None:
+            raise _err("DOMICILIO_LATITUD_REQUIRED", "latitudEntrega es requerida para marcar entregado", status_code=422)
+        if longitudEntrega is None:
+            raise _err("DOMICILIO_LONGITUD_REQUIRED", "longitudEntrega es requerida para marcar entregado", status_code=422)
+
+    entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ENTREGADO)
+    entrega.fechaEntrega = datetime.now(timezone.utc)
+    if str(firmaNombre or "").strip():
+        entrega.firmaNombre = str(firmaNombre).strip()
+    if str(firmaDocumento or "").strip():
+        entrega.firmaDocumento = str(firmaDocumento).strip()
+    if firmaImagen is not None:
+        entrega.firmaImagenUrl = _save_upload_file(firmaImagen)
+    elif firmaImagenUrl:
+        entrega.firmaImagenUrl = firmaImagenUrl.strip()
+    entrega.evidenciaFotoUrl = _save_upload_file(evidenciaFoto) or (evidenciaFotoUrl.strip() if evidenciaFotoUrl else None)
+    if latitudEntrega is not None:
+        entrega.latitudEntrega = latitudEntrega
+    if longitudEntrega is not None:
+        entrega.longitudEntrega = longitudEntrega
+    entrega.observaciones = (observaciones or "").strip() or entrega.observaciones
+    entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion=accion_auditoria,
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_ENTREGADO,
+        extra={
+            "usuarioCambio": str(usuarioCambio or "").strip(),
+            "firmaNombre": str(getattr(entrega, "firmaNombre", "") or "").strip() or None,
+            "firmaDocumento": str(getattr(entrega, "firmaDocumento", "") or "").strip() or None,
+            "evidenciaFotoUrl": entrega.evidenciaFotoUrl,
+            "observaciones": str(observaciones or "").strip() or None,
+            "resuelveNovedad": resuelve_novedad,
+        },
+    )
+    db.commit()
+
+    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ENTREGADO)
 
 
 @router.put(
@@ -1465,46 +2485,72 @@ def marcar_en_ruta(
 def marcar_entregado(
     entrega_id: int,
     usuarioCambio: str = Form(...),
-    firmaNombre: str = Form(...),
-    firmaDocumento: str = Form(...),
+    firmaNombre: str | None = Form(None),
+    firmaDocumento: str | None = Form(None),
     firmaImagenUrl: str | None = Form(None),
     evidenciaFotoUrl: str | None = Form(None),
-    latitudEntrega: float = Form(...),
-    longitudEntrega: float = Form(...),
+    latitudEntrega: float | None = Form(None),
+    longitudEntrega: float | None = Form(None),
     observaciones: str | None = Form(None),
     firmaImagen: UploadFile | None = File(None),
     evidenciaFoto: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
-    entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
-    assert_same_empresa(auth, int(entrega.empresaID))
-    _assert_entrega_actor_scope(entrega, auth, db)
-
-    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
-    domicilio_service.assert_transition_allowed_for_empresa(
+    return _marcar_entregado_impl(
+        entrega_id=entrega_id,
+        usuarioCambio=usuarioCambio,
+        firmaNombre=firmaNombre,
+        firmaDocumento=firmaDocumento,
+        firmaImagenUrl=firmaImagenUrl,
+        evidenciaFotoUrl=evidenciaFotoUrl,
+        latitudEntrega=latitudEntrega,
+        longitudEntrega=longitudEntrega,
+        observaciones=observaciones,
+        firmaImagen=firmaImagen,
+        evidenciaFoto=evidenciaFoto,
         db=db,
-        empresa_id=int(entrega.empresaID),
-        current=actual,
-        target=ESTADO_ENTREGADO,
+        auth=auth,
     )
 
-    entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ENTREGADO)
-    entrega.fechaEntrega = datetime.now(timezone.utc)
-    entrega.firmaNombre = firmaNombre.strip()
-    entrega.firmaDocumento = firmaDocumento.strip()
-    if firmaImagen is not None:
-        entrega.firmaImagenUrl = _save_upload_file(firmaImagen)
-    elif firmaImagenUrl:
-        entrega.firmaImagenUrl = firmaImagenUrl.strip()
-    entrega.evidenciaFotoUrl = _save_upload_file(evidenciaFoto) or (evidenciaFotoUrl.strip() if evidenciaFotoUrl else None)
-    entrega.latitudEntrega = latitudEntrega
-    entrega.longitudEntrega = longitudEntrega
-    entrega.observaciones = (observaciones or "").strip() or entrega.observaciones
-    entrega.updatedAt = datetime.now(timezone.utc)
-    db.commit()
 
-    return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ENTREGADO)
+@router.put(
+    "/{entrega_id}/resolver-novedad",
+    response_model=DomicilioActionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def resolver_novedad(
+    entrega_id: int,
+    usuarioCambio: str = Form(...),
+    observaciones: str | None = Form(None),
+    evidenciaFotoUrl: str | None = Form(None),
+    latitudEntrega: float | None = Form(None),
+    longitudEntrega: float | None = Form(None),
+    firmaNombre: str | None = Form(None),
+    firmaDocumento: str | None = Form(None),
+    firmaImagenUrl: str | None = Form(None),
+    firmaImagen: UploadFile | None = File(None),
+    evidenciaFoto: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    return _marcar_entregado_impl(
+        entrega_id=entrega_id,
+        usuarioCambio=usuarioCambio,
+        firmaNombre=firmaNombre,
+        firmaDocumento=firmaDocumento,
+        firmaImagenUrl=firmaImagenUrl,
+        evidenciaFotoUrl=evidenciaFotoUrl,
+        latitudEntrega=latitudEntrega,
+        longitudEntrega=longitudEntrega,
+        observaciones=observaciones,
+        firmaImagen=firmaImagen,
+        evidenciaFoto=evidenciaFoto,
+        db=db,
+        auth=auth,
+        accion_auditoria="RESOLVER_NOVEDAD",
+        requiere_novedad=True,
+    )
 
 
 @router.put(
@@ -1535,6 +2581,19 @@ def marcar_no_entregado(
     entrega.observaciones = (payload.observaciones or "").strip() or entrega.observaciones
     entrega.reprogramadaPara = payload.reprogramarPara
     entrega.updatedAt = datetime.now(timezone.utc)
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="NO_ENTREGADO",
+        estado_anterior=actual,
+        estado_nuevo=ESTADO_NO_ENTREGADO,
+        extra={
+            "motivo": entrega.motivoNoEntregado,
+            "observaciones": str(payload.observaciones or "").strip() or None,
+            "reprogramarPara": payload.reprogramarPara.isoformat() if payload.reprogramarPara else None,
+        },
+    )
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_NO_ENTREGADO)
@@ -1732,6 +2791,8 @@ def listar_pedidos_disponibles_api(
                 nombreZona=location["nombreZona"],
                 zona=location["zona"],
                 estado=_estado_api(entrega),
+                estadoProduccion=_estado_produccion_delivery(),
+                estado_produccion=_estado_produccion_delivery(),
                 prioridad=(str(produccion.prioridad or "") if produccion and produccion.prioridad else None),
                 latitudDestino=lat_destino,
                 longitudDestino=lng_destino,
@@ -1755,6 +2816,87 @@ def obtener_contadores_domicilio(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
     return _domicilio_contadores(db, empresa_id, sucursal_id, domiciliario_id, start, end)
+
+
+@router.get("/metricas", response_model=DomicilioMetricasResponse)
+def obtener_metricas_domicilios(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    anio: int | None = Query(None, alias="anio"),
+    mes: int | None = Query(None, ge=1, le=12),
+    dia: int | None = Query(None, ge=1, le=31),
+    domiciliario_id: int | None = Query(None, alias="domiciliarioID"),
+    agrupar_por: str = Query("mes", alias="agruparPor"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    allowed_group_by = {
+        "anio",
+        "mes",
+        "dia",
+        "domiciliario",
+        "estadoEntrega",
+        "estadoPedido",
+        "novedad",
+        "barrio",
+        "zona",
+    }
+    if agrupar_por not in allowed_group_by:
+        raise _err(
+            "DOMICILIO_METRICAS_GROUP_INVALID",
+            "agruparPor debe ser anio, mes, dia, domiciliario, estadoEntrega, estadoPedido, novedad, barrio o zona",
+            status_code=400,
+        )
+
+    if fecha_desde is None or fecha_hasta is None:
+        today = colombia_today()
+        target_year = int(anio or today.year)
+        if mes is not None and dia is not None:
+            fecha_desde = date(target_year, int(mes), int(dia))
+            fecha_hasta = fecha_desde
+        elif mes is not None:
+            fecha_desde = date(target_year, int(mes), 1)
+            next_month = date(target_year + (1 if int(mes) == 12 else 0), 1 if int(mes) == 12 else int(mes) + 1, 1)
+            fecha_hasta = next_month - timedelta(days=1)
+        else:
+            fecha_desde = date(target_year, 1, 1)
+            fecha_hasta = date(target_year, 12, 31)
+
+    if fecha_hasta < fecha_desde:
+        raise _err("DOMICILIO_METRICAS_RANGE_INVALID", "fechaHasta no puede ser menor que fechaDesde", status_code=400)
+
+    params = _metricas_base_params(
+        empresa_id=int(empresa_id),
+        sucursal_id=sucursal_id,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        domiciliario_id=domiciliario_id,
+        estado_para_entrega=produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA),
+    )
+    return DomicilioMetricasResponse(
+        empresaID=int(empresa_id),
+        sucursalID=(int(sucursal_id) if sucursal_id is not None else None),
+        fechaDesde=fecha_desde,
+        fechaHasta=fecha_hasta,
+        agruparPor=agrupar_por,
+        resumen=_metricas_resumen(db, params),
+        items=_metricas_rows(db, params, agrupar_por),
+        porDomiciliario=_metricas_rows(db, params, "domiciliario"),
+        porEstadoEntrega=_metricas_rows(db, params, "estadoEntrega"),
+        porEstadoPedido=_metricas_rows(db, params, "estadoPedido"),
+        porBarrio=_metricas_rows(db, params, "barrio"),
+        porZona=_metricas_rows(db, params, "zona"),
+        novedades=[
+            item
+            for item in _metricas_rows(db, params, "novedad")
+            if item.novedad
+        ],
+        detalleNovedades=_metricas_novedades_detalle(db, params),
+    )
 
 
 @router.post("/pedidos/{pedido_id}/asignar", response_model=PedidoAsignadoResponse)
@@ -2032,14 +3174,24 @@ def obtener_detalle_domicilio(
             )
         
         # Construir respuesta con formato correcto
-        numero_pedido_str = str(pedido.codigoPedido or pedido.numeroPedido or pedido.idPedido)
+        numero_pedido_base = str(pedido.numeroPedido or pedido.idPedido)
+        numero_pedido_str = (
+            numero_pedido_base
+            if int(pedido.empresaID) == 3
+            else str(pedido.codigoPedido or numero_pedido_base)
+        )
+        auditoria = _domicilio_auditoria(db, entrega)
+        novedad_summary = _novedad_audit_summary(auditoria, entrega)
         
         return DomicilioDetailResponse(
             idEntrega=int(entrega.idEntrega),
             numeroPedido=numero_pedido_str,
             cliente=cliente_nombre,
+            estado=domicilio_service.estado_norm(entrega.estadoEntregaID),
             items=items,
             customerMessage=(str(entrega.mensaje or "") or None),
+            auditoria=auditoria,
+            **novedad_summary,
         )
         
     except HTTPException:

@@ -20,6 +20,8 @@ class PermisoModuloItem(BaseModel):
 class AuthMeResponse(BaseModel):
     userID: int
     empresaID: int
+    empresaNombre: str | None = None
+    empresaSlug: str | None = None
     sucursalID: int | None = None
     planID: int | None = None
     rolID: int
@@ -57,6 +59,8 @@ class TokenPayload(BaseModel):
 class AuthContext(BaseModel):
     userID: int
     empresaID: int
+    empresaNombre: str | None = None
+    empresaSlug: str | None = None
     sucursalID: int | None = None
     rolID: int
     planID: int | None = None
@@ -89,6 +93,8 @@ class AuthContext(BaseModel):
         return {
             "userID": self.userID,
             "empresaID": self.empresaID,
+            "empresaNombre": self.empresaNombre,
+            "empresaSlug": self.empresaSlug,
             "sucursalID": self.sucursalID,
             "planID": self.planID,
             "rolID": self.rolID,
@@ -182,6 +188,7 @@ class UserDeleteResponse(BaseModel):
 class RoleOption(BaseModel):
     rolID: int
     nombreRol: str
+    modulosPermitidos: list[str] = []
 
 
 class RoleListResponse(BaseModel):
@@ -199,6 +206,7 @@ class SucursalListResponse(BaseModel):
 class EmpresaOption(BaseModel):
     empresaID: int
     nombre: str
+    empresaSlug: str | None = None
 
 
 class EmpresaListResponse(BaseModel):
@@ -209,6 +217,11 @@ class EmpresaCreateRequest(BaseModel):
     nombreComercial: str = Field(min_length=3, max_length=180)
     planID: int = 1
     estado: str = "Activo"
+    slug: str | None = Field(default=None, min_length=3, max_length=80)
+    adminLogin: str | None = Field(default=None, min_length=3, max_length=80)
+    adminPassword: str | None = Field(default=None, min_length=6, max_length=120)
+    adminEmail: str | None = None
+    sucursalNombre: str | None = Field(default=None, min_length=3, max_length=120)
 
 
 class EmpresaCreateResponse(BaseModel):
@@ -217,6 +230,8 @@ class EmpresaCreateResponse(BaseModel):
     nombre: str
     planID: int
     estado: str
+    sucursalID: int | None = None
+    adminUserID: int | None = None
 
 
 class EmpresaModuloItem(BaseModel):
@@ -232,6 +247,7 @@ class EmpresaModuloListResponse(BaseModel):
 class EmpresaModuloResumenItem(BaseModel):
     empresaID: int
     nombre: str
+    empresaSlug: str | None = None
     planID: int | None = None
     estado: str | None = None
     items: list[EmpresaModuloItem]

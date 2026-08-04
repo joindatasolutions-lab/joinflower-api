@@ -17,10 +17,12 @@ CROSS JOIN (
     VALUES
         (1, 2), -- Pendiente -> Asignado
         (1, 6), -- Pendiente -> Cancelado
+        (2, 1), -- Asignado -> Pendiente
         (2, 3), -- Asignado -> En ruta
         (2, 6), -- Asignado -> Cancelado
         (3, 4), -- En ruta -> Entregado
         (3, 5), -- En ruta -> No entregado
+        (5, 1), -- No entregado -> Pendiente
         (5, 2), -- No entregado -> Asignado
         (5, 6)  -- No entregado -> Cancelado
 ) AS t(estado_origen_id, estado_destino_id)

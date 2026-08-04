@@ -70,6 +70,64 @@ class PedidoCheckoutRequest(BaseModel):
     entrega: CheckoutEntregaInput
 
 
+class PedidoManualProductoItem(BaseModel):
+    productoID: Optional[int] = None
+    productoId: Optional[int] = None
+    cantidad: float = 1
+    productoPrecio: Optional[float] = None
+    precioUnitario: Optional[float] = None
+    productoObservaciones: Optional[str] = None
+    observaciones: Optional[str] = None
+
+
+class PedidoManualClienteInput(BaseModel):
+    clienteID: Optional[int] = None
+    clienteId: Optional[int] = None
+    tipoIdent: Optional[str] = None
+    identificacion: Optional[str] = None
+    indicativo: Optional[str] = None
+    nombreCompleto: Optional[str] = None
+    nombres: Optional[str] = None
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+
+
+class PedidoManualEntregaInput(BaseModel):
+    tipoEntrega: Optional[str] = None
+    destinatario: Optional[str] = None
+    destinatarioNombre: Optional[str] = None
+    telefonoDestino: Optional[str] = None
+    direccion: str
+    barrioID: Optional[int] = None
+    barrioId: Optional[int] = None
+    barrioNombre: Optional[str] = None
+    latitudDestino: Optional[float] = None
+    longitudDestino: Optional[float] = None
+    fechaEntrega: Optional[datetime | str] = None
+    horaEntrega: Optional[str] = None
+    rangoHora: Optional[str] = None
+    mensaje: Optional[str] = None
+    mensajeTarjeta: Optional[str] = None
+    firma: Optional[str] = None
+    observacionGeneral: Optional[str] = None
+
+
+class PedidoManualRequest(BaseModel):
+    empresaID: Optional[int] = None
+    empresaId: Optional[int] = None
+    sucursalID: Optional[int] = None
+    sucursalId: Optional[int] = None
+    productos: Optional[List[PedidoManualProductoItem]] = None
+    items: Optional[List[PedidoManualProductoItem]] = None
+    cliente: PedidoManualClienteInput
+    entrega: PedidoManualEntregaInput
+    domicilio: Optional[float] = None
+    domicilioOriginal: Optional[float] = None
+    descuentoDomicilio: Optional[float] = None
+    domicilioObsequiado: bool = False
+    omitirCostoDomicilio: bool = False
+
+
 class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
     numeroPedido: Optional[int] = None
@@ -78,6 +136,14 @@ class PedidoCheckoutResponse(BaseModel):
     cantidadPedidos: Optional[int] = None
     total: float
     estado: str
+
+
+class PedidoManualResponse(PedidoCheckoutResponse):
+    domicilioObsequiado: Optional[bool] = None
+    omitirCostoDomicilio: Optional[bool] = None
+    domicilio: Optional[float] = None
+    domicilioOriginal: Optional[float] = None
+    descuentoDomicilio: Optional[float] = None
 
 
 class PedidoListProducto(BaseModel):
@@ -119,12 +185,22 @@ class PedidoListItem(BaseModel):
     facturaImpresaAt: Optional[str] = None
 
 
+class PedidoListKpiSummary(BaseModel):
+    ventaHoy: float = 0
+    pedidosHoy: int = 0
+    aprobados: int = 0
+    pendientes: int = 0
+    cancelados: int = 0
+    sinImprimir: int = 0
+
+
 class PedidoListResponse(BaseModel):
     items: List[PedidoListItem]
     total: int
     page: int
     pageSize: int
     facturasPendientesImpresion: Optional[int] = None
+    kpis: Optional[PedidoListKpiSummary] = None
 
 
 class PedidoDetalleProducto(BaseModel):

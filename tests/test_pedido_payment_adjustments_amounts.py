@@ -5,6 +5,7 @@ from app.routers.pedido import (
     _extract_payment_adjustments,
     _flora_phase2_ready,
     _load_pago_resumen,
+    _manual_domicilio_amounts,
     _serialize_pago_metadata,
 )
 
@@ -81,6 +82,38 @@ def test_build_pedido_adjustments_uses_fixed_amount_discount_and_saldo_favor():
     assert ajustes["descuentoMonto"] == Decimal("5000.00")
     assert ajustes["saldoFavorMonto"] == Decimal("7000.00")
     assert ajustes["total"] == Decimal("112000.00")
+
+
+def test_manual_domicilio_amounts_omits_gifted_delivery():
+    amounts = _manual_domicilio_amounts(
+        domicilio=0,
+        domicilio_original=15000,
+        descuento_domicilio=15000,
+        domicilio_obsequiado=True,
+        omitir_costo_domicilio=True,
+        resolved_domicilio=Decimal("15000"),
+    )
+
+    assert amounts["cobrado"] == Decimal("0.00")
+    assert amounts["original"] == Decimal("15000.00")
+    assert amounts["descuento"] == Decimal("15000.00")
+    assert amounts["domicilioObsequiado"] is True
+    assert amounts["omitirCostoDomicilio"] is True
+
+
+def test_manual_domicilio_amounts_charges_delivery_when_not_omitted():
+    amounts = _manual_domicilio_amounts(
+        domicilio=None,
+        domicilio_original=None,
+        descuento_domicilio=None,
+        domicilio_obsequiado=False,
+        omitir_costo_domicilio=False,
+        resolved_domicilio=Decimal("12000"),
+    )
+
+    assert amounts["cobrado"] == Decimal("12000.00")
+    assert amounts["original"] == Decimal("12000.00")
+    assert amounts["descuento"] == Decimal("0.00")
 
 
 def test_payment_metadata_serializes_discount_notes_balance_and_invoice_state():
