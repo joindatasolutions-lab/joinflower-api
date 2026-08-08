@@ -42,6 +42,10 @@ class LoginResponse(BaseModel):
     user: AuthMeResponse
 
 
+class AdminProductosSessionResponse(BaseModel):
+    url: str
+
+
 class ImpersonateRequest(BaseModel):
     empresaID: int
     sucursalID: int | None = None

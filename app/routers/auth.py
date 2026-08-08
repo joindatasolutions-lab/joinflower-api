@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from jose import JWTError, jwt
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -42,6 +43,7 @@ from app.models.usuario import Usuario
 from app.services.cache import cache_ttl, get_cache, set_cache
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.schemas.auth import (
+    AdminProductosSessionResponse,
     AuthMeResponse,
     EmpresaCreateRequest,
     EmpresaCreateResponse,
@@ -72,6 +74,11 @@ from app.schemas.auth import (
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 auth_logger = get_logger("auth")
+
+ADMIN_PRODUCTOS_DEFAULT_URL = "https://adminpetalops.joindata.com.co/"
+ADMIN_PRODUCTOS_COOKIE_NAME = os.getenv("ADMIN_PRODUCTOS_COOKIE_NAME", "admin_productos_session")
+ADMIN_PRODUCTOS_COOKIE_PATH = os.getenv("ADMIN_PRODUCTOS_COOKIE_PATH", "/")
+ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS = int(os.getenv("ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS", "120"))
 
 
 def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
@@ -131,6 +138,68 @@ def _safe_int(value, default=None):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _admin_productos_url() -> str:
+    return os.getenv("ADMIN_PRODUCTOS_URL", ADMIN_PRODUCTOS_DEFAULT_URL)
+
+
+def _admin_productos_cookie_domain() -> str | None:
+    value = os.getenv("ADMIN_PRODUCTOS_COOKIE_DOMAIN", "").strip()
+    return value or None
+
+
+def _admin_productos_cookie_samesite() -> str:
+    value = os.getenv("ADMIN_PRODUCTOS_COOKIE_SAMESITE", "lax").strip().lower()
+    if value not in {"lax", "strict", "none"}:
+        return "lax"
+    return value
+
+
+def _admin_productos_cookie_secure() -> bool:
+    raw = os.getenv("ADMIN_PRODUCTOS_COOKIE_SECURE", "true").strip().lower()
+    secure = raw not in {"0", "false", "no", "off"}
+    return True if _admin_productos_cookie_samesite() == "none" else secure
+
+
+def _can_open_admin_productos(auth) -> bool:
+    empresa_id = _safe_int(getattr(auth, "empresaID", None), 0)
+    if empresa_id <= 0:
+        return False
+    if is_empresa_admin_context(auth):
+        return True
+    for modulo in ("catalogo", "inventario"):
+        if auth.can(modulo, "puedeCrear") or auth.can(modulo, "puedeEditar"):
+            return True
+    return False
+
+
+def _admin_productos_sso_cache_key(jti: str) -> str:
+    return f"admin_productos_sso:{jti}"
+
+
+def _set_admin_productos_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=ADMIN_PRODUCTOS_COOKIE_NAME,
+        value=token,
+        max_age=ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS,
+        httponly=True,
+        secure=_admin_productos_cookie_secure(),
+        samesite=_admin_productos_cookie_samesite(),
+        domain=_admin_productos_cookie_domain(),
+        path=ADMIN_PRODUCTOS_COOKIE_PATH,
+    )
+
+
+def _delete_admin_productos_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=ADMIN_PRODUCTOS_COOKIE_NAME,
+        domain=_admin_productos_cookie_domain(),
+        path=ADMIN_PRODUCTOS_COOKIE_PATH,
+        samesite=_admin_productos_cookie_samesite(),
+        secure=_admin_productos_cookie_secure(),
+        httponly=True,
+    )
 
 
 def _ensure_empresa_modulo_table(db: Session):
@@ -782,6 +851,94 @@ def logout(
 @router.get("/me", response_model=AuthMeResponse)
 def me(auth=Depends(get_current_auth_context)):
     return AuthMeResponse(**auth.to_me_response())
+
+
+@router.post("/admin-productos/session", response_model=AdminProductosSessionResponse)
+def create_admin_productos_session(
+    response: Response,
+    auth=Depends(get_current_auth_context),
+):
+    if not _can_open_admin_productos(auth):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para admin-productos")
+
+    jti = uuid.uuid4().hex
+    set_cache(_admin_productos_sso_cache_key(jti), {"status": "pending"}, ttl=ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS)
+    token = create_access_token(
+        user_id=int(auth.userID),
+        empresa_id=int(auth.empresaID),
+        sucursal_id=(_safe_int(auth.sucursalID) if auth.sucursalID is not None else None),
+        rol_id=int(auth.rolID),
+        plan_id=(_safe_int(auth.planID) if auth.planID is not None else None),
+        extra_claims={
+            "sessionType": "admin_productos",
+            "jti": jti,
+        },
+        expires_minutes=max(1, ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS // 60),
+    )
+    _set_admin_productos_cookie(response, token)
+    return AdminProductosSessionResponse(url=_admin_productos_url())
+
+
+@router.post("/admin-productos/exchange", response_model=LoginResponse)
+def exchange_admin_productos_session(
+    response: Response,
+    db: Session = Depends(get_db),
+    admin_productos_session: str | None = Cookie(default=None, alias=ADMIN_PRODUCTOS_COOKIE_NAME),
+):
+    credentials_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token temporal invalido o expirado",
+    )
+    if not admin_productos_session:
+        raise credentials_error
+
+    try:
+        payload = jwt.decode(admin_productos_session, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        _delete_admin_productos_cookie(response)
+        raise credentials_error from exc
+
+    if payload.get("sessionType") != "admin_productos":
+        _delete_admin_productos_cookie(response)
+        raise credentials_error
+    jti = str(payload.get("jti") or "").strip()
+    cached_sso_token = get_cache(_admin_productos_sso_cache_key(jti))
+    if not jti or not cached_sso_token or cached_sso_token.get("status") != "pending":
+        _delete_admin_productos_cookie(response)
+        raise credentials_error
+    set_cache(_admin_productos_sso_cache_key(jti), {"status": "used"}, ttl=ADMIN_PRODUCTOS_EXCHANGE_TOKEN_EXPIRE_SECONDS)
+
+    auth_context = get_current_auth_context(token=admin_productos_session, db=db)
+    if not _can_open_admin_productos(auth_context):
+        _delete_admin_productos_cookie(response)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para admin-productos")
+
+    token = create_access_token(
+        user_id=int(auth_context.userID),
+        empresa_id=int(auth_context.empresaID),
+        sucursal_id=(_safe_int(auth_context.sucursalID) if auth_context.sucursalID is not None else None),
+        rol_id=int(auth_context.rolID),
+        plan_id=(_safe_int(auth_context.planID) if auth_context.planID is not None else None),
+        extra_claims={
+            "sessionType": "admin_productos_app",
+            "tenantSlug": auth_context.empresaSlug,
+            "empresaSlug": auth_context.empresaSlug,
+            "empresaNombre": auth_context.empresaNombre,
+            "email": auth_context.email,
+        },
+    )
+    _delete_admin_productos_cookie(response)
+    return LoginResponse(
+        accessToken=token,
+        expiresIn=JWT_EXPIRE_MINUTES * 60,
+        user=AuthMeResponse(**auth_context.to_me_response()),
+    )
+
+
+@router.delete("/admin-productos/session")
+def delete_admin_productos_session(response: Response):
+    _delete_admin_productos_cookie(response)
+    return {"status": "ok"}
 
 
 @router.post("/impersonate", response_model=LoginResponse)
