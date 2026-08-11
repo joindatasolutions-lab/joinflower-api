@@ -1104,6 +1104,33 @@ def _payload_field_value(payload: BaseModel, name: str, missing):
     return missing
 
 
+def _sync_produccion_observaciones_internas_desde_detalle(
+    db: Session,
+    *,
+    pedido_id: int,
+    empresa_id: int,
+    detalle_id: int | None,
+    notas_produccion: str | None,
+) -> None:
+    if detalle_id is None:
+        return
+    estado_cancelado_id = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_CANCELADO)
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.pedidoID == int(pedido_id),
+            Produccion.empresaID == int(empresa_id),
+            Produccion.pedidoDetalleID == int(detalle_id),
+            Produccion.estado != int(estado_cancelado_id),
+        )
+        .all()
+    )
+    now = colombia_now_naive()
+    for produccion in producciones:
+        produccion.observacionesInternas = str(notas_produccion or "").strip() or None
+        produccion.updatedAt = now
+
+
 def _invalidate_factura_impresa(db: Session, *, pedido_id: int, empresa_id: int) -> None:
     row = db.execute(
         text(
@@ -2641,7 +2668,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 codigoCatalogo=_codigo_catalogo_base(producto),
                 nombreProducto=str((producto.nombreProducto if producto else None) or "Producto"),
                 cantidad=float(detalle.cantidad or 0),
-                observaciones=_sanitize_producto_observacion(
+                observaciones=None,
+                notasProduccion=_sanitize_producto_observacion(
                     (
                         str(getattr(detalle, "observacionesPersonalizados", "")).strip()
                         if has_observaciones_personalizados and getattr(detalle, "observacionesPersonalizados", None)
@@ -2649,6 +2677,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                     ),
                     producto=producto,
                 ),
+                observacionesPersonalizadas=(str(entrega.observaciones).strip() if entrega and entrega.observaciones else None),
                 precioUnitario=float(_quantize_peso_entero(detalle.precioUnitario or 0)),
                 subtotal=float(_quantize_peso_entero(detalle.subtotal or 0)),
             )
@@ -2694,6 +2723,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                 "firma": entrega.firma if entrega else None,
                 "mensajeTarjeta": entrega.mensaje if entrega else None,
                 "observacionGeneral": entrega.observacionGeneral if entrega else None,
+                "observaciones": entrega.observaciones if entrega else None,
+                "observacionesPersonalizadas": entrega.observaciones if entrega else None,
             },
             financiero={
                 "subtotal": float(pedido.totalBruto or 0),
@@ -2763,6 +2794,9 @@ class ActualizarDetallePedidoRequest(BaseModel):
     productoPrecio: float | None = None
     cantidad: float | None = None
     productoObservaciones: str | None = None
+    notasProduccion: str | None = None
+    observacionesPersonalizadas: str | None = None
+    observaciones: str | None = None
     fechaEntrega: str | None = None   # ISO date "YYYY-MM-DD"
     horaEntrega: str | None = None    # Ej. "10:00 - 12:00"
     clienteNombre: str | None = None
@@ -2879,6 +2913,13 @@ def actualizar_detalle_pedido(
             detalle = detalle_query.order_by(PedidoDetalle.idPedidoDetalle.asc()).first()
         needs_totals_recalc = False
         producto_detalle_actual: Producto | None = None
+        missing_payload = object()
+        notas_produccion_payload = _payload_field_value(payload, "notasProduccion", missing_payload)
+        if notas_produccion_payload is missing_payload:
+            notas_produccion_payload = _payload_field_value(payload, "productoObservaciones", missing_payload)
+        observaciones_personalizadas_payload = _payload_field_value(payload, "observacionesPersonalizadas", missing_payload)
+        if observaciones_personalizadas_payload is missing_payload:
+            observaciones_personalizadas_payload = _payload_field_value(payload, "observaciones", missing_payload)
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
             duplicate_detail = (
@@ -2918,11 +2959,18 @@ def actualizar_detalle_pedido(
             producto_detalle_actual = producto
             if has_observaciones_personalizados:
                 detalle.observacionesPersonalizados = _sanitize_producto_observacion(
-                    payload.productoObservaciones,
+                    None if notas_produccion_payload is missing_payload else notas_produccion_payload,
                     producto=producto,
                 )
+                _sync_produccion_observaciones_internas_desde_detalle(
+                    db,
+                    pedido_id=int(pedido.idPedido),
+                    empresa_id=int(pedido.empresaID),
+                    detalle_id=int(detalle.idPedidoDetalle),
+                    notas_produccion=detalle.observacionesPersonalizados,
+                )
             needs_totals_recalc = True
-        elif payload.productoObservaciones is not None and detalle and has_observaciones_personalizados:
+        elif notas_produccion_payload is not missing_payload and detalle and has_observaciones_personalizados:
             producto_actual = (
                 db.query(Producto)
                 .filter(
@@ -2932,8 +2980,15 @@ def actualizar_detalle_pedido(
                 .first()
             )
             detalle.observacionesPersonalizados = _sanitize_producto_observacion(
-                payload.productoObservaciones,
+                notas_produccion_payload,
                 producto=producto_actual,
+            )
+            _sync_produccion_observaciones_internas_desde_detalle(
+                db,
+                pedido_id=int(pedido.idPedido),
+                empresa_id=int(pedido.empresaID),
+                detalle_id=int(detalle.idPedidoDetalle),
+                notas_produccion=detalle.observacionesPersonalizados,
             )
 
         if payload.productoPrecio is not None and detalle:
@@ -3005,21 +3060,24 @@ def actualizar_detalle_pedido(
         if payload.clienteIdentificacion is not None:
             cliente.identificacion = str(payload.clienteIdentificacion).strip() or None
 
-        if any(
-            value is not None
-            for value in (
-                payload.fechaEntrega,
-                payload.horaEntrega,
-                payload.destinatarioNombre,
-                payload.telefonoDestino,
-                payload.direccion,
-                payload.barrioNombre,
-                payload.latitudDestino,
-                payload.longitudDestino,
-                payload.firma,
-                payload.mensajeTarjeta,
-                payload.observacionGeneral,
+        if (
+            any(
+                value is not None
+                for value in (
+                    payload.fechaEntrega,
+                    payload.horaEntrega,
+                    payload.destinatarioNombre,
+                    payload.telefonoDestino,
+                    payload.direccion,
+                    payload.barrioNombre,
+                    payload.latitudDestino,
+                    payload.longitudDestino,
+                    payload.firma,
+                    payload.mensajeTarjeta,
+                    payload.observacionGeneral,
+                )
             )
+            or observaciones_personalizadas_payload is not missing_payload
         ):
             entrega = (
                 db.query(Entrega)
@@ -3077,6 +3135,8 @@ def actualizar_detalle_pedido(
                     entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
                 if payload.observacionGeneral is not None:
                     entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
+                if observaciones_personalizadas_payload is not missing_payload:
+                    entrega.observaciones = str(observaciones_personalizadas_payload or "").strip() or None
                 if payload.fechaEntrega is not None:
                     fecha_base = entrega.fechaEntregaProgramada or entrega.fechaEntrega
                     fecha_programada = produccion_service.calcular_fecha_programada(

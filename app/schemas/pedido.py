@@ -211,6 +211,8 @@ class PedidoDetalleProducto(BaseModel):
     nombreProducto: str
     cantidad: float
     observaciones: Optional[str] = None
+    notasProduccion: Optional[str] = None
+    observacionesPersonalizadas: Optional[str] = None
     precioUnitario: float
     subtotal: float
 

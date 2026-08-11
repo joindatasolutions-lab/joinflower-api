@@ -947,8 +947,12 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
 
     for detalle in detalles:
         detalle_id = int(detalle.idPedidoDetalle)
+        notas_produccion = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip() or None
         existente = existing_by_detail_id.get(detalle_id)
         if existente:
+            if notas_produccion is not None and not str(existente.observacionesInternas or "").strip():
+                existente.observacionesInternas = notas_produccion
+                existente.updatedAt = now
             skipped_count += 1
             created_items.append(
                 {
@@ -972,6 +976,7 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
             fechaAsignacion=(now if florista_asignado_id is not None else None),
             estado=estados["pendiente"],
             prioridad="MEDIA",
+            observacionesInternas=notas_produccion,
             tiempoEstimadoMin=calcular_tiempo_estimado_detalle(detalle),
             ordenProduccion=siguiente_orden,
             createdAt=now,

@@ -529,9 +529,11 @@ def _build_items(
         nombre_arreglo = str(producto_info.get("nombreProducto") or "Producto")
         codigo_producto = str(producto_info.get("codigoProducto") or "").strip() or None
         codigo_catalogo = str(producto_info.get("codigoCatalogo") or "").strip() or None
-        observacion_personalizada = str(producto_info.get("observacionesPersonalizados") or "").strip() or None
-        observacion_entrega = str(entrega.observacionGeneral or "").strip() if entrega else ""
-        observacion_entrega = observacion_entrega or None
+        notas_produccion = str(produccion.observacionesInternas or "").strip() or None
+        observacion_personalizada = str(entrega.observaciones or "").strip() if entrega else ""
+        if not observacion_personalizada:
+            observacion_personalizada = str(entrega.observacionGeneral or "").strip() if entrega else ""
+        observacion_personalizada = observacion_personalizada or None
         producto_id = producto_info.get("productoID")
         codigo_base = codigo_catalogo if mostrar_codigo_catalogo and codigo_catalogo else codigo_producto
         codigo_arreglo = codigo_base or (str(producto_id) if producto_id is not None else None)
@@ -556,11 +558,11 @@ def _build_items(
                 horaEntrega=(entrega.rangoHora if entrega else None),
                 barrio=(str(entrega.barrioNombre or "") if entrega else None) or None,
                 observacion=observacion_personalizada,
-                notasProduccion=observacion_personalizada,
-                observacionesPersonalizados=observacion_entrega,
+                notasProduccion=notas_produccion,
+                observacionesPersonalizados=observacion_personalizada,
                 floristaAsignado=(florista.nombre if florista else None),
                 estado=_estado_produccion_norm(produccion.estado, db=db),
-                observaciones=(str(produccion.observacionesInternas).strip() if produccion.observacionesInternas else None),
+                observaciones=notas_produccion,
                 fechaAsignacion=produccion.fechaAsignacion,
                 tiempoRestanteHoras=tiempo_restante_horas,
                 tiempoEstimadoMin=(int(produccion.tiempoEstimadoMin) if produccion.tiempoEstimadoMin is not None else None),
