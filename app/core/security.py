@@ -746,8 +746,9 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             # usuario cualquier modulo, sin quedar limitado a los permisos por
             # defecto de su rol. El unico techo real es que la empresa no haya
             # desactivado ese modulo explicitamente a nivel comercial.
+            empresa_overrides = load_empresa_module_overrides(db, empresa_id) or {}
             modulos_desactivados_empresa = {
-                modulo for modulo, activo in (overrides or {}).items() if not activo
+                modulo for modulo, activo in empresa_overrides.items() if not activo
             }
             modulos_plan = modulos_usuario - modulos_desactivados_empresa
 
