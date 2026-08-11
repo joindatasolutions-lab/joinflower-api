@@ -18,3 +18,20 @@ def test_domiapp_login_preflight_is_allowed():
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "https://domiapp.joindata.com.co"
     assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_adminpetalops_session_preflight_is_allowed():
+    client = TestClient(app)
+
+    response = client.options(
+        "/auth/admin-productos/session",
+        headers={
+            "Origin": "https://adminpetalops.joindata.com.co",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://adminpetalops.joindata.com.co"
+    assert response.headers["access-control-allow-credentials"] == "true"

@@ -295,9 +295,10 @@ def create_access_token(
     rol_id: int,
     plan_id: int | None = None,
     extra_claims: dict | None = None,
+    expires_minutes: int | None = None,
 ) -> str:
     now = datetime.now(timezone.utc)
-    expire = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    expire = now + timedelta(minutes=expires_minutes or JWT_EXPIRE_MINUTES)
 
     payload = {
         "userID": int(user_id),
