@@ -70,6 +70,26 @@ class CajaListResponse(BaseModel):
     items: list[CajaDiaItem]
 
 
+class ContabilidadFloristRow(BaseModel):
+    id: int
+    nombre: str
+    tipo: str
+    pedidos: int
+    arreglos: int
+    totalVendido: float
+    promedio: float
+    completados: int
+    enProceso: int
+    pendientes: int
+    cancelados: int
+    tiempoPromedioMin: float | None = None
+    reasignaciones: int
+
+
+class ContabilidadResumenResponse(BaseModel):
+    floristRows: list[ContabilidadFloristRow]
+
+
 class CajaEfectivoDiaResponse(BaseModel):
     empresaID: int
     sucursalID: int

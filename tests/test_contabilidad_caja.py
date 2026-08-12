@@ -7,9 +7,12 @@ from fastapi import HTTPException
 from app.routers.contabilidad import (
     _caja_totales_sql,
     _calculate_nueva_base,
+    _florist_rows_sql,
     _parse_query_date,
+    _row_to_florist_item,
     _row_to_caja_item,
     listar_cierres_caja,
+    obtener_resumen_floristas_contabilidad,
 )
 from app.schemas.contabilidad import CajaCierreRequest
 from app.services import caja_service
@@ -151,6 +154,100 @@ def test_calculate_nueva_base_subtracts_gastos_and_guardado():
         total_gastos=Decimal("15000"),
         monto_guardado=Decimal("40000"),
     ) == Decimal("115000")
+
+
+def test_florist_rows_sql_uses_required_accounting_filters():
+    sql = _florist_rows_sql()
+
+    assert "pr.empresa_id = :empresa_id" in sql
+    assert "pr.empleado_id IS NOT NULL" in sql
+    assert "pr.fecha_programada_produccion::date BETWEEN :fecha_desde AND :fecha_hasta" in sql
+    assert "(:sucursal_id IS NULL OR pr.sucursal_id = :sucursal_id)" in sql
+    assert "SUM(COALESCE(NULLIF(pd.cantidad, 0), 1))" in sql
+    assert "JOIN petalops.empleado emp" in sql
+
+
+def test_row_to_florist_item_returns_frontend_contract_numbers():
+    item = _row_to_florist_item(
+        {
+            "id": 12,
+            "nombre": "Laura Martinez",
+            "tipo": "Interno",
+            "pedidos": Decimal("38"),
+            "arreglos": Decimal("52"),
+            "totalVendido": Decimal("4200000"),
+            "promedio": Decimal("80769"),
+            "completados": Decimal("48"),
+            "enProceso": Decimal("2"),
+            "pendientes": Decimal("1"),
+            "cancelados": Decimal("1"),
+            "tiempoPromedioMin": Decimal("36"),
+            "reasignaciones": Decimal("0"),
+        }
+    )
+
+    assert item.id == 12
+    assert item.arreglos == 52
+    assert item.totalVendido == 4200000
+    assert item.tiempoPromedioMin == 36
+    assert item.reasignaciones == 0
+
+
+class _ResumenResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _ResumenDb:
+    def __init__(self):
+        self.params = None
+
+    def execute(self, statement, params=None):
+        self.params = params
+        return _ResumenResult(
+            [
+                {
+                    "id": 12,
+                    "nombre": "Laura Martinez",
+                    "tipo": "Interno",
+                    "pedidos": 38,
+                    "arreglos": 52,
+                    "totalVendido": 4200000,
+                    "promedio": 80769,
+                    "completados": 48,
+                    "enProceso": 2,
+                    "pendientes": 1,
+                    "cancelados": 1,
+                    "tiempoPromedioMin": 36,
+                    "reasignaciones": 0,
+                }
+            ]
+        )
+
+
+def test_obtener_resumen_floristas_contabilidad_returns_florist_rows(monkeypatch):
+    monkeypatch.setattr("app.routers.contabilidad.assert_same_empresa", lambda *_args, **_kwargs: None)
+    db = _ResumenDb()
+
+    response = obtener_resumen_floristas_contabilidad(
+        empresa_id=1,
+        sucursal_id=None,
+        fecha_desde_raw="2026-06-01",
+        fecha_hasta_raw="2026-06-30",
+        db=db,
+        auth=object(),
+    )
+
+    assert db.params["empresa_id"] == 1
+    assert db.params["sucursal_id"] is None
+    assert response.floristRows[0].id == 12
+    assert response.floristRows[0].arreglos == 52
 
 
 class _FakePedido:

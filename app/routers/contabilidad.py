@@ -16,6 +16,8 @@ from app.schemas.contabilidad import (
     CajaDiaItem,
     CajaEfectivoDiaResponse,
     CajaListResponse,
+    ContabilidadFloristRow,
+    ContabilidadResumenResponse,
 )
 from app.services import caja_service
 
@@ -212,6 +214,110 @@ def _resolve_usuario_id(db: Session, *, empresa_id: int, requested_user_id: int 
         if row:
             return int(row[0])
     return None
+
+
+def _florist_rows_sql() -> str:
+    return """
+        WITH reasignaciones AS (
+            SELECT
+                ph.produccion_id,
+                COUNT(*)::int AS total_reasignaciones
+            FROM petalops.produccion_historial ph
+            WHERE ph.empresa_id = :empresa_id
+              AND ph.florista_anterior_id IS NOT NULL
+              AND ph.florista_nuevo_id IS NOT NULL
+            GROUP BY ph.produccion_id
+        )
+        SELECT
+            emp.id_empleado AS id,
+            emp.nombre_empleado AS nombre,
+            CASE
+                WHEN lower(COALESCE(emp.tipo, '')) = 'externo' THEN 'Externo'
+                ELSE 'Interno'
+            END AS tipo,
+            COUNT(DISTINCT pr.pedido_id)::int AS pedidos,
+            SUM(COALESCE(NULLIF(pd.cantidad, 0), 1))::int AS arreglos,
+            ROUND(SUM(COALESCE(pd.subtotal, 0)), 2)::float AS "totalVendido",
+            ROUND(AVG(COALESCE(pd.subtotal, 0)), 2)::float AS promedio,
+            COUNT(*) FILTER (
+                WHERE lower(COALESCE(ep.codigo, ep.nombre, '')) IN ('completado', 'terminado', 'listo', 'paraentrega', 'para_entrega')
+            )::int AS completados,
+            COUNT(*) FILTER (
+                WHERE lower(COALESCE(ep.codigo, ep.nombre, '')) IN ('en_proceso', 'produccion', 'asignado')
+            )::int AS "enProceso",
+            COUNT(*) FILTER (
+                WHERE lower(COALESCE(ep.codigo, ep.nombre, '')) = 'pendiente'
+            )::int AS pendientes,
+            COUNT(*) FILTER (
+                WHERE lower(COALESCE(ep.codigo, ep.nombre, '')) = 'cancelado'
+            )::int AS cancelados,
+            ROUND(AVG(NULLIF(pr.tiempo_real_min, 0)), 2)::float AS "tiempoPromedioMin",
+            SUM(COALESCE(reasignaciones.total_reasignaciones, 0))::int AS reasignaciones
+        FROM petalops.produccion pr
+        JOIN petalops.empleado emp
+          ON emp.id_empleado = pr.empleado_id
+         AND emp.empresa_id = pr.empresa_id
+         AND upper(emp.cargo) = 'FLORISTA'
+        LEFT JOIN petalops.pedido_detalle pd
+          ON pd.id_pedido_detalle = pr.pedido_detalle_id
+         AND pd.empresa_id = pr.empresa_id
+        LEFT JOIN petalops.estado_produccion ep
+          ON ep.id_estado_produccion = pr.estado_produccion_id
+        LEFT JOIN reasignaciones
+          ON reasignaciones.produccion_id = pr.id_produccion
+        WHERE pr.empresa_id = :empresa_id
+          AND (:sucursal_id IS NULL OR pr.sucursal_id = :sucursal_id)
+          AND pr.fecha_programada_produccion::date BETWEEN :fecha_desde AND :fecha_hasta
+          AND pr.empleado_id IS NOT NULL
+        GROUP BY emp.id_empleado, emp.nombre_empleado, emp.tipo
+        ORDER BY arreglos DESC, "totalVendido" DESC
+    """
+
+
+def _row_to_florist_item(row) -> ContabilidadFloristRow:
+    return ContabilidadFloristRow(
+        id=int(row["id"]),
+        nombre=str(row["nombre"] or ""),
+        tipo=str(row["tipo"] or "Interno"),
+        pedidos=int(row["pedidos"] or 0),
+        arreglos=int(row["arreglos"] or 0),
+        totalVendido=float(row["totalVendido"] or 0),
+        promedio=float(row["promedio"] or 0),
+        completados=int(row["completados"] or 0),
+        enProceso=int(row["enProceso"] or 0),
+        pendientes=int(row["pendientes"] or 0),
+        cancelados=int(row["cancelados"] or 0),
+        tiempoPromedioMin=(float(row["tiempoPromedioMin"]) if row["tiempoPromedioMin"] is not None else None),
+        reasignaciones=int(row["reasignaciones"] or 0),
+    )
+
+
+@router.get("/floristas/resumen", response_model=ContabilidadResumenResponse)
+def obtener_resumen_floristas_contabilidad(
+    empresa_id: int = Query(..., alias="empresaID", gt=0),
+    sucursal_id: int | None = Query(None, alias="sucursalID", gt=0),
+    fecha_desde_raw: str = Query(..., alias="fechaDesde"),
+    fecha_hasta_raw: str = Query(..., alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    fecha_desde = _parse_query_date(fecha_desde_raw)
+    fecha_hasta = _parse_query_date(fecha_hasta_raw)
+    if fecha_desde > fecha_hasta:
+        raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
+    assert_same_empresa(auth, int(empresa_id))
+
+    rows = db.execute(
+        text(_florist_rows_sql()),
+        {
+            "empresa_id": int(empresa_id),
+            "sucursal_id": (int(sucursal_id) if sucursal_id is not None else None),
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta,
+        },
+    ).mappings().all()
+
+    return ContabilidadResumenResponse(floristRows=[_row_to_florist_item(row) for row in rows])
 
 
 @router.get("/caja", response_model=CajaListResponse)
