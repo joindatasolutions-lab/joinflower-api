@@ -268,6 +268,24 @@ def test_row_to_domiciliario_pedido_item_returns_frontend_contract():
     assert item.observaciones == "Sin timbre"
 
 
+def test_row_to_domiciliario_pedido_item_uses_canonical_delivery_state_code():
+    item = _row_to_domiciliario_pedido_item(
+        {
+            "id_pedido": 3399,
+            "numero_pedido": "FLR-97753",
+            "cliente": "Cliente",
+            "estado_entrega": "No entregado",
+            "estado_entrega_codigo": "no_entregado",
+            "valor_domicilio": Decimal("15000"),
+            "total_pedido": Decimal("125000"),
+            "motivonoentregado": "Cliente no disponible",
+        }
+    )
+
+    assert item.estadoEntrega == "NO_ENTREGADO"
+    assert item.novedad == "Cliente no disponible"
+
+
 def test_domiciliario_resumen_counts_statuses_and_money():
     rows = [
         {"estado_entrega_codigo": "entregado", "reprogramadapara": None},

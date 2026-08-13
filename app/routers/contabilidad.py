@@ -458,8 +458,8 @@ def _row_to_domiciliario_pedido_item(row, pago_resumen: dict | None = None) -> C
         zona=(str(row.get("zona")).strip() if row.get("zona") else None),
         estadoPedido=(str(row.get("estado_pedido")).strip().upper() if row.get("estado_pedido") else None),
         estadoEntrega=(
-            str(row.get("estado_entrega") or row.get("estado_entrega_codigo")).strip().upper()
-            if (row.get("estado_entrega") or row.get("estado_entrega_codigo"))
+            _estado_key(row.get("estado_entrega_codigo") or row.get("estado_entrega")).upper()
+            if (row.get("estado_entrega_codigo") or row.get("estado_entrega"))
             else None
         ),
         valorDomicilio=_money(row.get("valor_domicilio")),
