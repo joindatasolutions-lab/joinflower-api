@@ -7,11 +7,16 @@ from fastapi import HTTPException
 from app.routers.contabilidad import (
     _caja_totales_sql,
     _calculate_nueva_base,
+    _domiciliario_pedidos_params,
+    _domiciliario_pedidos_sql,
+    _domiciliario_resumen,
     _florist_rows_sql,
     _parse_query_date,
+    _row_to_domiciliario_pedido_item,
     _row_to_florist_item,
     _row_to_caja_item,
     listar_cierres_caja,
+    obtener_pedidos_domiciliario_contabilidad,
     obtener_resumen_floristas_contabilidad,
 )
 from app.schemas.contabilidad import CajaCierreRequest
@@ -193,12 +198,114 @@ def test_row_to_florist_item_returns_frontend_contract_numbers():
     assert item.reasignaciones == 0
 
 
+def test_domiciliario_pedidos_sql_uses_accounting_scope_and_order():
+    sql = _domiciliario_pedidos_sql()
+
+    assert "SELECT DISTINCT ON (e.pedido_id)" in sql
+    assert "le.domiciliarioid = :domiciliario_id" in sql
+    assert "COALESCE(e.sucursalid, p_scope.sucursal_id) = :sucursal_id" in sql
+    assert "fecha_referencia" in sql
+    assert "ORDER BY" in sql
+    assert "DESC" in sql
+
+
+def test_domiciliario_pedidos_params_normalizes_estado_entrega_and_dates():
+    params = _domiciliario_pedidos_params(
+        empresa_id=1,
+        sucursal_id=2,
+        domiciliario_id=12,
+        fecha_desde=date(2026, 8, 1),
+        fecha_hasta=date(2026, 8, 12),
+        estado_entrega="No Entregado",
+    )
+
+    assert params["estado_entrega"] == "no_entregado"
+    assert params["fecha_desde"] == datetime(2026, 8, 1, 0, 0)
+    assert params["fecha_hasta"] == datetime(2026, 8, 13, 0, 0)
+
+
+def test_row_to_domiciliario_pedido_item_returns_frontend_contract():
+    item = _row_to_domiciliario_pedido_item(
+        {
+            "id_pedido": 1234,
+            "numero_pedido": "P-1234",
+            "fecha_pedido": datetime(2026, 8, 12, 9, 0),
+            "fechaentrega": datetime(2026, 8, 12, 12, 5),
+            "fecha_referencia": datetime(2026, 8, 12, 12, 5),
+            "cliente": "Ana Gomez",
+            "telefono": "3001234567",
+            "direccion": "Calle 10 # 20-30",
+            "barrio": "Chapinero",
+            "zona": "Norte",
+            "estado_pedido": "Aprobado",
+            "estado_entrega": "Entregado",
+            "estado_entrega_codigo": "entregado",
+            "valor_domicilio": Decimal("15000"),
+            "total_pedido": Decimal("125000"),
+            "fechaasignacion": datetime(2026, 8, 12, 10, 30),
+            "fechasalida": datetime(2026, 8, 12, 11, 10),
+            "tiempo_entrega_min": 95,
+            "observaciones": "",
+            "observaciongeneral": "Sin timbre",
+            "motivonoentregado": None,
+        },
+        {"metodoPago": "Efectivo", "cuentaBancaria": None},
+    )
+
+    assert item.pedidoID == 1234
+    assert item.numeroPedido == "P-1234"
+    assert item.fechaEntrega == date(2026, 8, 12)
+    assert item.estadoPedido == "APROBADO"
+    assert item.estadoEntrega == "ENTREGADO"
+    assert item.valorDomicilio == Decimal("15000")
+    assert item.medioPago == "Efectivo"
+    assert item.cuentaPago == "Efectivo"
+    assert item.horaAsignacion == "10:30"
+    assert item.horaEnRuta == "11:10"
+    assert item.horaEntrega == "12:05"
+    assert item.tiempoEntregaMin == 95
+    assert item.observaciones == "Sin timbre"
+
+
+def test_domiciliario_resumen_counts_statuses_and_money():
+    rows = [
+        {"estado_entrega_codigo": "entregado", "reprogramadapara": None},
+        {"estado_entrega_codigo": "no_entregado", "reprogramadapara": None},
+        {"estado_entrega_codigo": "asignado", "reprogramadapara": datetime(2026, 8, 13, 9, 0)},
+    ]
+    items = [
+        _row_to_domiciliario_pedido_item(
+            {
+                **row,
+                "id_pedido": idx,
+                "numero_pedido": str(idx),
+                "cliente": "Cliente",
+                "valor_domicilio": Decimal("10000"),
+                "total_pedido": Decimal("50000"),
+            }
+        )
+        for idx, row in enumerate(rows, start=1)
+    ]
+
+    resumen = _domiciliario_resumen(items, rows)
+
+    assert resumen.pedidos == 3
+    assert resumen.entregados == 1
+    assert resumen.noEntregados == 1
+    assert resumen.reprogramados == 1
+    assert resumen.totalDomicilios == Decimal("30000.00")
+    assert resumen.promedioDomicilio == Decimal("10000.00")
+
+
 class _ResumenResult:
     def __init__(self, rows):
         self.rows = rows
 
     def mappings(self):
         return self
+
+    def first(self):
+        return self.rows[0] if self.rows else None
 
     def all(self):
         return self.rows
@@ -248,6 +355,83 @@ def test_obtener_resumen_floristas_contabilidad_returns_florist_rows(monkeypatch
     assert db.params["sucursal_id"] is None
     assert response.floristRows[0].id == 12
     assert response.floristRows[0].arreglos == 52
+
+
+class _DomiciliarioPedidosDb:
+    def __init__(self):
+        self.params = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.params.append(params)
+        if "FROM petalops.empleado emp" in sql and "LIMIT 1" in sql:
+            return _ResumenResult(
+                [
+                    {
+                        "id": 12,
+                        "nombre": "Carlos Perez",
+                        "tipo": "Interno",
+                    }
+                ]
+            )
+        return _ResumenResult(
+            [
+                {
+                    "domiciliario_id": 12,
+                    "domiciliario_nombre": "Carlos Perez",
+                    "domiciliario_tipo": "Interno",
+                    "id_pedido": 1234,
+                    "numero_pedido": "P-1234",
+                    "fecha_pedido": datetime(2026, 8, 12, 9, 0),
+                    "fechaentrega": datetime(2026, 8, 12, 12, 5),
+                    "fecha_referencia": datetime(2026, 8, 12, 12, 5),
+                    "cliente": "Ana Gomez",
+                    "telefono": "3001234567",
+                    "direccion": "Calle 10 # 20-30",
+                    "barrio": "Chapinero",
+                    "zona": "Norte",
+                    "estado_pedido": "Aprobado",
+                    "estado_entrega": "Entregado",
+                    "estado_entrega_codigo": "entregado",
+                    "valor_domicilio": Decimal("15000"),
+                    "total_pedido": Decimal("125000"),
+                    "fechaasignacion": datetime(2026, 8, 12, 10, 30),
+                    "fechasalida": datetime(2026, 8, 12, 11, 10),
+                    "tiempo_entrega_min": 95,
+                    "observaciones": "",
+                    "observaciongeneral": "",
+                    "motivonoentregado": None,
+                    "reprogramadapara": None,
+                }
+            ]
+        )
+
+
+def test_obtener_pedidos_domiciliario_contabilidad_returns_items(monkeypatch):
+    monkeypatch.setattr("app.routers.contabilidad.assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "app.routers.pedido._load_pago_resumen_batch",
+        lambda *_args, **_kwargs: {1234: {"metodoPago": "Efectivo", "cuentaBancaria": None}},
+    )
+    db = _DomiciliarioPedidosDb()
+
+    response = obtener_pedidos_domiciliario_contabilidad(
+        domiciliario_id=12,
+        empresa_id=1,
+        sucursal_id=2,
+        fecha_desde_raw="2026-08-01",
+        fecha_hasta_raw="2026-08-12",
+        estado_entrega="entregado",
+        db=db,
+        auth=object(),
+    )
+
+    assert db.params[1]["estado_entrega"] == "entregado"
+    assert response.domiciliario.id == 12
+    assert response.resumen.pedidos == 1
+    assert response.resumen.entregados == 1
+    assert response.items[0].pedidoID == 1234
+    assert response.items[0].medioPago == "Efectivo"
 
 
 class _FakePedido:

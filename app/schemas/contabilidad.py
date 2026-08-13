@@ -90,6 +90,51 @@ class ContabilidadResumenResponse(BaseModel):
     floristRows: list[ContabilidadFloristRow]
 
 
+class ContabilidadDomiciliarioInfo(BaseModel):
+    id: int
+    nombre: str
+    tipo: str
+
+
+class ContabilidadDomiciliarioPedidosResumen(BaseModel):
+    pedidos: int
+    entregados: int
+    noEntregados: int
+    reprogramados: int
+    totalDomicilios: Decimal
+    promedioDomicilio: Decimal
+
+
+class ContabilidadDomiciliarioPedidoItem(BaseModel):
+    pedidoID: int
+    numeroPedido: str
+    fechaPedido: date | None = None
+    fechaEntrega: date | None = None
+    cliente: str
+    telefono: str | None = None
+    direccion: str | None = None
+    barrio: str | None = None
+    zona: str | None = None
+    estadoPedido: str | None = None
+    estadoEntrega: str | None = None
+    valorDomicilio: Decimal
+    totalPedido: Decimal
+    medioPago: str | None = None
+    cuentaPago: str | None = None
+    horaAsignacion: str | None = None
+    horaEnRuta: str | None = None
+    horaEntrega: str | None = None
+    tiempoEntregaMin: int | None = None
+    observaciones: str | None = None
+    novedad: str | None = None
+
+
+class ContabilidadDomiciliarioPedidosResponse(BaseModel):
+    domiciliario: ContabilidadDomiciliarioInfo
+    resumen: ContabilidadDomiciliarioPedidosResumen
+    items: list[ContabilidadDomiciliarioPedidoItem]
+
+
 class CajaEfectivoDiaResponse(BaseModel):
     empresaID: int
     sucursalID: int
