@@ -205,6 +205,7 @@ def test_domiciliario_pedidos_sql_uses_accounting_scope_and_order():
     assert "le.domiciliarioid = :domiciliario_id" in sql
     assert "COALESCE(e.sucursalid, p_scope.sucursal_id) = :sucursal_id" in sql
     assert "fecha_referencia" in sql
+    assert "petalops.zona" not in sql
     assert "ORDER BY" in sql
     assert "DESC" in sql
 

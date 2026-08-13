@@ -384,7 +384,7 @@ def _domiciliario_pedidos_sql() -> str:
             COALESCE(NULLIF(c.telefono_completo, ''), NULLIF(c.telefono, ''), NULLIF(le.telefonodestino, '')) AS telefono,
             le.direccion,
             COALESCE(NULLIF(le.barrionombre, ''), b.nombre_barrio) AS barrio,
-            z.nombre_zona AS zona,
+            CASE WHEN b.zona_id IS NULL THEN NULL ELSE CONCAT('Zona ', b.zona_id) END AS zona,
             ep.nombre_estado AS estado_pedido,
             COALESCE(ee.codigo, ee.nombre) AS estado_entrega_codigo,
             COALESCE(ee.nombre, ee.codigo) AS estado_entrega,
@@ -418,8 +418,6 @@ def _domiciliario_pedidos_sql() -> str:
         LEFT JOIN petalops.barrio b
           ON b.id_barrio = le.barrioid
          AND b.empresa_id = le.empresa_id
-        LEFT JOIN petalops.zona z
-          ON z.id_zona = b.zona_id
         WHERE le.domiciliarioid = :domiciliario_id
           AND COALESCE(le.fechaentrega, le.reprogramadapara, le.fechaentregaprogramada, le.createdat) >= :fecha_desde
           AND COALESCE(le.fechaentrega, le.reprogramadapara, le.fechaentregaprogramada, le.createdat) < :fecha_hasta
