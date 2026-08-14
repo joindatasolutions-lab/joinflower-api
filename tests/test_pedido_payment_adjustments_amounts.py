@@ -2,12 +2,15 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from app.routers.pedido import (
+    ActualizarDetallePedidoRequest,
     _apply_pedido_domicilio_amounts,
     _build_pedido_adjustments,
     _extract_payment_adjustments,
     _flora_phase2_ready,
+    _iva_unitario_for_producto,
     _load_pago_resumen,
     _manual_domicilio_amounts,
+    _payload_producto_precio_value,
     _serialize_pago_metadata,
 )
 
@@ -160,6 +163,19 @@ def test_apply_pedido_domicilio_amounts_forced_recalc_prefers_resolved_over_payl
     assert pedido.costoDomicilio == Decimal("15000.00")
     assert pedido.domicilioOriginal == Decimal("15000.00")
     assert pedido.descuentoDomicilio == Decimal("0.00")
+
+
+def test_update_detail_price_payload_accepts_precio_unitario_alias():
+    payload = ActualizarDetallePedidoRequest(detalleID=10, precioUnitario=120000)
+    missing = object()
+
+    assert _payload_producto_precio_value(payload, missing) == 120000
+
+
+def test_custom_product_nit_tax_uses_general_rate_when_rate_missing():
+    producto = SimpleNamespace(porcentajeIva=None, ivaIncluido=False)
+
+    assert _iva_unitario_for_producto(Decimal("100000"), producto) == Decimal("19000.00")
 
 
 def test_payment_metadata_serializes_discount_notes_balance_and_invoice_state():

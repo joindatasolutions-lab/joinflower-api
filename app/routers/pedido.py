@@ -1176,6 +1176,13 @@ def _payload_field_value(payload: BaseModel, name: str, missing):
     return missing
 
 
+def _payload_producto_precio_value(payload: BaseModel, missing):
+    value = _payload_field_value(payload, "productoPrecio", missing)
+    if value is not missing:
+        return value
+    return _payload_field_value(payload, "precioUnitario", missing)
+
+
 def _sync_produccion_observaciones_internas_desde_detalle(
     db: Session,
     *,
@@ -2864,6 +2871,7 @@ class ActualizarDetallePedidoRequest(BaseModel):
     detalleID: int | None = None
     productoID: int | None = None
     productoPrecio: float | None = None
+    precioUnitario: float | None = None
     cantidad: float | None = None
     productoObservaciones: str | None = None
     notasProduccion: str | None = None
@@ -2915,6 +2923,7 @@ class AgregarDetallePedidoRequest(BaseModel):
     cantidad: float | None = 1
     productoObservaciones: str | None = None
     productoPrecio: float | None = None
+    precioUnitario: float | None = None
 
 
 @router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
@@ -2992,6 +3001,7 @@ def actualizar_detalle_pedido(
         observaciones_personalizadas_payload = _payload_field_value(payload, "observacionesPersonalizadas", missing_payload)
         if observaciones_personalizadas_payload is missing_payload:
             observaciones_personalizadas_payload = _payload_field_value(payload, "observaciones", missing_payload)
+        producto_precio_payload = _payload_producto_precio_value(payload, missing_payload)
         entrega_actual: Entrega | None = None
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
@@ -3064,7 +3074,7 @@ def actualizar_detalle_pedido(
                 notas_produccion=detalle.observacionesPersonalizados,
             )
 
-        if payload.productoPrecio is not None and detalle:
+        if producto_precio_payload not in (missing_payload, None) and detalle:
             producto_para_precio = producto_detalle_actual
             if producto_para_precio is None:
                 producto_para_precio = (
@@ -3085,7 +3095,7 @@ def actualizar_detalle_pedido(
                     },
                 )
 
-            nuevo_precio = _quantize_peso_entero(payload.productoPrecio)
+            nuevo_precio = _quantize_peso_entero(producto_precio_payload)
             if nuevo_precio <= 0:
                 raise HTTPException(
                     status_code=400,
@@ -3561,8 +3571,11 @@ def agregar_detalle_pedido(
             .first()
         )
 
+        missing_payload = object()
+        producto_precio_payload = _payload_producto_precio_value(payload, missing_payload)
+
         if _is_custom_producto(producto):
-            if payload.productoPrecio is None:
+            if producto_precio_payload in (missing_payload, None):
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -3570,7 +3583,7 @@ def agregar_detalle_pedido(
                         "message": "Debes indicar un precio válido para el arreglo personalizado.",
                     },
                 )
-            precio_unitario = _quantize_peso_entero(payload.productoPrecio)
+            precio_unitario = _quantize_peso_entero(producto_precio_payload)
             if precio_unitario <= 0:
                 raise HTTPException(
                     status_code=400,
