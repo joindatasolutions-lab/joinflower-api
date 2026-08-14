@@ -1092,6 +1092,78 @@ def _manual_domicilio_amounts(
     }
 
 
+def _apply_pedido_domicilio_amounts(
+    pedido: Pedido,
+    *,
+    resolved_domicilio: Decimal,
+    domicilio_cobrado: float | int | Decimal | None = None,
+    domicilio_original: float | int | Decimal | None = None,
+    descuento_domicilio: float | int | Decimal | None = None,
+    domicilio_obsequiado: bool | None = None,
+    omitir_costo_domicilio: bool | None = None,
+    prefer_resolved: bool = False,
+) -> None:
+    resolved = _round_money_decimal(resolved_domicilio)
+    cobrado = _manual_money(domicilio_cobrado)
+    original_payload = _manual_money(domicilio_original)
+    descuento_payload = _manual_money(descuento_domicilio)
+
+    if domicilio_obsequiado is not None:
+        pedido.domicilioObsequiado = bool(domicilio_obsequiado)
+    if omitir_costo_domicilio is not None:
+        pedido.omitirCostoDomicilio = bool(omitir_costo_domicilio)
+
+    if _pedido_omite_costo_domicilio(pedido):
+        original = (
+            (resolved if prefer_resolved else None)
+            or original_payload
+            or cobrado
+            or _manual_money(getattr(pedido, "domicilioOriginal", None))
+            or _manual_money(getattr(pedido, "costoDomicilio", None))
+            or resolved
+        )
+        pedido.costoDomicilio = Decimal("0.00")
+        pedido.domicilioOriginal = _round_money_decimal(original)
+        pedido.descuentoDomicilio = _round_money_decimal(
+            original if prefer_resolved else (descuento_payload or original)
+        )
+        return
+
+    charged = (
+        (resolved if prefer_resolved else None)
+        or cobrado
+        or original_payload
+        or _manual_money(getattr(pedido, "costoDomicilio", None))
+        or resolved
+    )
+    original = (
+        (resolved if prefer_resolved else None)
+        or original_payload
+        or _manual_money(getattr(pedido, "domicilioOriginal", None))
+        or charged
+    )
+    pedido.costoDomicilio = _round_money_decimal(charged)
+    pedido.domicilioOriginal = _round_money_decimal(original)
+    pedido.descuentoDomicilio = _round_money_decimal(
+        descuento_payload
+        if descuento_payload is not None
+        else max(Decimal(str(original)) - Decimal(str(charged)), Decimal("0.00"))
+    )
+
+
+def _resolve_entrega_domicilio_amount(db: Session, *, pedido: Pedido, entrega: Entrega | None) -> Decimal:
+    if not entrega:
+        return _round_money_decimal(getattr(pedido, "costoDomicilio", None) or 0)
+    return _resolve_costo_domicilio(
+        db,
+        empresa_id=int(pedido.empresaID),
+        sucursal_id=int(pedido.sucursalID),
+        tipo_entrega=getattr(entrega, "tipoEntrega", None),
+        barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
+        barrio_nombre=getattr(entrega, "barrioNombre", None),
+    )
+
+
 def _payload_field_value(payload: BaseModel, name: str, missing):
     fields_set = getattr(payload, "model_fields_set", None)
     if fields_set is None:
@@ -2920,6 +2992,7 @@ def actualizar_detalle_pedido(
         observaciones_personalizadas_payload = _payload_field_value(payload, "observacionesPersonalizadas", missing_payload)
         if observaciones_personalizadas_payload is missing_payload:
             observaciones_personalizadas_payload = _payload_field_value(payload, "observaciones", missing_payload)
+        entrega_actual: Entrega | None = None
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
             duplicate_detail = (
@@ -3079,7 +3152,7 @@ def actualizar_detalle_pedido(
             )
             or observaciones_personalizadas_payload is not missing_payload
         ):
-            entrega = (
+            entrega_actual = (
                 db.query(Entrega)
                 .filter(
                     Entrega.pedidoID == pedido_id,
@@ -3088,57 +3161,50 @@ def actualizar_detalle_pedido(
                 .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
                 .first()
             )
-            if entrega:
+            if entrega_actual:
                 if payload.fechaEntrega is not None:
-                    entrega.fechaEntregaProgramada = _parse_iso_date(payload.fechaEntrega)
+                    entrega_actual.fechaEntregaProgramada = _parse_iso_date(payload.fechaEntrega)
                 if payload.horaEntrega is not None:
-                    entrega.rangoHora = payload.horaEntrega or None
+                    entrega_actual.rangoHora = payload.horaEntrega or None
                 if payload.destinatarioNombre is not None:
-                    entrega.destinatario = str(payload.destinatarioNombre).strip() or None
+                    entrega_actual.destinatario = str(payload.destinatarioNombre).strip() or None
                 if payload.telefonoDestino is not None:
-                    entrega.telefonoDestino = str(payload.telefonoDestino).strip() or None
+                    entrega_actual.telefonoDestino = str(payload.telefonoDestino).strip() or None
                 if payload.direccion is not None:
-                    entrega.direccion = str(payload.direccion).strip() or None
+                    entrega_actual.direccion = str(payload.direccion).strip() or None
                 if payload.barrioNombre is not None:
-                    entrega.barrioNombre = str(payload.barrioNombre).strip() or None
-                    entrega.tipoEntrega = _normalize_delivery_type_from_barrio_name(entrega.barrioNombre)
+                    entrega_actual.barrioNombre = str(payload.barrioNombre).strip() or None
+                    entrega_actual.tipoEntrega = _normalize_delivery_type_from_barrio_name(entrega_actual.barrioNombre)
                     barrio_actualizado = _find_barrio_by_name(
                         db,
                         empresa_id=int(pedido.empresaID),
                         sucursal_id=int(pedido.sucursalID),
-                        barrio_nombre=entrega.barrioNombre,
+                        barrio_nombre=entrega_actual.barrioNombre,
                     )
-                    entrega.barrioID = int(barrio_actualizado.idBarrio) if barrio_actualizado else None
-                    domicilio_recalculado = _resolve_costo_domicilio(
-                        db,
-                        empresa_id=int(pedido.empresaID),
-                        sucursal_id=int(pedido.sucursalID),
-                        tipo_entrega=entrega.tipoEntrega,
-                        barrio_id=(int(entrega.barrioID) if getattr(entrega, "barrioID", None) is not None else None),
-                        barrio_nombre=entrega.barrioNombre,
+                    entrega_actual.barrioID = int(barrio_actualizado.idBarrio) if barrio_actualizado else None
+                    domicilio_recalculado = _resolve_entrega_domicilio_amount(
+                        db, pedido=pedido, entrega=entrega_actual
                     )
-                    if _pedido_omite_costo_domicilio(pedido):
-                        pedido.domicilioOriginal = _round_money_decimal(
-                            getattr(pedido, "domicilioOriginal", None) or domicilio_recalculado
-                        )
-                        pedido.costoDomicilio = Decimal("0.00")
-                    else:
-                        pedido.costoDomicilio = domicilio_recalculado
+                    _apply_pedido_domicilio_amounts(
+                        pedido,
+                        resolved_domicilio=domicilio_recalculado,
+                        prefer_resolved=True,
+                    )
                     needs_totals_recalc = True
                 if payload.latitudDestino is not None:
-                    entrega.latitudDestino = payload.latitudDestino
+                    entrega_actual.latitudDestino = payload.latitudDestino
                 if payload.longitudDestino is not None:
-                    entrega.longitudDestino = payload.longitudDestino
+                    entrega_actual.longitudDestino = payload.longitudDestino
                 if payload.firma is not None:
-                    entrega.firma = str(payload.firma).strip() or None
+                    entrega_actual.firma = str(payload.firma).strip() or None
                 if payload.mensajeTarjeta is not None:
-                    entrega.mensaje = str(payload.mensajeTarjeta).strip() or None
+                    entrega_actual.mensaje = str(payload.mensajeTarjeta).strip() or None
                 if payload.observacionGeneral is not None:
-                    entrega.observacionGeneral = str(payload.observacionGeneral).strip() or None
+                    entrega_actual.observacionGeneral = str(payload.observacionGeneral).strip() or None
                 if observaciones_personalizadas_payload is not missing_payload:
-                    entrega.observaciones = str(observaciones_personalizadas_payload or "").strip() or None
+                    entrega_actual.observaciones = str(observaciones_personalizadas_payload or "").strip() or None
                 if payload.fechaEntrega is not None:
-                    fecha_base = entrega.fechaEntregaProgramada or entrega.fechaEntrega
+                    fecha_base = entrega_actual.fechaEntregaProgramada or entrega_actual.fechaEntrega
                     fecha_programada = produccion_service.calcular_fecha_programada(
                         fecha_entrega=fecha_base,
                         dias_anticipacion=_dias_anticipacion_produccion(),
@@ -3186,46 +3252,57 @@ def actualizar_detalle_pedido(
                 forzar_recalculo_payload,
             )
         ):
+            if entrega_actual is None:
+                entrega_actual = (
+                    db.query(Entrega)
+                    .filter(
+                        Entrega.pedidoID == pedido_id,
+                        Entrega.empresaID == int(pedido.empresaID),
+                    )
+                    .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+                    .first()
+                )
             if domicilio_obsequiado_payload is not missing_financial:
-                pedido.domicilioObsequiado = bool(domicilio_obsequiado_payload)
+                domicilio_obsequiado_value = bool(domicilio_obsequiado_payload)
+            else:
+                domicilio_obsequiado_value = None
             if omitir_costo_domicilio_payload is not missing_financial:
-                pedido.omitirCostoDomicilio = bool(omitir_costo_domicilio_payload)
-            if domicilio_original_payload not in (missing_financial, None):
-                pedido.domicilioOriginal = _round_money_decimal(domicilio_original_payload)
-            if descuento_domicilio_payload not in (missing_financial, None):
-                pedido.descuentoDomicilio = _round_money_decimal(descuento_domicilio_payload)
+                omitir_costo_domicilio_value = bool(omitir_costo_domicilio_payload)
+            else:
+                omitir_costo_domicilio_value = None
 
             domicilio_cobrado_payload = (
                 costo_domicilio_payload
                 if costo_domicilio_payload not in (missing_financial, None)
                 else domicilio_payload
             )
-            omite_domicilio = _pedido_omite_costo_domicilio(pedido)
-            if omite_domicilio:
-                domicilio_original = _round_money_decimal(
-                    (
-                        domicilio_original_payload
-                        if domicilio_original_payload not in (missing_financial, None)
-                        else getattr(pedido, "domicilioOriginal", None)
-                    )
-                    or (
-                        domicilio_cobrado_payload
-                        if domicilio_cobrado_payload not in (missing_financial, None)
-                        else getattr(pedido, "costoDomicilio", None)
-                    )
-                    or 0
-                )
-                pedido.domicilioOriginal = domicilio_original
-                pedido.costoDomicilio = Decimal("0.00")
-                pedido.descuentoDomicilio = domicilio_original
-            else:
-                if domicilio_cobrado_payload not in (missing_financial, None):
-                    pedido.costoDomicilio = _round_money_decimal(domicilio_cobrado_payload)
-                elif domicilio_original_payload not in (missing_financial, None):
-                    pedido.costoDomicilio = _round_money_decimal(domicilio_original_payload)
-                pedido.descuentoDomicilio = Decimal("0.00")
-                if getattr(pedido, "domicilioOriginal", None) is None:
-                    pedido.domicilioOriginal = _round_money_decimal(getattr(pedido, "costoDomicilio", None) or 0)
+            resolved_domicilio = _resolve_entrega_domicilio_amount(db, pedido=pedido, entrega=entrega_actual)
+            prefer_resolved = bool(
+                payload.barrioNombre is not None
+                or (forzar_recalculo_payload is not missing_financial and forzar_recalculo_payload)
+            )
+            _apply_pedido_domicilio_amounts(
+                pedido,
+                resolved_domicilio=resolved_domicilio,
+                domicilio_cobrado=(
+                    domicilio_cobrado_payload
+                    if domicilio_cobrado_payload not in (missing_financial, None)
+                    else None
+                ),
+                domicilio_original=(
+                    domicilio_original_payload
+                    if domicilio_original_payload not in (missing_financial, None)
+                    else None
+                ),
+                descuento_domicilio=(
+                    descuento_domicilio_payload
+                    if descuento_domicilio_payload not in (missing_financial, None)
+                    else None
+                ),
+                domicilio_obsequiado=domicilio_obsequiado_value,
+                omitir_costo_domicilio=omitir_costo_domicilio_value,
+                prefer_resolved=prefer_resolved,
+            )
 
             needs_totals_recalc = True
 

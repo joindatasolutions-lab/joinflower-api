@@ -1,6 +1,8 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
 from app.routers.pedido import (
+    _apply_pedido_domicilio_amounts,
     _build_pedido_adjustments,
     _extract_payment_adjustments,
     _flora_phase2_ready,
@@ -114,6 +116,50 @@ def test_manual_domicilio_amounts_charges_delivery_when_not_omitted():
     assert amounts["cobrado"] == Decimal("12000.00")
     assert amounts["original"] == Decimal("12000.00")
     assert amounts["descuento"] == Decimal("0.00")
+
+
+def test_apply_pedido_domicilio_amounts_gifted_uses_resolved_neighborhood_cost():
+    pedido = SimpleNamespace(
+        costoDomicilio=Decimal("0.00"),
+        domicilioObsequiado=True,
+        omitirCostoDomicilio=False,
+        domicilioOriginal=Decimal("8000.00"),
+        descuentoDomicilio=Decimal("8000.00"),
+    )
+
+    _apply_pedido_domicilio_amounts(
+        pedido,
+        resolved_domicilio=Decimal("15000"),
+        descuento_domicilio=Decimal("8000"),
+        prefer_resolved=True,
+    )
+
+    assert pedido.costoDomicilio == Decimal("0.00")
+    assert pedido.domicilioOriginal == Decimal("15000.00")
+    assert pedido.descuentoDomicilio == Decimal("15000.00")
+
+
+def test_apply_pedido_domicilio_amounts_forced_recalc_prefers_resolved_over_payload():
+    pedido = SimpleNamespace(
+        costoDomicilio=Decimal("8000.00"),
+        domicilioObsequiado=False,
+        omitirCostoDomicilio=False,
+        domicilioOriginal=Decimal("8000.00"),
+        descuentoDomicilio=Decimal("0.00"),
+    )
+
+    _apply_pedido_domicilio_amounts(
+        pedido,
+        resolved_domicilio=Decimal("15000"),
+        domicilio_cobrado=Decimal("8000"),
+        domicilio_original=Decimal("8000"),
+        descuento_domicilio=Decimal("0"),
+        prefer_resolved=True,
+    )
+
+    assert pedido.costoDomicilio == Decimal("15000.00")
+    assert pedido.domicilioOriginal == Decimal("15000.00")
+    assert pedido.descuentoDomicilio == Decimal("0.00")
 
 
 def test_payment_metadata_serializes_discount_notes_balance_and_invoice_state():
