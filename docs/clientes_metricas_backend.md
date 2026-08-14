@@ -15,7 +15,7 @@ Cubre:
 - actividad: activos 30/60/90 dias, inactivos y en riesgo
 - valor: facturacion del periodo, ticket promedio, valor promedio por cliente, VIP y porcentaje de revenue recurrente
 - frecuencia: compras promedio por cliente y dias promedio entre compras
-- segmentos: `NEW`, `ACTIVE`, `RECURRING`, `VIP`, `INACTIVE`, `AT_RISK`, `HIGH_VALUE`
+- segmento unico por cliente: `NEW`, `ACTIVE`, `RECURRING`, `VIP`, `INACTIVE`, `AT_RISK` o `HIGH_VALUE`
 - oportunidades por fechas especiales: cumpleanos y aniversarios
 
 ## Entrega 2
@@ -131,7 +131,9 @@ Respuesta:
       "customer_id": "123",
       "name": "Maria Perez",
       "lifetime_value": 1850000,
-      "segments": ["RECURRING", "AT_RISK"],
+      "primary_segment": "AT_RISK",
+      "customer_segment": "AT_RISK",
+      "segments": ["AT_RISK"],
       "intelligence": {
         "customer_health_score": 42.5,
         "churn_risk_probability": 85,
@@ -155,6 +157,9 @@ Respuesta:
 - Solo los pedidos con estado `APROBADO` cuentan como compra efectiva.
 - Pedidos en estado `CREADO` no cuentan como compra, revenue, recurrencia, actividad, favoritos ni preferencias. Un cliente que solo tenga pedidos `CREADO` se considera `non_buyer`.
 - Clientes cuyo `nombre_completo` contenga `prueba` se excluyen de las metricas, segmentos, oportunidades e inteligencia de clientes. La comparacion no distingue mayusculas/minusculas, por lo que nombres como `PRUEBA` o `pruebammmm` no entran en los indicadores.
+- Cada cliente pertenece a un solo segmento principal. `segments` se mantiene como arreglo por compatibilidad, pero devuelve maximo un valor. `primary_segment` y `customer_segment` devuelven ese mismo valor como string.
+- Si un cliente cumple varias condiciones, se aplica esta prioridad: `AT_RISK`, `INACTIVE`, `VIP`, `HIGH_VALUE`, `RECURRING`, `NEW`, `ACTIVE`.
+- Los KPIs agregados siguen calculando condiciones reales del cliente. Por ejemplo, un cliente cuyo segmento principal sea `VIP` puede seguir contando dentro de `customers.recurring` si tiene 2 o mas compras aprobadas.
 - `VIP` es top 10% historico por `total_spent`.
 - `HIGH_VALUE` es top 20% historico por `total_spent`.
 - `AT_RISK` aplica solo a clientes con 2 o mas compras cuando `days_since_last_purchase > average_days_between_purchases * 1.5`.

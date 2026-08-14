@@ -24,6 +24,7 @@ CUSTOMER_PRICE_RANGE_MID_MAX = Decimal("250000")
 CUSTOMER_EFFECTIVE_PURCHASE_STATES = ("APROBADO",)
 CUSTOMER_TEST_NAME_PATTERNS = ("%prueba%",)
 CUSTOMER_SEGMENTS = {"NEW", "ACTIVE", "RECURRING", "VIP", "INACTIVE", "AT_RISK", "HIGH_VALUE"}
+CUSTOMER_SEGMENT_PRIORITY = ("AT_RISK", "INACTIVE", "VIP", "HIGH_VALUE", "RECURRING", "NEW", "ACTIVE")
 CUSTOMER_METRIC_SORTS = {
     "name",
     "last_purchase_at",
@@ -529,31 +530,35 @@ def _decorate_customer_segments(
     inactive_cutoff = today - timedelta(days=CUSTOMER_INACTIVE_DAYS)
 
     for row in rows:
-        segments = []
+        segment_candidates = []
         first_purchase = _date_or_none(row.get("first_purchase_at"))
         last_purchase = _date_or_none(row.get("last_purchase_at"))
         purchase_count = int(row.get("purchase_count") or 0)
         customer_id = int(row["customer_id"])
 
         if first_purchase and (start_date is None or first_purchase >= start_date) and (end_date is None or first_purchase <= end_date):
-            segments.append("NEW")
+            segment_candidates.append("NEW")
         if last_purchase and last_purchase >= active_cutoff:
-            segments.append("ACTIVE")
+            segment_candidates.append("ACTIVE")
         if purchase_count >= 2:
-            segments.append("RECURRING")
+            segment_candidates.append("RECURRING")
         if customer_id in vip_ids:
-            segments.append("VIP")
+            segment_candidates.append("VIP")
         if purchase_count > 0 and (not last_purchase or last_purchase < inactive_cutoff):
-            segments.append("INACTIVE")
+            segment_candidates.append("INACTIVE")
 
         avg_days = row.get("average_days_between_purchases")
         days_since = row.get("days_since_last_purchase")
         if purchase_count >= 2 and avg_days is not None and days_since is not None:
             if Decimal(str(days_since)) > Decimal(str(avg_days)) * CUSTOMER_AT_RISK_MULTIPLIER:
-                segments.append("AT_RISK")
+                segment_candidates.append("AT_RISK")
         if customer_id in high_value_ids:
-            segments.append("HIGH_VALUE")
+            segment_candidates.append("HIGH_VALUE")
 
+        primary_segment = next((segment for segment in CUSTOMER_SEGMENT_PRIORITY if segment in segment_candidates), None)
+        segments = [primary_segment] if primary_segment else []
+        row["_segment_candidates"] = segment_candidates
+        row["primary_segment"] = primary_segment
         row["segments"] = segments
         row["intelligence"] = _customer_intelligence(row, today=today)
     return rows
@@ -583,11 +588,11 @@ def _customer_metrics_payload(
 
     total_clients = len(rows)
     buyers = sum(1 for row in rows if int(row.get("purchase_count") or 0) > 0)
-    recurring = sum(1 for row in rows if "RECURRING" in row["segments"])
+    recurring = sum(1 for row in rows if "RECURRING" in row.get("_segment_candidates", row["segments"]))
     period_orders = sum(int(row.get("period_purchase_count") or 0) for row in rows)
     total_revenue = sum((_money(row.get("period_total_spent")) for row in rows), Decimal("0.00"))
     recurring_revenue = sum(
-        (_money(row.get("period_total_spent")) for row in rows if "RECURRING" in row["segments"]),
+        (_money(row.get("period_total_spent")) for row in rows if "RECURRING" in row.get("_segment_candidates", row["segments"])),
         Decimal("0.00"),
     )
     lifetime_revenue = sum((_money(row.get("total_spent")) for row in rows), Decimal("0.00"))
@@ -605,16 +610,16 @@ def _customer_metrics_payload(
             "total": total_clients,
             "buyers": buyers,
             "non_buyers": max(total_clients - buyers, 0),
-            "new": sum(1 for row in rows if "NEW" in row["segments"]),
+            "new": sum(1 for row in rows if "NEW" in row.get("_segment_candidates", row["segments"])),
             "recurring": recurring,
             "repeat_rate": _pct(recurring, buyers),
         },
         "activity": {
             "active_30d": sum(1 for row in rows if (row.get("days_since_last_purchase") is not None and row["days_since_last_purchase"] <= 30)),
             "active_60d": sum(1 for row in rows if (row.get("days_since_last_purchase") is not None and row["days_since_last_purchase"] <= 60)),
-            "active_90d": sum(1 for row in rows if "ACTIVE" in row["segments"]),
-            "inactive": sum(1 for row in rows if "INACTIVE" in row["segments"]),
-            "at_risk": sum(1 for row in rows if "AT_RISK" in row["segments"]),
+            "active_90d": sum(1 for row in rows if "ACTIVE" in row.get("_segment_candidates", row["segments"])),
+            "inactive": sum(1 for row in rows if "INACTIVE" in row.get("_segment_candidates", row["segments"])),
+            "at_risk": sum(1 for row in rows if "AT_RISK" in row.get("_segment_candidates", row["segments"])),
         },
         "value": {
             "total_revenue": float(total_revenue),
@@ -622,7 +627,7 @@ def _customer_metrics_payload(
             "average_order_value": float(_money(total_revenue / Decimal(period_orders))) if period_orders else 0.0,
             "average_customer_value": float(_money(total_revenue / Decimal(buyers))) if buyers else 0.0,
             "average_lifetime_value": float(_money(lifetime_revenue / Decimal(buyers))) if buyers else 0.0,
-            "vip_customers": sum(1 for row in rows if "VIP" in row["segments"]),
+            "vip_customers": sum(1 for row in rows if "VIP" in row.get("_segment_candidates", row["segments"])),
             "recurring_revenue_percentage": _pct(recurring_revenue, total_revenue),
         },
         "frequency": {
@@ -773,6 +778,9 @@ def _with_comparison(current_payload: dict, previous_payload: dict) -> dict:
 def _customer_metric_item(row: dict) -> dict:
     purchase_count = int(row.get("purchase_count") or 0)
     total_spent = _money(row.get("total_spent"))
+    primary_segment = row.get("primary_segment")
+    if primary_segment is None and row.get("segments"):
+        primary_segment = row["segments"][0]
     return {
         "customer_id": str(row["customer_id"]),
         "clienteID": int(row["customer_id"]),
@@ -795,7 +803,8 @@ def _customer_metric_item(row: dict) -> dict:
             if row.get("average_days_between_purchases") is not None
             else None
         ),
-        "customer_segment": row.get("segments", []),
+        "primary_segment": primary_segment,
+        "customer_segment": primary_segment,
         "segments": row.get("segments", []),
         "favorite_product": row.get("favorite_product"),
         "favorite_category": row.get("favorite_category"),

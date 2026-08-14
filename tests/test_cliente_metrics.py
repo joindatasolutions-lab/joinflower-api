@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.routers.cliente import (
     CUSTOMER_EFFECTIVE_PURCHASE_STATES,
+    CUSTOMER_SEGMENT_PRIORITY,
     CUSTOMER_TEST_NAME_PATTERNS,
     _average_price_range,
     _customer_insights,
@@ -91,7 +92,7 @@ def test_customer_metric_rows_only_counts_approved_orders_as_effective_purchase(
     assert CUSTOMER_TEST_NAME_PATTERNS == ("%prueba%",)
 
 
-def test_decorate_customer_segments_marks_vip_recurring_inactive_and_at_risk():
+def test_decorate_customer_segments_assigns_one_primary_segment_by_priority():
     rows = [
         {
             "customer_id": 1,
@@ -122,8 +123,11 @@ def test_decorate_customer_segments_marks_vip_recurring_inactive_and_at_risk():
         today=date(2026, 8, 14),
     )
 
-    assert {"VIP", "HIGH_VALUE", "RECURRING", "INACTIVE", "AT_RISK"}.issubset(set(result[0]["segments"]))
-    assert {"NEW", "ACTIVE"}.issubset(set(result[1]["segments"]))
+    assert result[0]["primary_segment"] == "AT_RISK"
+    assert result[0]["segments"] == ["AT_RISK"]
+    assert result[1]["primary_segment"] == "NEW"
+    assert result[1]["segments"] == ["NEW"]
+    assert CUSTOMER_SEGMENT_PRIORITY == ("AT_RISK", "INACTIVE", "VIP", "HIGH_VALUE", "RECURRING", "NEW", "ACTIVE")
 
 
 def test_customer_metrics_payload_returns_p0_kpis():
@@ -221,6 +225,8 @@ def test_customer_metric_item_includes_ltv_and_preferences():
     assert item["preferred_channel"] == "WhatsApp"
     assert item["average_price_range"] == "HIGH"
     assert item["preferred_occasion"] is None
+    assert item["primary_segment"] == "RECURRING"
+    assert item["customer_segment"] == "RECURRING"
 
 
 def test_customer_insights_are_backed_by_metrics():
