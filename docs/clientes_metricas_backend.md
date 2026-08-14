@@ -203,7 +203,7 @@ Respuesta:
 - Labels: `P0 VIP en riesgo`, `P1 Alto valor en riesgo`, `P2 Cliente en riesgo`, `P3 VIP inactivo`, `P4 Alto valor inactivo`, `P5 Cliente inactivo`, `P6 Cliente nuevo`, `P7 Cliente recurrente`, `P8 Cliente activo`.
 - En `/customers/priorities`, cuando llega rango de fechas, solo entran clientes con al menos una compra aprobada dentro del rango. `total_period_value` suma compras aprobadas del rango y `total_historical_value` mantiene el valor historico de esos mismos clientes.
 - En `/customers/metrics`, `commercial_priorities` aplica la misma regla de rango y devuelve `count`, `historical_value` y `period_value` por prioridad.
-- `VIP` es top 10% historico por `total_spent`.
+- `VIP` aplica cuando el cliente supera `3000000` en facturacion historica o supera `10` compras aprobadas historicas.
 - `HIGH_VALUE` es top 20% historico por `total_spent`.
 - `AT_RISK` aplica solo a clientes con 2 o mas compras cuando `days_since_last_purchase > average_days_between_purchases * 1.5`.
 - Preferencias se calculan con compras historicas validas.

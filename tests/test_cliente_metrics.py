@@ -6,6 +6,8 @@ from app.routers.cliente import (
     CUSTOMER_COMMERCIAL_PRIORITIES,
     CUSTOMER_EFFECTIVE_PURCHASE_STATES,
     CUSTOMER_TEST_NAME_PATTERNS,
+    CUSTOMER_VIP_MIN_PURCHASE_COUNT,
+    CUSTOMER_VIP_MIN_TOTAL_SPENT,
     _average_price_range,
     calculate_commercial_priority,
     _customer_insights,
@@ -101,7 +103,7 @@ def test_decorate_customer_segments_keeps_multiple_segments_and_commercial_prior
             "customer_id": 1,
             "name": "VIP",
             "purchase_count": 5,
-            "total_spent": Decimal("1000000"),
+            "total_spent": Decimal("3000001"),
             "first_purchase_at": date(2026, 1, 1),
             "last_purchase_at": date(2026, 3, 1),
             "average_days_between_purchases": Decimal("30"),
@@ -132,6 +134,51 @@ def test_decorate_customer_segments_keeps_multiple_segments_and_commercial_prior
     assert {"NEW", "ACTIVE"}.issubset(set(result[1]["segments"]))
     assert result[1]["commercial_priority"] == "P6"
     assert result[1]["commercial_priority_label"] == "Cliente nuevo"
+
+
+def test_vip_segment_uses_total_spent_or_purchase_count_thresholds():
+    rows = [
+        {
+            "customer_id": 1,
+            "purchase_count": 2,
+            "total_spent": Decimal("3000001"),
+            "first_purchase_at": date(2026, 1, 1),
+            "last_purchase_at": date(2026, 8, 1),
+            "average_days_between_purchases": None,
+            "days_since_last_purchase": 13,
+        },
+        {
+            "customer_id": 2,
+            "purchase_count": 11,
+            "total_spent": Decimal("100000"),
+            "first_purchase_at": date(2026, 1, 1),
+            "last_purchase_at": date(2026, 8, 1),
+            "average_days_between_purchases": None,
+            "days_since_last_purchase": 13,
+        },
+        {
+            "customer_id": 3,
+            "purchase_count": 10,
+            "total_spent": Decimal("3000000"),
+            "first_purchase_at": date(2026, 1, 1),
+            "last_purchase_at": date(2026, 8, 1),
+            "average_days_between_purchases": None,
+            "days_since_last_purchase": 13,
+        },
+    ]
+
+    result = _decorate_customer_segments(
+        rows,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 8, 14),
+        today=date(2026, 8, 14),
+    )
+
+    assert "VIP" in result[0]["segments"]
+    assert "VIP" in result[1]["segments"]
+    assert "VIP" not in result[2]["segments"]
+    assert CUSTOMER_VIP_MIN_TOTAL_SPENT == Decimal("3000000")
+    assert CUSTOMER_VIP_MIN_PURCHASE_COUNT == 10
 
 
 def test_calculate_commercial_priority_uses_business_priority_order():

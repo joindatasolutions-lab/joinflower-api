@@ -17,7 +17,8 @@ CUSTOMER_ACTIVE_DAYS = 90
 CUSTOMER_AT_RISK_MULTIPLIER = Decimal("1.5")
 CUSTOMER_CHURN_HIGH_RISK_THRESHOLD = Decimal("70")
 CUSTOMER_REPURCHASE_HIGH_PROBABILITY_THRESHOLD = Decimal("60")
-CUSTOMER_VIP_TOP_PERCENT = Decimal("10")
+CUSTOMER_VIP_MIN_TOTAL_SPENT = Decimal("3000000")
+CUSTOMER_VIP_MIN_PURCHASE_COUNT = 10
 CUSTOMER_HIGH_VALUE_TOP_PERCENT = Decimal("20")
 CUSTOMER_PRICE_RANGE_LOW_MAX = Decimal("120000")
 CUSTOMER_PRICE_RANGE_MID_MAX = Decimal("250000")
@@ -549,7 +550,6 @@ def _decorate_customer_segments(
     end_date: date | None,
     today: date,
 ) -> list[dict]:
-    vip_ids = _rank_top_ids(rows, percent=CUSTOMER_VIP_TOP_PERCENT, key="total_spent")
     high_value_ids = _rank_top_ids(rows, percent=CUSTOMER_HIGH_VALUE_TOP_PERCENT, key="total_spent")
     active_cutoff = today - timedelta(days=CUSTOMER_ACTIVE_DAYS)
     inactive_cutoff = today - timedelta(days=CUSTOMER_INACTIVE_DAYS)
@@ -567,7 +567,7 @@ def _decorate_customer_segments(
             segments.append("ACTIVE")
         if purchase_count >= 2:
             segments.append("RECURRING")
-        if customer_id in vip_ids:
+        if _money(row.get("total_spent")) > CUSTOMER_VIP_MIN_TOTAL_SPENT or purchase_count > CUSTOMER_VIP_MIN_PURCHASE_COUNT:
             segments.append("VIP")
         if purchase_count > 0 and (not last_purchase or last_purchase < inactive_cutoff):
             segments.append("INACTIVE")
