@@ -50,7 +50,7 @@ class _CaptureSqlDb:
         return _RowsResult([])
 
 
-def _row(cliente_id, total_spent, purchase_count, first_purchase, last_purchase, avg_days=None, period_spent=None):
+def _row(cliente_id, total_spent, purchase_count, first_purchase, last_purchase, avg_days=None, period_spent=None, period_purchase_count=None):
     return {
         "cliente_id": cliente_id,
         "empresa_id": 3,
@@ -67,7 +67,7 @@ def _row(cliente_id, total_spent, purchase_count, first_purchase, last_purchase,
         "first_purchase_at": first_purchase,
         "last_purchase_at": last_purchase,
         "average_days_between_purchases": avg_days,
-        "period_purchase_count": purchase_count,
+        "period_purchase_count": purchase_count if period_purchase_count is None else period_purchase_count,
         "period_total_spent": Decimal(str(period_spent if period_spent is not None else total_spent)),
         "period_average_order_value": Decimal(str(total_spent / purchase_count)) if purchase_count else Decimal("0"),
         "favorite_product": "Ramo premium" if purchase_count else None,
@@ -183,6 +183,7 @@ def test_customer_metrics_payload_returns_p0_kpis():
     assert payload["value"]["average_lifetime_value"] == 750.0
     assert payload["commercial_priorities"]["P7"]["count"] == 1
     assert payload["commercial_priorities"]["P7"]["historical_value"] == 1000.0
+    assert payload["commercial_priorities"]["P7"]["period_value"] == 1000.0
     assert payload["commercial_priorities"]["P6"]["count"] == 1
     assert payload["insights"]
 
@@ -192,6 +193,7 @@ def test_customer_priorities_endpoint_filters_and_totals_historical_value():
         [
             _row(1, 1000, 2, date(2026, 1, 1), date(2026, 8, 1), avg_days=Decimal("30")),
             _row(2, 500, 1, date(2026, 8, 3), date(2026, 8, 3)),
+            _row(3, 900, 2, date(2026, 1, 1), date(2026, 7, 1), avg_days=Decimal("30"), period_spent=0, period_purchase_count=0),
         ]
     )
 
@@ -213,6 +215,7 @@ def test_customer_priorities_endpoint_filters_and_totals_historical_value():
     assert payload["label"] == "Cliente recurrente"
     assert payload["total"] == 1
     assert payload["total_historical_value"] == 1000.0
+    assert payload["total_period_value"] == 1000.0
     assert payload["data"][0]["commercial_priority"] == "P7"
 
 

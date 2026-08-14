@@ -322,6 +322,12 @@ def _period_params(start_date: date | None, end_date: date | None, today: date) 
     return None, today
 
 
+def _filter_rows_by_requested_period(rows: list[dict], *, requested_period: bool) -> list[dict]:
+    if not requested_period:
+        return rows
+    return [row for row in rows if int(row.get("period_purchase_count") or 0) > 0]
+
+
 def _previous_period(start_date: date | None, end_date: date | None) -> tuple[date | None, date | None]:
     if not start_date or not end_date:
         return None, None
@@ -590,6 +596,7 @@ def _customer_metrics_payload(
     end_date: date | None,
     today: date,
 ) -> dict:
+    requested_period = bool(start_date or end_date)
     period_start, period_end = _period_params(start_date, end_date, today)
     rows = _decorate_customer_segments(
         _customer_metric_rows(
@@ -618,13 +625,20 @@ def _customer_metrics_payload(
     health_values = [Decimal(str(row.get("intelligence", {}).get("customer_health_score", 0))) for row in buyers_rows]
     churn_values = [Decimal(str(row.get("intelligence", {}).get("churn_risk_probability", 0))) for row in buyers_rows]
     repurchase_values = [Decimal(str(row.get("intelligence", {}).get("repurchase_probability", 0))) for row in buyers_rows]
+    priority_rows = _filter_rows_by_requested_period(rows, requested_period=requested_period)
     commercial_priorities = {
         priority: {
             "label": config["label"],
-            "count": sum(1 for row in rows if row.get("commercial_priority") == priority),
+            "count": sum(1 for row in priority_rows if row.get("commercial_priority") == priority),
             "historical_value": float(
                 sum(
-                    (_money(row.get("total_spent")) for row in rows if row.get("commercial_priority") == priority),
+                    (_money(row.get("total_spent")) for row in priority_rows if row.get("commercial_priority") == priority),
+                    Decimal("0.00"),
+                )
+            ),
+            "period_value": float(
+                sum(
+                    (_money(row.get("period_total_spent")) for row in priority_rows if row.get("commercial_priority") == priority),
                     Decimal("0.00"),
                 )
             ),
@@ -1080,6 +1094,7 @@ def listar_clientes_por_prioridad_comercial_tenant(
         raise HTTPException(status_code=400, detail=f"Prioridad comercial invalida: {priority}")
 
     today = datetime.now(timezone.utc).date()
+    requested_period = bool(start_date or end_date)
     period_start, period_end = _period_params(start_date, end_date, today)
     rows = _decorate_customer_segments(
         _customer_metric_rows(
@@ -1094,6 +1109,7 @@ def listar_clientes_por_prioridad_comercial_tenant(
         today=today,
     )
 
+    rows = _filter_rows_by_requested_period(rows, requested_period=requested_period)
     filtered = [row for row in rows if row.get("commercial_priority") == requested_priority]
     filtered = _filter_customer_metric_rows(filtered, search)
     filtered = _sort_customer_metric_rows(filtered, sort=sort, order=order)
@@ -1105,6 +1121,7 @@ def listar_clientes_por_prioridad_comercial_tenant(
         "label": CUSTOMER_COMMERCIAL_PRIORITIES[requested_priority]["label"],
         "total": total,
         "total_historical_value": float(sum((_money(row.get("total_spent")) for row in filtered), Decimal("0.00"))),
+        "total_period_value": float(sum((_money(row.get("period_total_spent")) for row in filtered), Decimal("0.00"))),
         "page": page,
         "limit": limit,
         "data": [_customer_metric_item(row) for row in items],

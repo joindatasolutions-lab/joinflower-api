@@ -91,6 +91,8 @@ Notas:
 
 - `start_date`: fecha inicial opcional, formato `YYYY-MM-DD`
 - `end_date`: fecha final opcional, formato `YYYY-MM-DD`
+- Si se omiten `start_date` y `end_date`, el filtro es historico.
+- Si llega `start_date` y/o `end_date`, metricas de periodo, prioridades comerciales y totales asociados usan ese rango.
 - `comparison=true`: disponible en metricas principales cuando hay periodo explicito
 - `page`, `limit`: paginacion en segmentos, prioridades y oportunidades
 - `search`: busqueda por nombre, identificacion, telefono o email en segmentos y prioridades
@@ -171,6 +173,7 @@ Respuesta:
   "label": "VIP en riesgo",
   "total": 23,
   "total_historical_value": 42800000,
+  "total_period_value": 12500000,
   "page": 1,
   "limit": 50,
   "data": [
@@ -198,6 +201,8 @@ Respuesta:
 - `commercial_priority` representa la prioridad de accion comercial y se calcula desde `segments`.
 - Prioridad comercial: `P0 = VIP + AT_RISK`, `P1 = HIGH_VALUE + AT_RISK`, `P2 = AT_RISK`, `P3 = VIP + INACTIVE`, `P4 = HIGH_VALUE + INACTIVE`, `P5 = INACTIVE`, `P6 = NEW`, `P7 = RECURRING`, `P8 = ACTIVE`.
 - Labels: `P0 VIP en riesgo`, `P1 Alto valor en riesgo`, `P2 Cliente en riesgo`, `P3 VIP inactivo`, `P4 Alto valor inactivo`, `P5 Cliente inactivo`, `P6 Cliente nuevo`, `P7 Cliente recurrente`, `P8 Cliente activo`.
+- En `/customers/priorities`, cuando llega rango de fechas, solo entran clientes con al menos una compra aprobada dentro del rango. `total_period_value` suma compras aprobadas del rango y `total_historical_value` mantiene el valor historico de esos mismos clientes.
+- En `/customers/metrics`, `commercial_priorities` aplica la misma regla de rango y devuelve `count`, `historical_value` y `period_value` por prioridad.
 - `VIP` es top 10% historico por `total_spent`.
 - `HIGH_VALUE` es top 20% historico por `total_spent`.
 - `AT_RISK` aplica solo a clientes con 2 o mas compras cuando `days_since_last_purchase > average_days_between_purchases * 1.5`.
