@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.routers.cliente import (
     CUSTOMER_EFFECTIVE_PURCHASE_STATES,
+    CUSTOMER_TEST_NAME_PATTERNS,
     _average_price_range,
     _customer_insights,
     _customer_special_date_opportunities,
@@ -85,6 +86,9 @@ def test_customer_metric_rows_only_counts_approved_orders_as_effective_purchase(
     assert "ANY(:effective_purchase_states)" in db.statement
     assert db.params["effective_purchase_states"] == list(CUSTOMER_EFFECTIVE_PURCHASE_STATES)
     assert CUSTOMER_EFFECTIVE_PURCHASE_STATES == ("APROBADO",)
+    assert "test_customer_name_patterns" in db.statement
+    assert db.params["test_customer_name_patterns"] == list(CUSTOMER_TEST_NAME_PATTERNS)
+    assert CUSTOMER_TEST_NAME_PATTERNS == ("%prueba%",)
 
 
 def test_decorate_customer_segments_marks_vip_recurring_inactive_and_at_risk():

@@ -154,6 +154,7 @@ Respuesta:
 - Todas las consultas filtran por `empresa_id` y validan tenant contra el usuario autenticado.
 - Solo los pedidos con estado `APROBADO` cuentan como compra efectiva.
 - Pedidos en estado `CREADO` no cuentan como compra, revenue, recurrencia, actividad, favoritos ni preferencias. Un cliente que solo tenga pedidos `CREADO` se considera `non_buyer`.
+- Clientes cuyo `nombre_completo` contenga `prueba` se excluyen de las metricas, segmentos, oportunidades e inteligencia de clientes. La comparacion no distingue mayusculas/minusculas, por lo que nombres como `PRUEBA` o `pruebammmm` no entran en los indicadores.
 - `VIP` es top 10% historico por `total_spent`.
 - `HIGH_VALUE` es top 20% historico por `total_spent`.
 - `AT_RISK` aplica solo a clientes con 2 o mas compras cuando `days_since_last_purchase > average_days_between_purchases * 1.5`.

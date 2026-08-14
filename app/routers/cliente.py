@@ -22,6 +22,7 @@ CUSTOMER_HIGH_VALUE_TOP_PERCENT = Decimal("20")
 CUSTOMER_PRICE_RANGE_LOW_MAX = Decimal("120000")
 CUSTOMER_PRICE_RANGE_MID_MAX = Decimal("250000")
 CUSTOMER_EFFECTIVE_PURCHASE_STATES = ("APROBADO",)
+CUSTOMER_TEST_NAME_PATTERNS = ("%prueba%",)
 CUSTOMER_SEGMENTS = {"NEW", "ACTIVE", "RECURRING", "VIP", "INACTIVE", "AT_RISK", "HIGH_VALUE"}
 CUSTOMER_METRIC_SORTS = {
     "name",
@@ -489,6 +490,9 @@ def _customer_metric_rows(
             LEFT JOIN category_preferences cp ON cp.cliente_id = c.cliente_id
             LEFT JOIN channel_preferences chp ON chp.cliente_id = c.cliente_id
             WHERE c.empresa_id = :empresa_id
+              AND NOT (
+                LOWER(COALESCE(c.nombre_completo, '')) LIKE ANY(:test_customer_name_patterns)
+              )
             """
         ),
         {
@@ -496,6 +500,7 @@ def _customer_metric_rows(
             "start_date": start_date,
             "end_date": end_date,
             "effective_purchase_states": list(CUSTOMER_EFFECTIVE_PURCHASE_STATES),
+            "test_customer_name_patterns": list(CUSTOMER_TEST_NAME_PATTERNS),
         },
     ).mappings().all()
 
