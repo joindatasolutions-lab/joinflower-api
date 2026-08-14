@@ -1183,6 +1183,19 @@ def _payload_producto_precio_value(payload: BaseModel, missing):
     return _payload_field_value(payload, "precioUnitario", missing)
 
 
+def _payload_cliente_tipo_ident_value(payload: BaseModel, missing):
+    value = _payload_field_value(payload, "clienteTipoIdent", missing)
+    if value is not missing:
+        return value
+    value = _payload_field_value(payload, "tipoIdent", missing)
+    if value is not missing:
+        return value
+    cliente_payload = getattr(payload, "cliente", None)
+    if isinstance(cliente_payload, dict) and "tipoIdent" in cliente_payload:
+        return cliente_payload.get("tipoIdent")
+    return missing
+
+
 def _sync_produccion_observaciones_internas_desde_detalle(
     db: Session,
     *,
@@ -2883,7 +2896,9 @@ class ActualizarDetallePedidoRequest(BaseModel):
     clienteTelefono: str | None = None
     clienteEmail: str | None = None
     clienteTipoIdent: str | None = None
+    tipoIdent: str | None = None
     clienteIdentificacion: str | None = None
+    cliente: dict | None = None
     destinatarioNombre: str | None = None
     telefonoDestino: str | None = None
     direccion: str | None = None
@@ -3002,6 +3017,7 @@ def actualizar_detalle_pedido(
         if observaciones_personalizadas_payload is missing_payload:
             observaciones_personalizadas_payload = _payload_field_value(payload, "observaciones", missing_payload)
         producto_precio_payload = _payload_producto_precio_value(payload, missing_payload)
+        cliente_tipo_ident_payload = _payload_cliente_tipo_ident_value(payload, missing_payload)
         entrega_actual: Entrega | None = None
 
         if payload.productoID is not None and detalle and int(payload.productoID) != int(detalle.productoID):
@@ -3137,8 +3153,8 @@ def actualizar_detalle_pedido(
                 cliente.telefonoCompleto = telefono_cliente or None
         if payload.clienteEmail is not None:
             cliente.email = str(payload.clienteEmail).strip().lower() or None
-        if payload.clienteTipoIdent is not None:
-            cliente.tipoIdent = _normalize_ident_type(payload.clienteTipoIdent)
+        if cliente_tipo_ident_payload not in (missing_payload, None):
+            cliente.tipoIdent = _normalize_ident_type(cliente_tipo_ident_payload)
             needs_totals_recalc = True
         if payload.clienteIdentificacion is not None:
             cliente.identificacion = str(payload.clienteIdentificacion).strip() or None
@@ -3317,6 +3333,7 @@ def actualizar_detalle_pedido(
             needs_totals_recalc = True
 
         if needs_totals_recalc:
+            db.flush()
             _recalculate_pedido_financials(
                 db,
                 pedido=pedido,

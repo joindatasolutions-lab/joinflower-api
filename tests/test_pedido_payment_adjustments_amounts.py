@@ -10,6 +10,7 @@ from app.routers.pedido import (
     _iva_unitario_for_producto,
     _load_pago_resumen,
     _manual_domicilio_amounts,
+    _payload_cliente_tipo_ident_value,
     _payload_producto_precio_value,
     _serialize_pago_metadata,
 )
@@ -170,6 +171,20 @@ def test_update_detail_price_payload_accepts_precio_unitario_alias():
     missing = object()
 
     assert _payload_producto_precio_value(payload, missing) == 120000
+
+
+def test_update_detail_ident_type_payload_accepts_tipo_ident_alias():
+    payload = ActualizarDetallePedidoRequest(detalleID=10, tipoIdent="NIT")
+    missing = object()
+
+    assert _payload_cliente_tipo_ident_value(payload, missing) == "NIT"
+
+
+def test_update_detail_ident_type_payload_accepts_nested_cliente_alias():
+    payload = ActualizarDetallePedidoRequest(detalleID=10, cliente={"tipoIdent": "NIT"})
+    missing = object()
+
+    assert _payload_cliente_tipo_ident_value(payload, missing) == "NIT"
 
 
 def test_custom_product_nit_tax_uses_general_rate_when_rate_missing():
