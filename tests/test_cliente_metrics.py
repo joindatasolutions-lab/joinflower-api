@@ -2,12 +2,14 @@ from datetime import date
 from decimal import Decimal
 
 from app.routers.cliente import (
+    CUSTOMER_EFFECTIVE_PURCHASE_STATES,
     _average_price_range,
     _customer_insights,
     _customer_special_date_opportunities,
     _customer_intelligence,
     _customer_metric_item,
     _customer_metrics_payload,
+    _customer_metric_rows,
     _decorate_customer_segments,
     _with_comparison,
 )
@@ -30,6 +32,17 @@ class _MetricRowsDb:
 
     def execute(self, *_args, **_kwargs):
         return _RowsResult(self.rows)
+
+
+class _CaptureSqlDb:
+    def __init__(self):
+        self.statement = ""
+        self.params = {}
+
+    def execute(self, statement, params=None):
+        self.statement = str(statement)
+        self.params = params or {}
+        return _RowsResult([])
 
 
 def _row(cliente_id, total_spent, purchase_count, first_purchase, last_purchase, avg_days=None, period_spent=None):
@@ -56,6 +69,22 @@ def _row(cliente_id, total_spent, purchase_count, first_purchase, last_purchase,
         "favorite_category": "Arreglos" if purchase_count else None,
         "preferred_channel": "WhatsApp" if purchase_count else None,
     }
+
+
+def test_customer_metric_rows_only_counts_approved_orders_as_effective_purchase():
+    db = _CaptureSqlDb()
+
+    _customer_metric_rows(
+        db,
+        empresa_id=3,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 8, 14),
+        today=date(2026, 8, 14),
+    )
+
+    assert "ANY(:effective_purchase_states)" in db.statement
+    assert db.params["effective_purchase_states"] == list(CUSTOMER_EFFECTIVE_PURCHASE_STATES)
+    assert CUSTOMER_EFFECTIVE_PURCHASE_STATES == ("APROBADO",)
 
 
 def test_decorate_customer_segments_marks_vip_recurring_inactive_and_at_risk():

@@ -21,6 +21,7 @@ CUSTOMER_VIP_TOP_PERCENT = Decimal("10")
 CUSTOMER_HIGH_VALUE_TOP_PERCENT = Decimal("20")
 CUSTOMER_PRICE_RANGE_LOW_MAX = Decimal("120000")
 CUSTOMER_PRICE_RANGE_MID_MAX = Decimal("250000")
+CUSTOMER_EFFECTIVE_PURCHASE_STATES = ("APROBADO",)
 CUSTOMER_SEGMENTS = {"NEW", "ACTIVE", "RECURRING", "VIP", "INACTIVE", "AT_RISK", "HIGH_VALUE"}
 CUSTOMER_METRIC_SORTS = {
     "name",
@@ -340,12 +341,7 @@ def _customer_metric_rows(
                   ON ep.id_estado_pedido = p.estado_pedido_id
                 WHERE p.empresa_id = :empresa_id
                   AND p.cliente_id IS NOT NULL
-                  AND (
-                    ep.nombre_estado IS NULL
-                    OR UPPER(TRIM(ep.nombre_estado)) NOT IN (
-                        'CANCELADO', 'CANCELLED', 'RECHAZADO', 'REFUNDED', 'VOID', 'ANULADO'
-                    )
-                  )
+                  AND UPPER(TRIM(COALESCE(ep.nombre_estado, ''))) = ANY(:effective_purchase_states)
             ),
             ordered_orders AS (
                 SELECT
@@ -499,6 +495,7 @@ def _customer_metric_rows(
             "empresa_id": int(empresa_id),
             "start_date": start_date,
             "end_date": end_date,
+            "effective_purchase_states": list(CUSTOMER_EFFECTIVE_PURCHASE_STATES),
         },
     ).mappings().all()
 
