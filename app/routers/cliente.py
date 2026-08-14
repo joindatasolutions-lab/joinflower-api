@@ -24,7 +24,17 @@ CUSTOMER_PRICE_RANGE_MID_MAX = Decimal("250000")
 CUSTOMER_EFFECTIVE_PURCHASE_STATES = ("APROBADO",)
 CUSTOMER_TEST_NAME_PATTERNS = ("%prueba%",)
 CUSTOMER_SEGMENTS = {"NEW", "ACTIVE", "RECURRING", "VIP", "INACTIVE", "AT_RISK", "HIGH_VALUE"}
-CUSTOMER_SEGMENT_PRIORITY = ("AT_RISK", "INACTIVE", "VIP", "HIGH_VALUE", "RECURRING", "NEW", "ACTIVE")
+CUSTOMER_COMMERCIAL_PRIORITIES = {
+    "P0": {"label": "VIP en riesgo", "segments": {"VIP", "AT_RISK"}},
+    "P1": {"label": "Alto valor en riesgo", "segments": {"HIGH_VALUE", "AT_RISK"}},
+    "P2": {"label": "Cliente en riesgo", "segments": {"AT_RISK"}},
+    "P3": {"label": "VIP inactivo", "segments": {"VIP", "INACTIVE"}},
+    "P4": {"label": "Alto valor inactivo", "segments": {"HIGH_VALUE", "INACTIVE"}},
+    "P5": {"label": "Cliente inactivo", "segments": {"INACTIVE"}},
+    "P6": {"label": "Cliente nuevo", "segments": {"NEW"}},
+    "P7": {"label": "Cliente recurrente", "segments": {"RECURRING"}},
+    "P8": {"label": "Cliente activo", "segments": {"ACTIVE"}},
+}
 CUSTOMER_METRIC_SORTS = {
     "name",
     "last_purchase_at",
@@ -39,6 +49,7 @@ CUSTOMER_METRIC_SORTS = {
     "favorite_category",
     "preferred_channel",
     "average_price_range",
+    "commercial_priority",
 }
 
 
@@ -90,6 +101,14 @@ def _average_price_range(value) -> str | None:
     if amount <= CUSTOMER_PRICE_RANGE_MID_MAX:
         return "MID"
     return "HIGH"
+
+
+def calculate_commercial_priority(segments: list[str]) -> dict:
+    segment_set = {str(segment or "").strip().upper() for segment in segments or []}
+    for priority, config in CUSTOMER_COMMERCIAL_PRIORITIES.items():
+        if config["segments"].issubset(segment_set):
+            return {"priority": priority, "label": config["label"]}
+    return {"priority": None, "label": None}
 
 
 def _clamp_decimal(value: Decimal | int | float, minimum: Decimal = Decimal("0"), maximum: Decimal = Decimal("100")) -> Decimal:
@@ -530,36 +549,35 @@ def _decorate_customer_segments(
     inactive_cutoff = today - timedelta(days=CUSTOMER_INACTIVE_DAYS)
 
     for row in rows:
-        segment_candidates = []
+        segments = []
         first_purchase = _date_or_none(row.get("first_purchase_at"))
         last_purchase = _date_or_none(row.get("last_purchase_at"))
         purchase_count = int(row.get("purchase_count") or 0)
         customer_id = int(row["customer_id"])
 
         if first_purchase and (start_date is None or first_purchase >= start_date) and (end_date is None or first_purchase <= end_date):
-            segment_candidates.append("NEW")
+            segments.append("NEW")
         if last_purchase and last_purchase >= active_cutoff:
-            segment_candidates.append("ACTIVE")
+            segments.append("ACTIVE")
         if purchase_count >= 2:
-            segment_candidates.append("RECURRING")
+            segments.append("RECURRING")
         if customer_id in vip_ids:
-            segment_candidates.append("VIP")
+            segments.append("VIP")
         if purchase_count > 0 and (not last_purchase or last_purchase < inactive_cutoff):
-            segment_candidates.append("INACTIVE")
+            segments.append("INACTIVE")
 
         avg_days = row.get("average_days_between_purchases")
         days_since = row.get("days_since_last_purchase")
         if purchase_count >= 2 and avg_days is not None and days_since is not None:
             if Decimal(str(days_since)) > Decimal(str(avg_days)) * CUSTOMER_AT_RISK_MULTIPLIER:
-                segment_candidates.append("AT_RISK")
+                segments.append("AT_RISK")
         if customer_id in high_value_ids:
-            segment_candidates.append("HIGH_VALUE")
+            segments.append("HIGH_VALUE")
 
-        primary_segment = next((segment for segment in CUSTOMER_SEGMENT_PRIORITY if segment in segment_candidates), None)
-        segments = [primary_segment] if primary_segment else []
-        row["_segment_candidates"] = segment_candidates
-        row["primary_segment"] = primary_segment
+        commercial_priority = calculate_commercial_priority(segments)
         row["segments"] = segments
+        row["commercial_priority"] = commercial_priority["priority"]
+        row["commercial_priority_label"] = commercial_priority["label"]
         row["intelligence"] = _customer_intelligence(row, today=today)
     return rows
 
@@ -588,11 +606,11 @@ def _customer_metrics_payload(
 
     total_clients = len(rows)
     buyers = sum(1 for row in rows if int(row.get("purchase_count") or 0) > 0)
-    recurring = sum(1 for row in rows if "RECURRING" in row.get("_segment_candidates", row["segments"]))
+    recurring = sum(1 for row in rows if "RECURRING" in row["segments"])
     period_orders = sum(int(row.get("period_purchase_count") or 0) for row in rows)
     total_revenue = sum((_money(row.get("period_total_spent")) for row in rows), Decimal("0.00"))
     recurring_revenue = sum(
-        (_money(row.get("period_total_spent")) for row in rows if "RECURRING" in row.get("_segment_candidates", row["segments"])),
+        (_money(row.get("period_total_spent")) for row in rows if "RECURRING" in row["segments"]),
         Decimal("0.00"),
     )
     lifetime_revenue = sum((_money(row.get("total_spent")) for row in rows), Decimal("0.00"))
@@ -600,6 +618,19 @@ def _customer_metrics_payload(
     health_values = [Decimal(str(row.get("intelligence", {}).get("customer_health_score", 0))) for row in buyers_rows]
     churn_values = [Decimal(str(row.get("intelligence", {}).get("churn_risk_probability", 0))) for row in buyers_rows]
     repurchase_values = [Decimal(str(row.get("intelligence", {}).get("repurchase_probability", 0))) for row in buyers_rows]
+    commercial_priorities = {
+        priority: {
+            "label": config["label"],
+            "count": sum(1 for row in rows if row.get("commercial_priority") == priority),
+            "historical_value": float(
+                sum(
+                    (_money(row.get("total_spent")) for row in rows if row.get("commercial_priority") == priority),
+                    Decimal("0.00"),
+                )
+            ),
+        }
+        for priority, config in CUSTOMER_COMMERCIAL_PRIORITIES.items()
+    }
 
     payload = {
         "period": {
@@ -610,16 +641,16 @@ def _customer_metrics_payload(
             "total": total_clients,
             "buyers": buyers,
             "non_buyers": max(total_clients - buyers, 0),
-            "new": sum(1 for row in rows if "NEW" in row.get("_segment_candidates", row["segments"])),
+            "new": sum(1 for row in rows if "NEW" in row["segments"]),
             "recurring": recurring,
             "repeat_rate": _pct(recurring, buyers),
         },
         "activity": {
             "active_30d": sum(1 for row in rows if (row.get("days_since_last_purchase") is not None and row["days_since_last_purchase"] <= 30)),
             "active_60d": sum(1 for row in rows if (row.get("days_since_last_purchase") is not None and row["days_since_last_purchase"] <= 60)),
-            "active_90d": sum(1 for row in rows if "ACTIVE" in row.get("_segment_candidates", row["segments"])),
-            "inactive": sum(1 for row in rows if "INACTIVE" in row.get("_segment_candidates", row["segments"])),
-            "at_risk": sum(1 for row in rows if "AT_RISK" in row.get("_segment_candidates", row["segments"])),
+            "active_90d": sum(1 for row in rows if "ACTIVE" in row["segments"]),
+            "inactive": sum(1 for row in rows if "INACTIVE" in row["segments"]),
+            "at_risk": sum(1 for row in rows if "AT_RISK" in row["segments"]),
         },
         "value": {
             "total_revenue": float(total_revenue),
@@ -627,7 +658,7 @@ def _customer_metrics_payload(
             "average_order_value": float(_money(total_revenue / Decimal(period_orders))) if period_orders else 0.0,
             "average_customer_value": float(_money(total_revenue / Decimal(buyers))) if buyers else 0.0,
             "average_lifetime_value": float(_money(lifetime_revenue / Decimal(buyers))) if buyers else 0.0,
-            "vip_customers": sum(1 for row in rows if "VIP" in row.get("_segment_candidates", row["segments"])),
+            "vip_customers": sum(1 for row in rows if "VIP" in row["segments"]),
             "recurring_revenue_percentage": _pct(recurring_revenue, total_revenue),
         },
         "frequency": {
@@ -658,6 +689,7 @@ def _customer_metrics_payload(
             "recommended_special_date_campaigns": sum(1 for row in rows if row.get("intelligence", {}).get("next_best_action", {}).get("action") == "SPECIAL_DATE_CAMPAIGN"),
             "recommended_vip_care_customers": sum(1 for row in rows if row.get("intelligence", {}).get("next_best_action", {}).get("action") == "VIP_CARE"),
         },
+        "commercial_priorities": commercial_priorities,
     }
     payload["insights"] = _customer_insights(payload)
     return payload
@@ -778,9 +810,13 @@ def _with_comparison(current_payload: dict, previous_payload: dict) -> dict:
 def _customer_metric_item(row: dict) -> dict:
     purchase_count = int(row.get("purchase_count") or 0)
     total_spent = _money(row.get("total_spent"))
-    primary_segment = row.get("primary_segment")
-    if primary_segment is None and row.get("segments"):
-        primary_segment = row["segments"][0]
+    segments = row.get("segments", [])
+    commercial_priority = row.get("commercial_priority")
+    commercial_priority_label = row.get("commercial_priority_label")
+    if commercial_priority is None or commercial_priority_label is None:
+        priority = calculate_commercial_priority(segments)
+        commercial_priority = priority["priority"]
+        commercial_priority_label = priority["label"]
     return {
         "customer_id": str(row["customer_id"]),
         "clienteID": int(row["customer_id"]),
@@ -803,15 +839,54 @@ def _customer_metric_item(row: dict) -> dict:
             if row.get("average_days_between_purchases") is not None
             else None
         ),
-        "primary_segment": primary_segment,
-        "customer_segment": primary_segment,
-        "segments": row.get("segments", []),
+        "customer_segment": segments,
+        "segments": segments,
+        "commercial_priority": commercial_priority,
+        "commercial_priority_label": commercial_priority_label,
         "favorite_product": row.get("favorite_product"),
         "favorite_category": row.get("favorite_category"),
         "preferred_occasion": None,
         "preferred_channel": row.get("preferred_channel"),
         "intelligence": row.get("intelligence") or {},
     }
+
+
+def _filter_customer_metric_rows(rows: list[dict], search: str) -> list[dict]:
+    search_text = str(search or "").strip().lower()
+    if not search_text:
+        return rows
+    return [
+        row
+        for row in rows
+        if search_text in str(row.get("name") or "").lower()
+        or search_text in str(row.get("identificacion") or "").lower()
+        or search_text in str(row.get("telefono") or "").lower()
+        or search_text in str(row.get("telefono_completo") or "").lower()
+        or search_text in str(row.get("email") or "").lower()
+    ]
+
+
+def _sort_customer_metric_rows(rows: list[dict], *, sort: str, order: str) -> list[dict]:
+    sort_key = sort if sort in CUSTOMER_METRIC_SORTS else "total_spent"
+    reverse = str(order or "desc").lower() != "asc"
+
+    def _sort_value(row: dict):
+        value_key = "total_spent" if sort_key == "lifetime_value" else sort_key
+        value = row.get(value_key)
+        if sort_key == "name":
+            return str(value or "").lower()
+        if sort_key in {"total_spent", "average_order_value", "lifetime_value"}:
+            return _money(value)
+        return value
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            _sort_value(row) is None,
+            _sort_value(row),
+        ),
+        reverse=reverse,
+    )
 
 
 @router.get("/cliente/buscar/{empresaID}/{identificacion}", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
@@ -920,37 +995,8 @@ def listar_clientes_por_segmento_tenant(
     )
 
     filtered = [row for row in rows if requested_segment in row.get("segments", [])]
-    search_text = str(search or "").strip().lower()
-    if search_text:
-        filtered = [
-            row
-            for row in filtered
-            if search_text in str(row.get("name") or "").lower()
-            or search_text in str(row.get("identificacion") or "").lower()
-            or search_text in str(row.get("telefono") or "").lower()
-            or search_text in str(row.get("telefono_completo") or "").lower()
-            or search_text in str(row.get("email") or "").lower()
-        ]
-
-    sort_key = sort if sort in CUSTOMER_METRIC_SORTS else "total_spent"
-    reverse = str(order or "desc").lower() != "asc"
-
-    def _segment_sort_value(row: dict):
-        value_key = "total_spent" if sort_key == "lifetime_value" else sort_key
-        value = row.get(value_key)
-        if sort_key == "name":
-            return str(value or "").lower()
-        if sort_key in {"total_spent", "average_order_value", "lifetime_value"}:
-            return _money(value)
-        return value
-
-    filtered.sort(
-        key=lambda row: (
-            _segment_sort_value(row) is None,
-            _segment_sort_value(row),
-        ),
-        reverse=reverse,
-    )
+    filtered = _filter_customer_metric_rows(filtered, search)
+    filtered = _sort_customer_metric_rows(filtered, sort=sort, order=order)
     total = len(filtered)
     start = (page - 1) * limit
     items = filtered[start : start + limit]
@@ -1011,6 +1057,57 @@ def listar_oportunidades_clientes_tenant(
         "limit": limit,
         "days": int(days),
         "data": opportunities[start : start + limit],
+    }
+
+
+@router.get("/tenants/{tenant_id}/customers/priorities", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
+def listar_clientes_por_prioridad_comercial_tenant(
+    tenant_id: int,
+    priority: str = Query(...),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    search: str = Query(default=""),
+    sort: str = Query(default="total_spent"),
+    order: str = Query(default="desc"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    empresa_id = _resolve_empresa_id(auth, int(tenant_id))
+    requested_priority = str(priority or "").strip().upper()
+    if requested_priority not in CUSTOMER_COMMERCIAL_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Prioridad comercial invalida: {priority}")
+
+    today = datetime.now(timezone.utc).date()
+    period_start, period_end = _period_params(start_date, end_date, today)
+    rows = _decorate_customer_segments(
+        _customer_metric_rows(
+            db,
+            empresa_id=empresa_id,
+            start_date=period_start,
+            end_date=period_end,
+            today=today,
+        ),
+        start_date=period_start,
+        end_date=period_end,
+        today=today,
+    )
+
+    filtered = [row for row in rows if row.get("commercial_priority") == requested_priority]
+    filtered = _filter_customer_metric_rows(filtered, search)
+    filtered = _sort_customer_metric_rows(filtered, sort=sort, order=order)
+    total = len(filtered)
+    start = (page - 1) * limit
+    items = filtered[start : start + limit]
+    return {
+        "priority": requested_priority,
+        "label": CUSTOMER_COMMERCIAL_PRIORITIES[requested_priority]["label"],
+        "total": total,
+        "total_historical_value": float(sum((_money(row.get("total_spent")) for row in filtered), Decimal("0.00"))),
+        "page": page,
+        "limit": limit,
+        "data": [_customer_metric_item(row) for row in items],
     }
 
 

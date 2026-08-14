@@ -15,7 +15,7 @@ Cubre:
 - actividad: activos 30/60/90 dias, inactivos y en riesgo
 - valor: facturacion del periodo, ticket promedio, valor promedio por cliente, VIP y porcentaje de revenue recurrente
 - frecuencia: compras promedio por cliente y dias promedio entre compras
-- segmento unico por cliente: `NEW`, `ACTIVE`, `RECURRING`, `VIP`, `INACTIVE`, `AT_RISK` o `HIGH_VALUE`
+- segmentos multiples por cliente: `NEW`, `ACTIVE`, `RECURRING`, `VIP`, `INACTIVE`, `AT_RISK`, `HIGH_VALUE`
 - oportunidades por fechas especiales: cumpleanos y aniversarios
 
 ## Entrega 2
@@ -44,6 +44,7 @@ Cubre:
 Endpoints nuevos o ampliados:
 
 - `GET /tenants/{tenant_id}/customers/intelligence`
+- `GET /tenants/{tenant_id}/customers/priorities`
 - `GET /tenants/{tenant_id}/customers/metrics`
 - `GET /tenants/{tenant_id}/customers/{customer_id}/metrics`
 - `GET /clientes?includeMetrics=true`
@@ -57,6 +58,9 @@ Cubre:
 - resumen agregado en `metrics.intelligence`
 - insights textuales accionables en `metrics.insights`
 - listado de clientes por inteligencia comercial
+- prioridad comercial por cliente como `commercial_priority` y `commercial_priority_label`
+- resumen agregado por prioridad en `metrics.commercial_priorities`
+- listado de clientes por prioridad comercial
 - filtros de inteligencia por:
   - `action`
   - `risk=HIGH|LOW`
@@ -88,9 +92,10 @@ Notas:
 - `start_date`: fecha inicial opcional, formato `YYYY-MM-DD`
 - `end_date`: fecha final opcional, formato `YYYY-MM-DD`
 - `comparison=true`: disponible en metricas principales cuando hay periodo explicito
-- `page`, `limit`: paginacion en segmentos y oportunidades
-- `search`: busqueda por nombre, identificacion, telefono o email en segmentos
-- `sort`: `name`, `last_purchase_at`, `first_purchase_at`, `purchase_count`, `total_spent`, `lifetime_value`, `average_order_value`, `average_price_range`, `days_since_last_purchase`, `average_days_between_purchases`, `favorite_product`, `favorite_category`, `preferred_channel`
+- `page`, `limit`: paginacion en segmentos, prioridades y oportunidades
+- `search`: busqueda por nombre, identificacion, telefono o email en segmentos y prioridades
+- `priority`: filtro de prioridad comercial en `/customers/priorities`, valores `P0` a `P8`
+- `sort`: `name`, `last_purchase_at`, `first_purchase_at`, `purchase_count`, `total_spent`, `lifetime_value`, `average_order_value`, `average_price_range`, `days_since_last_purchase`, `average_days_between_purchases`, `favorite_product`, `favorite_category`, `preferred_channel`, `commercial_priority`
 - `order`: `asc` o `desc`
 
 ## Insights
@@ -131,9 +136,10 @@ Respuesta:
       "customer_id": "123",
       "name": "Maria Perez",
       "lifetime_value": 1850000,
-      "primary_segment": "AT_RISK",
-      "customer_segment": "AT_RISK",
-      "segments": ["AT_RISK"],
+      "customer_segment": ["VIP", "RECURRING", "AT_RISK"],
+      "segments": ["VIP", "RECURRING", "AT_RISK"],
+      "commercial_priority": "P0",
+      "commercial_priority_label": "VIP en riesgo",
       "intelligence": {
         "customer_health_score": 42.5,
         "churn_risk_probability": 85,
@@ -151,15 +157,47 @@ Respuesta:
 }
 ```
 
+## Endpoint de prioridades comerciales
+
+```http
+GET /tenants/{tenant_id}/customers/priorities?priority=P0&page=1&limit=50
+```
+
+Respuesta:
+
+```json
+{
+  "priority": "P0",
+  "label": "VIP en riesgo",
+  "total": 23,
+  "total_historical_value": 42800000,
+  "page": 1,
+  "limit": 50,
+  "data": [
+    {
+      "customer_id": "123",
+      "segments": ["VIP", "RECURRING", "AT_RISK"],
+      "commercial_priority": "P0",
+      "commercial_priority_label": "VIP en riesgo",
+      "purchase_count": 8,
+      "total_spent": 2850000,
+      "last_purchase_at": "2026-04-10",
+      "days_since_last_purchase": 126
+    }
+  ]
+}
+```
+
 ## Reglas de negocio
 
 - Todas las consultas filtran por `empresa_id` y validan tenant contra el usuario autenticado.
 - Solo los pedidos con estado `APROBADO` cuentan como compra efectiva.
 - Pedidos en estado `CREADO` no cuentan como compra, revenue, recurrencia, actividad, favoritos ni preferencias. Un cliente que solo tenga pedidos `CREADO` se considera `non_buyer`.
 - Clientes cuyo `nombre_completo` contenga `prueba` se excluyen de las metricas, segmentos, oportunidades e inteligencia de clientes. La comparacion no distingue mayusculas/minusculas, por lo que nombres como `PRUEBA` o `pruebammmm` no entran en los indicadores.
-- Cada cliente pertenece a un solo segmento principal. `segments` se mantiene como arreglo por compatibilidad, pero devuelve maximo un valor. `primary_segment` y `customer_segment` devuelven ese mismo valor como string.
-- Si un cliente cumple varias condiciones, se aplica esta prioridad: `AT_RISK`, `INACTIVE`, `VIP`, `HIGH_VALUE`, `RECURRING`, `NEW`, `ACTIVE`.
-- Los KPIs agregados siguen calculando condiciones reales del cliente. Por ejemplo, un cliente cuyo segmento principal sea `VIP` puede seguir contando dentro de `customers.recurring` si tiene 2 o mas compras aprobadas.
+- Un cliente puede pertenecer a varios segmentos. `segments` representa caracteristicas del cliente; no es una categoria unica.
+- `commercial_priority` representa la prioridad de accion comercial y se calcula desde `segments`.
+- Prioridad comercial: `P0 = VIP + AT_RISK`, `P1 = HIGH_VALUE + AT_RISK`, `P2 = AT_RISK`, `P3 = VIP + INACTIVE`, `P4 = HIGH_VALUE + INACTIVE`, `P5 = INACTIVE`, `P6 = NEW`, `P7 = RECURRING`, `P8 = ACTIVE`.
+- Labels: `P0 VIP en riesgo`, `P1 Alto valor en riesgo`, `P2 Cliente en riesgo`, `P3 VIP inactivo`, `P4 Alto valor inactivo`, `P5 Cliente inactivo`, `P6 Cliente nuevo`, `P7 Cliente recurrente`, `P8 Cliente activo`.
 - `VIP` es top 10% historico por `total_spent`.
 - `HIGH_VALUE` es top 20% historico por `total_spent`.
 - `AT_RISK` aplica solo a clientes con 2 o mas compras cuando `days_since_last_purchase > average_days_between_purchases * 1.5`.

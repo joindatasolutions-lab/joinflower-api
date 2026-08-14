@@ -1,11 +1,13 @@
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 from app.routers.cliente import (
+    CUSTOMER_COMMERCIAL_PRIORITIES,
     CUSTOMER_EFFECTIVE_PURCHASE_STATES,
-    CUSTOMER_SEGMENT_PRIORITY,
     CUSTOMER_TEST_NAME_PATTERNS,
     _average_price_range,
+    calculate_commercial_priority,
     _customer_insights,
     _customer_special_date_opportunities,
     _customer_intelligence,
@@ -13,6 +15,7 @@ from app.routers.cliente import (
     _customer_metrics_payload,
     _customer_metric_rows,
     _decorate_customer_segments,
+    listar_clientes_por_prioridad_comercial_tenant,
     _with_comparison,
 )
 
@@ -92,7 +95,7 @@ def test_customer_metric_rows_only_counts_approved_orders_as_effective_purchase(
     assert CUSTOMER_TEST_NAME_PATTERNS == ("%prueba%",)
 
 
-def test_decorate_customer_segments_assigns_one_primary_segment_by_priority():
+def test_decorate_customer_segments_keeps_multiple_segments_and_commercial_priority():
     rows = [
         {
             "customer_id": 1,
@@ -123,11 +126,33 @@ def test_decorate_customer_segments_assigns_one_primary_segment_by_priority():
         today=date(2026, 8, 14),
     )
 
-    assert result[0]["primary_segment"] == "AT_RISK"
-    assert result[0]["segments"] == ["AT_RISK"]
-    assert result[1]["primary_segment"] == "NEW"
-    assert result[1]["segments"] == ["NEW"]
-    assert CUSTOMER_SEGMENT_PRIORITY == ("AT_RISK", "INACTIVE", "VIP", "HIGH_VALUE", "RECURRING", "NEW", "ACTIVE")
+    assert {"VIP", "HIGH_VALUE", "RECURRING", "INACTIVE", "AT_RISK"}.issubset(set(result[0]["segments"]))
+    assert result[0]["commercial_priority"] == "P0"
+    assert result[0]["commercial_priority_label"] == "VIP en riesgo"
+    assert {"NEW", "ACTIVE"}.issubset(set(result[1]["segments"]))
+    assert result[1]["commercial_priority"] == "P6"
+    assert result[1]["commercial_priority_label"] == "Cliente nuevo"
+
+
+def test_calculate_commercial_priority_uses_business_priority_order():
+    cases = [
+        (["VIP", "AT_RISK"], "P0", "VIP en riesgo"),
+        (["HIGH_VALUE", "AT_RISK"], "P1", "Alto valor en riesgo"),
+        (["AT_RISK"], "P2", "Cliente en riesgo"),
+        (["VIP", "INACTIVE"], "P3", "VIP inactivo"),
+        (["HIGH_VALUE", "INACTIVE"], "P4", "Alto valor inactivo"),
+        (["INACTIVE"], "P5", "Cliente inactivo"),
+        (["NEW"], "P6", "Cliente nuevo"),
+        (["RECURRING"], "P7", "Cliente recurrente"),
+        (["ACTIVE"], "P8", "Cliente activo"),
+        (["VIP", "RECURRING", "AT_RISK"], "P0", "VIP en riesgo"),
+    ]
+
+    for segments, expected_priority, expected_label in cases:
+        priority = calculate_commercial_priority(segments)
+        assert priority == {"priority": expected_priority, "label": expected_label}
+
+    assert tuple(CUSTOMER_COMMERCIAL_PRIORITIES.keys()) == ("P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8")
 
 
 def test_customer_metrics_payload_returns_p0_kpis():
@@ -156,7 +181,39 @@ def test_customer_metrics_payload_returns_p0_kpis():
     assert payload["value"]["total_revenue"] == 1500.0
     assert payload["value"]["lifetime_revenue"] == 1500.0
     assert payload["value"]["average_lifetime_value"] == 750.0
+    assert payload["commercial_priorities"]["P7"]["count"] == 1
+    assert payload["commercial_priorities"]["P7"]["historical_value"] == 1000.0
+    assert payload["commercial_priorities"]["P6"]["count"] == 1
     assert payload["insights"]
+
+
+def test_customer_priorities_endpoint_filters_and_totals_historical_value():
+    db = _MetricRowsDb(
+        [
+            _row(1, 1000, 2, date(2026, 1, 1), date(2026, 8, 1), avg_days=Decimal("30")),
+            _row(2, 500, 1, date(2026, 8, 3), date(2026, 8, 3)),
+        ]
+    )
+
+    payload = listar_clientes_por_prioridad_comercial_tenant(
+        3,
+        priority="P7",
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 14),
+        page=1,
+        limit=50,
+        search="",
+        sort="total_spent",
+        order="desc",
+        db=db,
+        auth=SimpleNamespace(empresaID=3, rol="USER", esGlobalJoin=False),
+    )
+
+    assert payload["priority"] == "P7"
+    assert payload["label"] == "Cliente recurrente"
+    assert payload["total"] == 1
+    assert payload["total_historical_value"] == 1000.0
+    assert payload["data"][0]["commercial_priority"] == "P7"
 
 
 def test_with_comparison_wraps_metric_changes():
@@ -225,8 +282,9 @@ def test_customer_metric_item_includes_ltv_and_preferences():
     assert item["preferred_channel"] == "WhatsApp"
     assert item["average_price_range"] == "HIGH"
     assert item["preferred_occasion"] is None
-    assert item["primary_segment"] == "RECURRING"
-    assert item["customer_segment"] == "RECURRING"
+    assert item["customer_segment"] == ["RECURRING", "VIP"]
+    assert item["commercial_priority"] == "P7"
+    assert item["commercial_priority_label"] == "Cliente recurrente"
 
 
 def test_customer_insights_are_backed_by_metrics():
