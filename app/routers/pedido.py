@@ -4491,6 +4491,7 @@ def _build_ventas_diario_rows(
 
 
 @router.get("/contabilidad/ventas-diario", dependencies=[Depends(require_module_access("contabilidad", "puedeVer"))])
+@router.get("/pedidos/contabilidad/ventas-diario", dependencies=[Depends(require_module_access("contabilidad", "puedeVer"))])
 def resumen_ventas_diario(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),

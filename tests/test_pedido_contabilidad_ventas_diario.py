@@ -3,6 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from app.routers.pedido import _build_ventas_diario_rows
+from app.routers.pedido import router
 
 
 def _pedido(
@@ -64,3 +65,10 @@ def test_ventas_diario_uses_approved_orders_and_charged_delivery_only():
     ]
     assert result["totals"]["cantidadPedidos"] == 3
     assert result["totals"]["totalDomicilios"] == 18000.0
+
+
+def test_ventas_diario_registers_legacy_and_canonical_paths():
+    paths = {getattr(route, "path", None) for route in router.routes}
+
+    assert "/contabilidad/ventas-diario" in paths
+    assert "/pedidos/contabilidad/ventas-diario" in paths
