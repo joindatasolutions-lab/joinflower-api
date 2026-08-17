@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import and_, or_, cast, String, func, text
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 import textwrap
 from reportlab.lib.units import mm
@@ -4409,6 +4409,121 @@ def resumen_contabilidad(
         "paymentAccountRows": payment_rows_payload,
         "accountingDetailRows": detalles_contables,
     }
+
+
+def _build_ventas_diario_rows(
+    order_rows: list[tuple[Pedido, EstadoPedido]],
+    pagos_por_pedido: dict[int, dict],
+) -> dict:
+    resumen_por_fecha: dict[str, dict] = {}
+
+    for pedido, estado in order_rows:
+        estado_nombre = str(estado.nombreEstado if estado else "SIN_ESTADO").strip().upper()
+        if estado_nombre != "APROBADO":
+            continue
+
+        pedido_id = int(pedido.idPedido)
+        fecha_key = _fecha_pedido_str(pedido.fechaPedido) or "Sin fecha"
+        pago_resumen = pagos_por_pedido.get(pedido_id, {})
+
+        total_arreglos = (
+            Decimal(str(pedido.totalBruto or 0))
+            + Decimal(str(pedido.totalIva or 0))
+        ).quantize(Decimal("0.01"))
+        total_domicilios = Decimal(str(pedido.costoDomicilio or 0)).quantize(Decimal("0.01"))
+        total_recargos = Decimal(str(pago_resumen.get("recargoLinkMonto") or 0)).quantize(Decimal("0.01"))
+        total_descuentos = Decimal(str(pago_resumen.get("descuentoMonto") or 0)).quantize(Decimal("0.01"))
+        total_saldo_favor = Decimal(str(pago_resumen.get("saldoFavorMonto") or 0)).quantize(Decimal("0.01"))
+        total_venta = (
+            total_arreglos
+            + total_domicilios
+            + total_recargos
+            - total_descuentos
+            + total_saldo_favor
+        ).quantize(Decimal("0.01"))
+
+        current = resumen_por_fecha.get(fecha_key) or {
+            "fecha": fecha_key,
+            "cantidadPedidos": 0,
+            "totalArreglos": Decimal("0.00"),
+            "totalDomicilios": Decimal("0.00"),
+            "totalRecargos": Decimal("0.00"),
+            "totalDescuentos": Decimal("0.00"),
+            "totalSaldoFavor": Decimal("0.00"),
+            "totalVenta": Decimal("0.00"),
+        }
+        current["cantidadPedidos"] += 1
+        current["totalArreglos"] += total_arreglos
+        current["totalDomicilios"] += total_domicilios
+        current["totalRecargos"] += total_recargos
+        current["totalDescuentos"] += total_descuentos
+        current["totalSaldoFavor"] += total_saldo_favor
+        current["totalVenta"] += total_venta
+        resumen_por_fecha[fecha_key] = current
+
+    order_rows_payload = sorted(
+        [
+            {
+                "fecha": item["fecha"],
+                "cantidadPedidos": int(item["cantidadPedidos"]),
+                "totalArreglos": float(item["totalArreglos"].quantize(Decimal("0.01"))),
+                "totalDomicilios": float(item["totalDomicilios"].quantize(Decimal("0.01"))),
+                "totalRecargos": float(item["totalRecargos"].quantize(Decimal("0.01"))),
+                "totalDescuentos": float(item["totalDescuentos"].quantize(Decimal("0.01"))),
+                "totalSaldoFavor": float(item["totalSaldoFavor"].quantize(Decimal("0.01"))),
+                "totalVenta": float(item["totalVenta"].quantize(Decimal("0.01"))),
+            }
+            for item in resumen_por_fecha.values()
+        ],
+        key=lambda item: item["fecha"],
+    )
+    totals = {
+        "fecha": "Totales",
+        "cantidadPedidos": sum(int(item["cantidadPedidos"]) for item in order_rows_payload),
+        "totalArreglos": float(sum(Decimal(str(item["totalArreglos"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+        "totalDomicilios": float(sum(Decimal(str(item["totalDomicilios"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+        "totalRecargos": float(sum(Decimal(str(item["totalRecargos"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+        "totalDescuentos": float(sum(Decimal(str(item["totalDescuentos"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+        "totalSaldoFavor": float(sum(Decimal(str(item["totalSaldoFavor"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+        "totalVenta": float(sum(Decimal(str(item["totalVenta"])) for item in order_rows_payload).quantize(Decimal("0.01"))),
+    }
+    return {"orderRows": order_rows_payload, "totals": totals}
+
+
+@router.get("/contabilidad/ventas-diario", dependencies=[Depends(require_module_access("contabilidad", "puedeVer"))])
+def resumen_ventas_diario(
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    fecha_desde: date = Query(..., alias="fechaDesde"),
+    fecha_hasta: date = Query(..., alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+    if fecha_desde > fecha_hasta:
+        raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
+
+    order_query = (
+        db.query(Pedido, EstadoPedido)
+        .join(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+        .filter(
+            Pedido.empresaID == int(empresa_id),
+            Pedido.fechaPedido >= datetime.combine(fecha_desde, datetime.min.time()),
+            Pedido.fechaPedido < datetime.combine(fecha_hasta, datetime.min.time()) + timedelta(days=1),
+            func.upper(EstadoPedido.nombreEstado) == "APROBADO",
+        )
+    )
+    if sucursal_id is not None:
+        order_query = order_query.filter(Pedido.sucursalID == int(sucursal_id))
+
+    order_rows = order_query.order_by(Pedido.fechaPedido.asc(), Pedido.idPedido.asc()).all()
+    pedido_ids = [int(pedido.idPedido) for pedido, _ in order_rows]
+    pagos_por_pedido = (
+        _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
+        if pedido_ids
+        else {}
+    )
+    return _build_ventas_diario_rows(order_rows, pagos_por_pedido)
 
 
 @router.put("/pedido/{pedido_id}/aprobar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
