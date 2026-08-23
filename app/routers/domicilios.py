@@ -60,6 +60,8 @@ from app.schemas.domicilios import (
     DomicilioMetricasNovedadDetalle,
     DomicilioMetricasResponse,
     DomicilioMetricasResumen,
+    DomicilioTrazabilidadCorreccionRequest,
+    DomicilioTrazabilidadCorreccionResponse,
     PedidoAsignadoResponse,
     PedidoDisponibleItem,
     ESTADO_ASIGNADO,
@@ -1648,6 +1650,137 @@ def _assert_admin_can_manage_domiciliarios(auth):
         )
 
 
+def _assert_admin_can_correct_trazabilidad(auth):
+    if not _actor_can_override_delivery(auth):
+        raise _err(
+            "DOMICILIO_TRAZABILIDAD_ADMIN_REQUIRED",
+            "Solo un administrador puede corregir la trazabilidad de domicilio",
+            status_code=403,
+        )
+
+
+def _estado_trazabilidad_norm(value: str | int | None) -> str:
+    raw = str(value or "").strip()
+    compact = (
+        unicodedata.normalize("NFKD", raw)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+    if compact in {"paraentrega", "paraentregar", "listo", "terminado"}:
+        return produccion_service.ESTADO_PARA_ENTREGA
+    return domicilio_service.estado_norm(value)
+
+
+_TRAZABILIDAD_ENTREGA_FIELDS = {
+    ESTADO_ASIGNADO: "fechaAsignacion",
+    ESTADO_EN_RUTA: "fechaSalida",
+    ESTADO_ENTREGADO: "fechaEntrega",
+    ESTADO_NO_ENTREGADO: "fechaEntrega",
+}
+
+_TRAZABILIDAD_ORDER = {
+    produccion_service.ESTADO_PARA_ENTREGA: 0,
+    ESTADO_ASIGNADO: 1,
+    ESTADO_EN_RUTA: 2,
+    ESTADO_ENTREGADO: 3,
+    ESTADO_NO_ENTREGADO: 3,
+}
+
+
+def _datetime_naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _estado_entrega_reached(actual: str, target: str) -> bool:
+    if actual == target:
+        return True
+    actual_order = _TRAZABILIDAD_ORDER.get(actual)
+    target_order = _TRAZABILIDAD_ORDER.get(target)
+    if actual_order is None or target_order is None:
+        return False
+    return actual_order >= target_order
+
+
+def _latest_para_entrega_timestamp(producciones: list[Produccion]) -> datetime | None:
+    values = [
+        _datetime_naive_utc(getattr(produccion, "fechaFinalizacion", None))
+        for produccion in producciones
+        if getattr(produccion, "fechaFinalizacion", None) is not None
+    ]
+    return max(values) if values else None
+
+
+def _validate_fecha_coherente_con_entrega(entrega: Entrega, pedido: Pedido, fecha_efectiva: datetime):
+    referencia = _fecha_entrega_programada(entrega) or getattr(pedido, "fechaPedido", None)
+    referencia = _datetime_naive_utc(referencia)
+    if referencia is None:
+        return
+    if fecha_efectiva.date() != referencia.date():
+        raise _err(
+            "DOMICILIO_TRAZABILIDAD_FECHA_ENTREGA_INVALIDA",
+            "La fecha efectiva debe coincidir con la fecha de entrega programada del pedido",
+            status_code=400,
+        )
+
+
+def _build_trazabilidad_timeline(
+    entrega: Entrega,
+    producciones: list[Produccion],
+    *,
+    estado_target: str,
+    fecha_target: datetime,
+) -> list[tuple[str, datetime]]:
+    para_entrega_at = _latest_para_entrega_timestamp(producciones)
+    if estado_target == produccion_service.ESTADO_PARA_ENTREGA:
+        para_entrega_at = fecha_target
+
+    fecha_asignacion = _datetime_naive_utc(getattr(entrega, "fechaAsignacion", None))
+    fecha_salida = _datetime_naive_utc(getattr(entrega, "fechaSalida", None))
+    fecha_entrega = _datetime_naive_utc(getattr(entrega, "fechaEntrega", None))
+    if estado_target == ESTADO_ASIGNADO:
+        fecha_asignacion = fecha_target
+    elif estado_target == ESTADO_EN_RUTA:
+        fecha_salida = fecha_target
+    elif estado_target in {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO}:
+        fecha_entrega = fecha_target
+
+    terminal_estado = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if terminal_estado not in {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO}:
+        terminal_estado = estado_target if estado_target in {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO} else ESTADO_ENTREGADO
+
+    timestamps = [
+        (produccion_service.ESTADO_PARA_ENTREGA, para_entrega_at),
+        (ESTADO_ASIGNADO, fecha_asignacion),
+        (ESTADO_EN_RUTA, fecha_salida),
+        (terminal_estado, fecha_entrega),
+    ]
+
+    return [(estado, value) for estado, value in timestamps if value is not None]
+
+
+def _validate_trazabilidad_cronologica(timeline: list[tuple[str, datetime]]):
+    ordered = sorted(timeline, key=lambda item: _TRAZABILIDAD_ORDER.get(item[0], 99))
+    previous_estado = None
+    previous_fecha = None
+    for estado, fecha in ordered:
+        if previous_fecha is not None and fecha < previous_fecha:
+            raise _err(
+                "DOMICILIO_TRAZABILIDAD_SECUENCIA_INVALIDA",
+                f"La fecha de {estado} no puede ser anterior a {previous_estado}",
+                status_code=400,
+            )
+        previous_estado = estado
+        previous_fecha = fecha
+
+
 def _normalize_login_part(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
@@ -2119,6 +2252,161 @@ def listar_admin(
         priority=lambda item: item.prioridad,
     )
     return DomicilioAdminListResponse(items=items, total=len(items))
+
+
+@router.patch(
+    "/pedidos/{pedido_id}/trazabilidad",
+    response_model=DomicilioTrazabilidadCorreccionResponse,
+    dependencies=[Depends(require_module_access("domicilios", "puedeEditar"))],
+)
+def corregir_trazabilidad_pedido(
+    pedido_id: int,
+    payload: DomicilioTrazabilidadCorreccionRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    _assert_admin_can_correct_trazabilidad(auth)
+
+    motivo = str(payload.motivo or "").strip()
+    if not motivo:
+        raise _err(
+            "DOMICILIO_TRAZABILIDAD_MOTIVO_REQUIRED",
+            "El motivo de la correccion es obligatorio",
+            status_code=422,
+        )
+
+    estado = _estado_trazabilidad_norm(payload.estado)
+    if estado not in _TRAZABILIDAD_ORDER:
+        raise _err(
+            "DOMICILIO_TRAZABILIDAD_ESTADO_INVALIDO",
+            "Estado no permitido para correccion de trazabilidad de domicilio",
+            status_code=400,
+        )
+
+    fecha_nueva = _datetime_naive_utc(payload.fechaEfectiva)
+    if fecha_nueva is None:
+        raise _err(
+            "DOMICILIO_TRAZABILIDAD_FECHA_REQUIRED",
+            "La fecha efectiva es obligatoria",
+            status_code=422,
+        )
+
+    pedido = (
+        db.query(Pedido)
+        .filter(
+            Pedido.idPedido == int(pedido_id),
+            Pedido.empresaID == int(auth.empresaID),
+        )
+        .first()
+    )
+    if not pedido:
+        raise _err("PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
+    assert_same_empresa(auth, int(pedido.empresaID))
+
+    entrega = (
+        db.query(Entrega)
+        .filter(
+            Entrega.pedidoID == int(pedido.idPedido),
+            Entrega.empresaID == int(pedido.empresaID),
+        )
+        .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+        .with_for_update()
+        .first()
+    )
+    if not entrega:
+        raise _err("DOMICILIO_NOT_FOUND", "Entrega no encontrada para el pedido", status_code=404)
+
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.pedidoID == int(pedido.idPedido),
+            Produccion.empresaID == int(pedido.empresaID),
+        )
+        .with_for_update()
+        .all()
+    )
+
+    _validate_fecha_coherente_con_entrega(entrega, pedido, fecha_nueva)
+
+    fecha_anterior = None
+    if estado == produccion_service.ESTADO_PARA_ENTREGA:
+        if not producciones:
+            raise _err(
+                "DOMICILIO_TRAZABILIDAD_PRODUCCION_NOT_FOUND",
+                "No hay registros de produccion para corregir ParaEntrega",
+                status_code=404,
+            )
+        if not any(
+            produccion_service.estado_produccion_norm(getattr(produccion, "estado", None), db)
+            == produccion_service.ESTADO_PARA_ENTREGA
+            for produccion in producciones
+        ):
+            raise _err(
+                "DOMICILIO_TRAZABILIDAD_ESTADO_NO_ALCANZADO",
+                "El pedido aun no ha alcanzado el estado ParaEntrega",
+                status_code=400,
+            )
+        fecha_anterior = _latest_para_entrega_timestamp(producciones)
+    else:
+        estado_actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+        if not _estado_entrega_reached(estado_actual, estado):
+            raise _err(
+                "DOMICILIO_TRAZABILIDAD_ESTADO_NO_ALCANZADO",
+                "No se puede corregir un estado que la entrega aun no ha alcanzado",
+                status_code=400,
+            )
+        field_name = _TRAZABILIDAD_ENTREGA_FIELDS[estado]
+        fecha_anterior = _datetime_naive_utc(getattr(entrega, field_name, None))
+
+    timeline = _build_trazabilidad_timeline(
+        entrega,
+        producciones,
+        estado_target=estado,
+        fecha_target=fecha_nueva,
+    )
+    _validate_trazabilidad_cronologica(timeline)
+
+    fecha_modificacion = datetime.now(timezone.utc)
+    if estado == produccion_service.ESTADO_PARA_ENTREGA:
+        for produccion in producciones:
+            if (
+                produccion_service.estado_produccion_norm(getattr(produccion, "estado", None), db)
+                == produccion_service.ESTADO_PARA_ENTREGA
+            ):
+                produccion.fechaFinalizacion = fecha_nueva
+                produccion.updatedAt = fecha_modificacion
+    else:
+        setattr(entrega, _TRAZABILIDAD_ENTREGA_FIELDS[estado], fecha_nueva)
+
+    entrega.updatedAt = fecha_modificacion
+    _audit_domicilio_action(
+        db=db,
+        auth=auth,
+        entrega=entrega,
+        accion="CORRECCION_TRAZABILIDAD",
+        estado_anterior=estado,
+        estado_nuevo=estado,
+        extra={
+            "pedidoID": int(pedido.idPedido),
+            "estado": estado,
+            "fechaAnterior": fecha_anterior.isoformat() if fecha_anterior else None,
+            "fechaNueva": fecha_nueva.isoformat(),
+            "motivo": motivo,
+            "usuarioAdmin": str(getattr(auth, "login", None) or getattr(auth, "nombre", None) or "").strip() or None,
+            "fechaModificacion": fecha_modificacion.isoformat(),
+        },
+    )
+    db.commit()
+
+    return DomicilioTrazabilidadCorreccionResponse(
+        status="ok",
+        pedidoID=int(pedido.idPedido),
+        idEntrega=int(entrega.idEntrega),
+        estado=estado,
+        fechaAnterior=fecha_anterior,
+        fechaNueva=fecha_nueva,
+        fechaModificacion=fecha_modificacion,
+    )
 
 
 @router.put(

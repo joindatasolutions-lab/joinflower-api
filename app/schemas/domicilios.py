@@ -329,6 +329,22 @@ class DomicilioActionResponse(BaseModel):
     estado: str
 
 
+class DomicilioTrazabilidadCorreccionRequest(BaseModel):
+    estado: str = Field(min_length=2, max_length=40)
+    fechaEfectiva: datetime = Field(alias="fecha_efectiva")
+    motivo: str = Field(min_length=10, max_length=1000)
+
+
+class DomicilioTrazabilidadCorreccionResponse(BaseModel):
+    status: str
+    pedidoID: int
+    idEntrega: int
+    estado: str
+    fechaAnterior: datetime | None = None
+    fechaNueva: datetime
+    fechaModificacion: datetime
+
+
 class FiltroEstadoResponse(BaseModel):
     filtro: str
     fecha: date
