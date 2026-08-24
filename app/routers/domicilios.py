@@ -74,7 +74,7 @@ from app.schemas.domicilios import (
     OrderItemDetail,
     TomarEntregaRequest,
 )
-from app.services import domicilio_service, produccion_service
+from app.services import domicilio_service, produccion_service, whatsapp_service
 
 router = APIRouter(
     prefix="/domicilios",
@@ -2759,6 +2759,16 @@ def _marcar_entregado_impl(
             "observaciones": str(observaciones or "").strip() or None,
             "resuelveNovedad": resuelve_novedad,
         },
+    )
+    # Encola (idempotente) la notificacion de WhatsApp de pedido entregado en la MISMA
+    # transaccion: se crea si y solo si esta confirmacion de entrega realmente se guarda.
+    # El envio real lo hace el job de fondo (app/jobs/whatsapp_dispatch_job.py), nunca esta
+    # peticion -- ver pendientes/Mejoras/whatsapp-notificacion-entregado-decisiones.md.
+    whatsapp_service.encolar_notificacion_entregado(
+        db,
+        empresa_id=int(entrega.empresaID),
+        pedido_id=int(entrega.pedidoID),
+        entrega_id=int(entrega.idEntrega),
     )
     db.commit()
 

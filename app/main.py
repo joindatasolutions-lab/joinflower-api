@@ -13,6 +13,7 @@ from app.core.logger import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.database import engine
 from app.jobs.produccion_autoassign_job import ProduccionAutoassignJob, autoassign_job_enabled
+from app.jobs.whatsapp_dispatch_job import WhatsAppDispatchJob, whatsapp_dispatch_enabled
 from app.middlewares.rate_limit import limiter
 from app.routers import auth
 from app.routers import barrios
@@ -26,6 +27,7 @@ from app.routers import inventario
 from app.routers import pedido
 from app.routers import pipeline
 from app.routers import produccion
+from app.routers import webhooks
 
 configure_logging()
 
@@ -51,17 +53,22 @@ if extra_origins:
     ALLOWED_ORIGINS.extend(extra_origins)
 
 _produccion_autoassign_job = ProduccionAutoassignJob()
+_whatsapp_dispatch_job = WhatsAppDispatchJob()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if autoassign_job_enabled():
         _produccion_autoassign_job.start()
+    if whatsapp_dispatch_enabled():
+        _whatsapp_dispatch_job.start()
     try:
         yield
     finally:
         if autoassign_job_enabled():
             _produccion_autoassign_job.stop()
+        if whatsapp_dispatch_enabled():
+            _whatsapp_dispatch_job.stop()
 
 
 app = FastAPI(
@@ -108,6 +115,7 @@ app.include_router(domicilios.router)
 app.include_router(inventario.router)
 app.include_router(entregas.router)
 app.include_router(pipeline.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/")
