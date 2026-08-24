@@ -2,6 +2,18 @@
 
 **Estado: mitigado (2026-08-05), no resuelto de raiz.** Se bajo el pool por instancia para dejar de chocar contra el limite real de Postgres. El problema de fondo (tier de Cloud SQL demasiado chico) sigue sin resolverse.
 
+**Actualizacion 2026-08-23:** el tier de Cloud SQL ya fue subido (opcion 1 de abajo, aplicada por el usuario en algun momento entre el 08-06 y esta fecha) a `db-custom-2-8192` (`max_connections=400`). El pool tambien habia sido subido manualmente a `DB_POOL_SIZE=4`/`DB_MAX_OVERFLOW=1` (5 por instancia) en algun punto intermedio, pero seguia siendo demasiado chico para la capacidad real disponible. Esto causaba que rafagas normales de trafico (ej. el usuario cambiando rapido entre las 5 pestanas del modulo Domicilios: hoy/pendientes/enruta/manana/entregado) agotaran las 5 conexiones de una instancia y dejaran a otras peticiones (como `PUT /domicilios/{id}/asignar`) esperando en cola hasta 30s por una conexion libre — sintoma reportado como "asignar domiciliario se demora 5-10 segundos". Confirmado con `pg_stat_activity`: solo 24 conexiones activas en uso real de un limite de 400, es decir, muchisimo margen sin aprovechar.
+
+Se subio el pool a `DB_POOL_SIZE=10`/`DB_MAX_OVERFLOW=5` (15 por instancia; peor caso teorico con `maxScale=10` = 150 conexiones, bien por debajo del limite de 400 y dejando margen para los otros 3 servicios que comparten la BD):
+
+```bash
+gcloud run services update join-flower \
+  --project=flora-471805 --region=us-central1 \
+  --update-env-vars="DB_POOL_SIZE=10,DB_MAX_OVERFLOW=5"
+```
+
+Revision desplegada: `join-flower-00236-dtz`, 100% del trafico. Validado `GET /health` -> 200, `GET /` -> 200. Ver tambien `domicilios-lentitud-indice-entrega.md` para la otra mitad del fix (indice faltante en `petalops.entrega` que hacia mas lenta de lo necesario la consulta que dispara cada pestana de Domicilios).
+
 Encontrado al validar errores de produccion de los ultimos 2 dias (pedido del usuario), no relacionado con ningun cambio de esta sesion — confirmado con logs que el error ya ocurria desde el 2026-07-09, casi un mes antes.
 
 ## El problema
