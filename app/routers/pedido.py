@@ -974,7 +974,9 @@ def _resolve_costo_domicilio(
     barrio_id: int | None = None,
     barrio_nombre: str | None = None,
 ) -> Decimal:
-    tipo = str(tipo_entrega or "").strip().lower()
+    if _is_store_pickup_delivery(tipo_entrega=tipo_entrega, barrio_nombre=barrio_nombre):
+        return Decimal("0.00")
+    tipo = _normalize_store_pickup_value(tipo_entrega)
     if tipo and tipo != "domicilio":
         return Decimal("0.00")
 
@@ -1009,12 +1011,25 @@ def _resolve_costo_domicilio(
 
 
 def _normalize_delivery_type_from_barrio_name(barrio_nombre: str | None) -> str:
-    nombre = str(barrio_nombre or "").strip().lower()
-    return "recogida_en_tienda" if nombre == "recoger en tienda" else "domicilio"
+    return "recogida_en_tienda" if _is_store_pickup_delivery(barrio_nombre=barrio_nombre) else "domicilio"
 
 
 def _normalize_store_pickup_value(value: str | None) -> str:
     return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_store_pickup_delivery(*, tipo_entrega: str | None = None, barrio_nombre: str | None = None) -> bool:
+    tipo = _normalize_store_pickup_value(tipo_entrega)
+    barrio = _normalize_store_pickup_value(barrio_nombre)
+    return tipo in STORE_PICKUP_DELIVERY_VALUES or barrio in STORE_PICKUP_DELIVERY_VALUES
+
+
+def _apply_store_pickup_domicilio_amounts(pedido: Pedido) -> None:
+    pedido.costoDomicilio = Decimal("0.00")
+    pedido.domicilioOriginal = Decimal("0.00")
+    pedido.descuentoDomicilio = Decimal("0.00")
+    pedido.domicilioObsequiado = False
+    pedido.omitirCostoDomicilio = False
 
 
 def _find_barrio_by_name(db: Session, *, empresa_id: int, sucursal_id: int, barrio_nombre: str | None) -> Barrio | None:
@@ -2902,6 +2917,7 @@ class ActualizarDetallePedidoRequest(BaseModel):
     destinatarioNombre: str | None = None
     telefonoDestino: str | None = None
     direccion: str | None = None
+    tipoEntrega: str | None = None
     barrioNombre: str | None = None
     latitudDestino: float | None = None
     longitudDestino: float | None = None
@@ -3168,6 +3184,7 @@ def actualizar_detalle_pedido(
                     payload.destinatarioNombre,
                     payload.telefonoDestino,
                     payload.direccion,
+                    payload.tipoEntrega,
                     payload.barrioNombre,
                     payload.latitudDestino,
                     payload.longitudDestino,
@@ -3198,6 +3215,12 @@ def actualizar_detalle_pedido(
                     entrega_actual.telefonoDestino = str(payload.telefonoDestino).strip() or None
                 if payload.direccion is not None:
                     entrega_actual.direccion = str(payload.direccion).strip() or None
+                if payload.tipoEntrega is not None:
+                    entrega_actual.tipoEntrega = (
+                        "recogida_en_tienda"
+                        if _is_store_pickup_delivery(tipo_entrega=payload.tipoEntrega)
+                        else str(payload.tipoEntrega or "").strip().lower() or "domicilio"
+                    )
                 if payload.barrioNombre is not None:
                     entrega_actual.barrioNombre = str(payload.barrioNombre).strip() or None
                     entrega_actual.tipoEntrega = _normalize_delivery_type_from_barrio_name(entrega_actual.barrioNombre)
@@ -3208,14 +3231,25 @@ def actualizar_detalle_pedido(
                         barrio_nombre=entrega_actual.barrioNombre,
                     )
                     entrega_actual.barrioID = int(barrio_actualizado.idBarrio) if barrio_actualizado else None
-                    domicilio_recalculado = _resolve_entrega_domicilio_amount(
-                        db, pedido=pedido, entrega=entrega_actual
-                    )
-                    _apply_pedido_domicilio_amounts(
-                        pedido,
-                        resolved_domicilio=domicilio_recalculado,
-                        prefer_resolved=True,
-                    )
+                elif _is_store_pickup_delivery(tipo_entrega=getattr(entrega_actual, "tipoEntrega", None)):
+                    entrega_actual.barrioID = None
+                    if not getattr(entrega_actual, "barrioNombre", None):
+                        entrega_actual.barrioNombre = "Recoger en tienda"
+                if payload.tipoEntrega is not None or payload.barrioNombre is not None:
+                    if _is_store_pickup_delivery(
+                        tipo_entrega=getattr(entrega_actual, "tipoEntrega", None),
+                        barrio_nombre=getattr(entrega_actual, "barrioNombre", None),
+                    ):
+                        _apply_store_pickup_domicilio_amounts(pedido)
+                    else:
+                        domicilio_recalculado = _resolve_entrega_domicilio_amount(
+                            db, pedido=pedido, entrega=entrega_actual
+                        )
+                        _apply_pedido_domicilio_amounts(
+                            pedido,
+                            resolved_domicilio=domicilio_recalculado,
+                            prefer_resolved=True,
+                        )
                     needs_totals_recalc = True
                 if payload.latitudDestino is not None:
                     entrega_actual.latitudDestino = payload.latitudDestino
@@ -3305,30 +3339,37 @@ def actualizar_detalle_pedido(
             resolved_domicilio = _resolve_entrega_domicilio_amount(db, pedido=pedido, entrega=entrega_actual)
             prefer_resolved = bool(
                 payload.barrioNombre is not None
+                or payload.tipoEntrega is not None
                 or (forzar_recalculo_payload is not missing_financial and forzar_recalculo_payload)
             )
-            _apply_pedido_domicilio_amounts(
-                pedido,
-                resolved_domicilio=resolved_domicilio,
-                domicilio_cobrado=(
-                    domicilio_cobrado_payload
-                    if domicilio_cobrado_payload not in (missing_financial, None)
-                    else None
-                ),
-                domicilio_original=(
-                    domicilio_original_payload
-                    if domicilio_original_payload not in (missing_financial, None)
-                    else None
-                ),
-                descuento_domicilio=(
-                    descuento_domicilio_payload
-                    if descuento_domicilio_payload not in (missing_financial, None)
-                    else None
-                ),
-                domicilio_obsequiado=domicilio_obsequiado_value,
-                omitir_costo_domicilio=omitir_costo_domicilio_value,
-                prefer_resolved=prefer_resolved,
-            )
+            if _is_store_pickup_delivery(
+                tipo_entrega=getattr(entrega_actual, "tipoEntrega", None),
+                barrio_nombre=getattr(entrega_actual, "barrioNombre", None),
+            ):
+                _apply_store_pickup_domicilio_amounts(pedido)
+            else:
+                _apply_pedido_domicilio_amounts(
+                    pedido,
+                    resolved_domicilio=resolved_domicilio,
+                    domicilio_cobrado=(
+                        domicilio_cobrado_payload
+                        if domicilio_cobrado_payload not in (missing_financial, None)
+                        else None
+                    ),
+                    domicilio_original=(
+                        domicilio_original_payload
+                        if domicilio_original_payload not in (missing_financial, None)
+                        else None
+                    ),
+                    descuento_domicilio=(
+                        descuento_domicilio_payload
+                        if descuento_domicilio_payload not in (missing_financial, None)
+                        else None
+                    ),
+                    domicilio_obsequiado=domicilio_obsequiado_value,
+                    omitir_costo_domicilio=omitir_costo_domicilio_value,
+                    prefer_resolved=prefer_resolved,
+                )
 
             needs_totals_recalc = True
 

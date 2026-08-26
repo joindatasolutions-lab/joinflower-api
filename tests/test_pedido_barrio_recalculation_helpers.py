@@ -1,9 +1,14 @@
 from app.routers.barrios import _invalidate_barrios_cache
 from app.routers.pedido import (
     STORE_PICKUP_DELIVERY_VALUES,
+    _apply_store_pickup_domicilio_amounts,
+    _is_store_pickup_delivery,
     _normalize_delivery_type_from_barrio_name,
     _normalize_store_pickup_value,
+    _resolve_costo_domicilio,
 )
+from decimal import Decimal
+from types import SimpleNamespace
 from app.services.cache import get_cache, set_cache
 
 
@@ -15,6 +20,41 @@ def test_normalize_delivery_type_from_barrio_name_returns_store_pickup():
 def test_store_pickup_filter_accepts_recoger_en_tienda_label():
     assert _normalize_store_pickup_value("Recoger En Tienda") in STORE_PICKUP_DELIVERY_VALUES
     assert _normalize_store_pickup_value("retiro-en-tienda") in STORE_PICKUP_DELIVERY_VALUES
+
+
+def test_store_pickup_detection_accepts_tipo_entrega_or_barrio_label():
+    assert _is_store_pickup_delivery(tipo_entrega="recogida_en_tienda")
+    assert _is_store_pickup_delivery(barrio_nombre="Recoger en tienda")
+
+
+def test_resolve_costo_domicilio_returns_zero_for_store_pickup_without_db_lookup():
+    resolved = _resolve_costo_domicilio(
+        SimpleNamespace(),
+        empresa_id=3,
+        sucursal_id=3,
+        tipo_entrega="recogida_en_tienda",
+        barrio_nombre="Barrio con costo anterior",
+    )
+
+    assert resolved == Decimal("0.00")
+
+
+def test_apply_store_pickup_domicilio_amounts_clears_previous_delivery_cost():
+    pedido = SimpleNamespace(
+        costoDomicilio=Decimal("10000.00"),
+        domicilioOriginal=Decimal("10000.00"),
+        descuentoDomicilio=Decimal("0.00"),
+        domicilioObsequiado=True,
+        omitirCostoDomicilio=True,
+    )
+
+    _apply_store_pickup_domicilio_amounts(pedido)
+
+    assert pedido.costoDomicilio == Decimal("0.00")
+    assert pedido.domicilioOriginal == Decimal("0.00")
+    assert pedido.descuentoDomicilio == Decimal("0.00")
+    assert pedido.domicilioObsequiado is False
+    assert pedido.omitirCostoDomicilio is False
 
 
 def test_normalize_delivery_type_from_barrio_name_returns_delivery_for_regular_neighborhood():
