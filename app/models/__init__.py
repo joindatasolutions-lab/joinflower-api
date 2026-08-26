@@ -19,6 +19,7 @@ from .permisomodulo import PermisoModulo
 from .planmodulo import PlanModulo
 from .domiciliario import Domiciliario
 from .usuariomodulo import UsuarioModulo
+from .usuariorol import UsuarioRol
 from .proveedor import Proveedor
 from .inventario import Inventario
 from .movimientoinventario import MovimientoInventario
