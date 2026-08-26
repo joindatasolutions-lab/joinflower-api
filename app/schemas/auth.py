@@ -17,6 +17,12 @@ class PermisoModuloItem(BaseModel):
     puedeEliminar: bool
 
 
+class RoleAssignmentItem(BaseModel):
+    rolID: int
+    nombreRol: str
+    principal: bool = False
+
+
 class AuthMeResponse(BaseModel):
     userID: int
     empresaID: int
@@ -26,6 +32,7 @@ class AuthMeResponse(BaseModel):
     planID: int | None = None
     rolID: int
     rol: str
+    roles: list[RoleAssignmentItem] = Field(default_factory=list)
     nombre: str
     login: str
     email: str
@@ -69,6 +76,7 @@ class AuthContext(BaseModel):
     rolID: int
     planID: int | None = None
     rol: str
+    roles: list[RoleAssignmentItem] = Field(default_factory=list)
     nombre: str
     login: str
     email: str
@@ -103,6 +111,7 @@ class AuthContext(BaseModel):
             "planID": self.planID,
             "rolID": self.rolID,
             "rol": self.rol,
+            "roles": self.roles,
             "nombre": self.nombre,
             "login": self.login,
             "email": self.email,
@@ -123,6 +132,7 @@ class UserCreateRequest(BaseModel):
     sucursalID: int
     estado: str | None = "Activo"
     modulosAcceso: list[str] | None = None
+    rolesIDs: list[int] | None = None
 
 
 class UserCreateResponse(BaseModel):
@@ -133,6 +143,8 @@ class UserCreateResponse(BaseModel):
     login: str
     email: str
     rolID: int
+    rolesIDs: list[int] = Field(default_factory=list)
+    roles: list[RoleAssignmentItem] = Field(default_factory=list)
     estado: str
     modulosAcceso: list[str] | None = None
 
@@ -146,6 +158,8 @@ class UserListItem(BaseModel):
     email: str
     rolID: int
     rol: str
+    rolesIDs: list[int] = Field(default_factory=list)
+    roles: list[RoleAssignmentItem] = Field(default_factory=list)
     estado: str
     ultimoLogin: datetime | None = None
 
@@ -168,6 +182,8 @@ class UserDetailResponse(BaseModel):
     email: str
     rolID: int
     rol: str
+    rolesIDs: list[int] = Field(default_factory=list)
+    roles: list[RoleAssignmentItem] = Field(default_factory=list)
     estado: str
     modulosAcceso: list[str]
     ultimoLogin: datetime | None = None
@@ -182,6 +198,7 @@ class UserUpdateRequest(BaseModel):
     sucursalID: int
     estado: str | None = "Activo"
     modulosAcceso: list[str] | None = None
+    rolesIDs: list[int] | None = None
 
 
 class UserDeleteResponse(BaseModel):

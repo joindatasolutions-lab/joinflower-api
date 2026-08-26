@@ -60,6 +60,7 @@ from app.schemas.auth import (
     ImpersonateRequest,
     RoleListResponse,
     RoleOption,
+    RoleAssignmentItem,
     SucursalListResponse,
     SucursalOption,
     UserCreateRequest,
@@ -238,6 +239,163 @@ def _ensure_usuario_modulo_table(db: Session):
         )
     )
     db.execute(text("CREATE INDEX IF NOT EXISTS idx_usuariomodulo_activo ON petalops.usuario_modulo (usuario_id, activo);"))
+
+
+def _ensure_usuario_rol_table(db: Session):
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS petalops.usuario_rol (
+              usuario_id BIGINT NOT NULL,
+              rol_id BIGINT NOT NULL,
+              empresa_id BIGINT NOT NULL,
+              principal BOOLEAN NOT NULL DEFAULT FALSE,
+              activo BOOLEAN NOT NULL DEFAULT TRUE,
+              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (usuario_id, rol_id),
+              CONSTRAINT fk_usuario_rol_usuario FOREIGN KEY (usuario_id)
+                REFERENCES petalops.usuario(id_usuario),
+              CONSTRAINT fk_usuario_rol_rol FOREIGN KEY (rol_id)
+                REFERENCES petalops.rol(id_rol),
+              CONSTRAINT fk_usuario_rol_empresa FOREIGN KEY (empresa_id)
+                REFERENCES petalops.empresa(id_empresa)
+            );
+            """
+        )
+    )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_usuario_rol_usuario_activo ON petalops.usuario_rol (usuario_id, activo);"))
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_usuario_rol_empresa_rol ON petalops.usuario_rol (empresa_id, rol_id);"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuario_rol_principal ON petalops.usuario_rol (usuario_id) WHERE principal = TRUE AND activo = TRUE;"))
+
+
+def _normalize_role_ids(primary_role_id: int, values: list[int] | None) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in [primary_role_id, *(values or [])]:
+        try:
+            role_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if role_id <= 0 or role_id in seen:
+            continue
+        seen.add(role_id)
+        normalized.append(role_id)
+    return normalized
+
+
+def _load_user_roles(db: Session, user_id: int, primary_role_id: int | None = None) -> list[RoleAssignmentItem]:
+    role_ids = [int(primary_role_id)] if primary_role_id else []
+    try:
+        table_exists = db.execute(
+            text(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'petalops'
+                  AND table_name = 'usuario_rol'
+                LIMIT 1
+                """
+            )
+        ).first()
+        if table_exists:
+            rows = db.execute(
+                text(
+                    """
+                    SELECT ur.rol_id, r.nombre_rol, ur.principal
+                    FROM petalops.usuario_rol ur
+                    JOIN petalops.rol r
+                      ON r.id_rol = ur.rol_id
+                     AND r.empresa_id = ur.empresa_id
+                    WHERE ur.usuario_id = :user_id
+                      AND ur.activo = TRUE
+                    ORDER BY ur.principal DESC, r.nombre_rol ASC
+                    """
+                ),
+                {"user_id": int(user_id)},
+            ).all()
+            if rows:
+                return [
+                    RoleAssignmentItem(rolID=int(rol_id), nombreRol=str(nombre_rol or ""), principal=bool(principal))
+                    for rol_id, nombre_rol, principal in rows
+                ]
+    except SQLAlchemyError:
+        db.rollback()
+
+    if not role_ids:
+        return []
+    rows = db.query(Rol).filter(Rol.idRol.in_(role_ids)).all()
+    return [
+        RoleAssignmentItem(rolID=int(row.idRol), nombreRol=str(row.nombreRol or ""), principal=int(row.idRol) == int(primary_role_id))
+        for row in rows
+    ]
+
+
+def _validate_user_roles(db: Session, empresa_id: int, primary_role_id: int, role_ids: list[int] | None, auth) -> tuple[Rol, list[Rol], list[int]]:
+    normalized_ids = _normalize_role_ids(primary_role_id, role_ids)
+    if not normalized_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Debes seleccionar al menos un rol valido")
+
+    rows = db.query(Rol).filter(Rol.idRol.in_(normalized_ids), Rol.empresaID == int(empresa_id)).all()
+    roles_by_id = {int(row.idRol): row for row in rows}
+    missing = [role_id for role_id in normalized_ids if role_id not in roles_by_id]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Roles invalidos para la empresa", "rolesInvalidos": missing},
+        )
+
+    for role in rows:
+        role_name = normalize_role_name(role.nombreRol)
+        if not is_super_admin_context(auth) and role_name in STRUCTURAL_ROLES:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa Admin no puede asignar roles estructurales")
+
+    primary_role = roles_by_id.get(int(primary_role_id))
+    if primary_role is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol principal invalido para la empresa")
+
+    ordered_roles = [roles_by_id[role_id] for role_id in normalized_ids]
+    return primary_role, ordered_roles, normalized_ids
+
+
+def _sync_user_roles(db: Session, usuario: Usuario, role_ids: list[int]) -> None:
+    _ensure_usuario_rol_table(db)
+    db.execute(
+        text(
+            """
+            UPDATE petalops.usuario_rol
+            SET activo = FALSE,
+                principal = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE usuario_id = :usuario_id
+            """
+        ),
+        {"usuario_id": int(usuario.idusuario)},
+    )
+    for index, role_id in enumerate(role_ids):
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.usuario_rol (
+                    usuario_id, rol_id, empresa_id, principal, activo, created_at, updated_at
+                )
+                VALUES (
+                    :usuario_id, :rol_id, :empresa_id, :principal, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (usuario_id, rol_id) DO UPDATE SET
+                    empresa_id = EXCLUDED.empresa_id,
+                    principal = EXCLUDED.principal,
+                    activo = TRUE,
+                    updated_at = CURRENT_TIMESTAMP
+                """
+            ),
+            {
+                "usuario_id": int(usuario.idusuario),
+                "rol_id": int(role_id),
+                "empresa_id": int(usuario.empresaID),
+                "principal": index == 0,
+            },
+        )
 
 
 def _plan_user_limit(plan_id: int | None) -> int:
@@ -1052,17 +1210,13 @@ def crear_usuario(
                 detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
             )
 
-        rol = (
-            db.query(Rol)
-            .filter(Rol.idRol == payload.rolID, Rol.empresaID == target_empresa_id)
-            .first()
+        rol, assigned_roles, assigned_role_ids = _validate_user_roles(
+            db,
+            target_empresa_id,
+            int(payload.rolID),
+            payload.rolesIDs,
+            auth,
         )
-        if not rol:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol invalido para la empresa")
-
-        role_name = normalize_role_name(rol.nombreRol)
-        if not is_super_admin_context(auth) and role_name in STRUCTURAL_ROLES:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa Admin no puede crear roles estructurales")
 
         empresa_meta = load_empresa_auth_meta(db, target_empresa_id)
         active_users = (
@@ -1094,6 +1248,7 @@ def crear_usuario(
         )
         db.add(usuario)
         db.flush()
+        _sync_user_roles(db, usuario, assigned_role_ids)
         _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
         if payload.modulosAcceso is not None:
             _ensure_usuario_modulo_table(db)
@@ -1118,6 +1273,7 @@ def crear_usuario(
             target=usuario,
             extra={
                 "rolID": int(usuario.rolID),
+                "rolesIDs": assigned_role_ids,
                 "sucursalID": int(usuario.sucursalID),
                 "modulosAcceso": selected_user_modules,
             },
@@ -1133,6 +1289,15 @@ def crear_usuario(
             login=str(usuario.login),
             email=str(usuario.email),
             rolID=int(usuario.rolID),
+            rolesIDs=assigned_role_ids,
+            roles=[
+                RoleAssignmentItem(
+                    rolID=int(role.idRol),
+                    nombreRol=str(role.nombreRol or ""),
+                    principal=int(role.idRol) == int(usuario.rolID),
+                )
+                for role in assigned_roles
+            ],
             estado=str(usuario.estado),
             modulosAcceso=(selected_user_modules if payload.modulosAcceso is not None else None),
         )
@@ -1176,8 +1341,10 @@ def listar_usuarios(
         )
 
     rows = query.order_by(Usuario.empresaID.asc(), Usuario.sucursalID.asc(), Usuario.idusuario.desc()).all()
-    items = [
-        UserListItem(
+    items = []
+    for usuario, rol in rows:
+        assigned_roles = _load_user_roles(db, int(usuario.idusuario), int(usuario.rolID))
+        items.append(UserListItem(
             userID=int(usuario.idusuario),
             empresaID=int(usuario.empresaID),
             sucursalID=int(usuario.sucursalID),
@@ -1186,11 +1353,11 @@ def listar_usuarios(
             email=str(usuario.email or ""),
             rolID=int(usuario.rolID),
             rol=str(rol.nombreRol or ""),
+            rolesIDs=[int(item.rolID) for item in assigned_roles],
+            roles=assigned_roles,
             estado=str(usuario.estado or ""),
             ultimoLogin=usuario.ultimoLogin,
-        )
-        for usuario, rol in rows
-    ]
+        ))
     return UserListResponse(items=items, total=len(items))
 
 
@@ -1204,6 +1371,7 @@ def obtener_usuario(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para consultar usuarios")
     usuario, target_role = _get_target_user_for_admin(db, auth, user_id)
     rol_nombre = str(target_role.nombreRol or "") if target_role else ""
+    assigned_roles = _load_user_roles(db, int(usuario.idusuario), int(usuario.rolID))
     return UserDetailResponse(
         userID=int(usuario.idusuario),
         empresaID=int(usuario.empresaID),
@@ -1213,6 +1381,8 @@ def obtener_usuario(
         email=str(usuario.email or ""),
         rolID=int(usuario.rolID),
         rol=rol_nombre,
+        rolesIDs=[int(item.rolID) for item in assigned_roles],
+        roles=assigned_roles,
         estado=str(usuario.estado or ""),
         modulosAcceso=_load_user_modules(db, int(usuario.idusuario), rol_nombre),
         ultimoLogin=usuario.ultimoLogin,
@@ -1268,17 +1438,13 @@ def actualizar_usuario(
                 detail="Ya existe un empleado (florista/domiciliario) con ese nombre de usuario en esta empresa. Elige otro login.",
             )
 
-        rol = (
-            db.query(Rol)
-            .filter(Rol.idRol == payload.rolID, Rol.empresaID == target_empresa_id)
-            .first()
+        rol, assigned_roles, assigned_role_ids = _validate_user_roles(
+            db,
+            target_empresa_id,
+            int(payload.rolID),
+            payload.rolesIDs,
+            auth,
         )
-        if not rol:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rol invalido para la empresa")
-
-        role_name = normalize_role_name(rol.nombreRol)
-        if not is_super_admin_context(auth) and role_name in STRUCTURAL_ROLES:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Empresa Admin no puede asignar roles estructurales")
 
         sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
         if not sucursal:
@@ -1295,6 +1461,7 @@ def actualizar_usuario(
         if payload.password:
             usuario.passwordHash = pwd_context.hash(payload.password)
         usuario.updatedAt = datetime.now(timezone.utc)
+        _sync_user_roles(db, usuario, assigned_role_ids)
         _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
 
         if payload.modulosAcceso is not None:
@@ -1321,6 +1488,7 @@ def actualizar_usuario(
             target=usuario,
             extra={
                 "rolID": int(usuario.rolID),
+                "rolesIDs": assigned_role_ids,
                 "sucursalID": int(usuario.sucursalID),
                 "estado": estado,
                 "modulosAcceso": selected_user_modules,
@@ -1338,6 +1506,15 @@ def actualizar_usuario(
             login=str(usuario.login),
             email=str(usuario.email),
             rolID=int(usuario.rolID),
+            rolesIDs=assigned_role_ids,
+            roles=[
+                RoleAssignmentItem(
+                    rolID=int(role.idRol),
+                    nombreRol=str(role.nombreRol or ""),
+                    principal=int(role.idRol) == int(usuario.rolID),
+                )
+                for role in assigned_roles
+            ],
             estado=str(usuario.estado),
             modulosAcceso=(selected_user_modules if payload.modulosAcceso is not None else None),
         )
@@ -1386,6 +1563,7 @@ def actualizar_estado_usuario(
         extra={"estado": estado},
     )
     db.commit()
+    assigned_roles = _load_user_roles(db, int(usuario.idusuario), int(usuario.rolID))
 
     return UserCreateResponse(
         status="ok",
@@ -1395,6 +1573,8 @@ def actualizar_estado_usuario(
         login=str(usuario.login),
         email=str(usuario.email),
         rolID=int(usuario.rolID),
+        rolesIDs=[int(item.rolID) for item in assigned_roles],
+        roles=assigned_roles,
         estado=str(usuario.estado),
     )
 
@@ -1415,6 +1595,8 @@ def eliminar_usuario(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No puedes eliminar tu propio usuario")
 
         _ensure_usuario_modulo_table(db)
+        _ensure_usuario_rol_table(db)
+        db.execute(text("DELETE FROM petalops.usuario_rol WHERE usuario_id = :user_id"), {"user_id": target_id})
         db.execute(text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"), {"user_id": target_id})
         db.execute(
             text(
@@ -1452,6 +1634,8 @@ def eliminar_usuario(
             usuario.estado = "Eliminado"
             usuario.updatedAt = datetime.now(timezone.utc)
             _ensure_usuario_modulo_table(db)
+            _ensure_usuario_rol_table(db)
+            db.execute(text("DELETE FROM petalops.usuario_rol WHERE usuario_id = :user_id"), {"user_id": target_id})
             db.execute(text("DELETE FROM petalops.usuario_modulo WHERE usuario_id = :user_id"), {"user_id": target_id})
             db.execute(
                 text(

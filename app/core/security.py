@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.rol import Rol
 from app.models.usuario import Usuario
-from app.schemas.auth import AuthContext
+from app.schemas.auth import AuthContext, RoleAssignmentItem
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -206,13 +206,17 @@ ROLE_PERMISSION_BASELINES = {}
 
 
 def is_super_admin_context(auth: AuthContext) -> bool:
-    return bool(auth.esGlobalJoin) or normalize_role_name(auth.rol) in ROLE_SUPER_ADMIN
+    role_names = {normalize_role_name(auth.rol)}
+    role_names.update(normalize_role_name(role.nombreRol) for role in getattr(auth, "roles", []) or [])
+    return bool(auth.esGlobalJoin) or bool(role_names & ROLE_SUPER_ADMIN)
 
 
 def is_empresa_admin_context(auth: AuthContext) -> bool:
     if is_super_admin_context(auth):
         return True
-    return normalize_role_name(auth.rol) in ROLE_EMPRESA_ADMIN
+    role_names = {normalize_role_name(auth.rol)}
+    role_names.update(normalize_role_name(role.nombreRol) for role in getattr(auth, "roles", []) or [])
+    return bool(role_names & ROLE_EMPRESA_ADMIN)
 
 
 def apply_role_module_limits(
@@ -523,6 +527,109 @@ def load_usuario_module_overrides(db: Session, user_id: int) -> dict[str, bool] 
         for row in rows
         if row.get("modulo")
     }
+
+
+def _load_usuario_role_assignments(
+    db: Session,
+    *,
+    user_id: int,
+    empresa_id: int,
+    primary_role_id: int,
+) -> list[RoleAssignmentItem]:
+    roles: list[RoleAssignmentItem] = []
+    try:
+        table_name, columns = _resolve_table_spec(
+            db,
+            ["usuario_rol", "usuariorol", "UsuarioRol"],
+            {
+                "usuario_id": ["usuario_id", "userid", "userID"],
+                "rol_id": ["rol_id", "rolid", "rolID"],
+                "empresa_id": ["empresa_id", "empresaid", "empresaID"],
+                "principal": ["principal"],
+                "activo": ["activo"],
+            },
+        )
+        if table_name and columns:
+            rows = db.execute(
+                text(
+                    f"""
+                    SELECT ur.{_quote_ident(columns["rol_id"])} AS rol_id,
+                           r.nombre_rol AS nombre_rol,
+                           ur.{_quote_ident(columns["principal"])} AS principal
+                    FROM petalops.{_quote_ident(table_name)} ur
+                    JOIN petalops.rol r
+                      ON r.id_rol = ur.{_quote_ident(columns["rol_id"])}
+                     AND r.empresa_id = ur.{_quote_ident(columns["empresa_id"])}
+                    WHERE ur.{_quote_ident(columns["usuario_id"])} = :user_id
+                      AND ur.{_quote_ident(columns["empresa_id"])} = :empresa_id
+                      AND ur.{_quote_ident(columns["activo"])} = TRUE
+                    ORDER BY ur.{_quote_ident(columns["principal"])} DESC, r.nombre_rol ASC
+                    """
+                ),
+                {"user_id": int(user_id), "empresa_id": int(empresa_id)},
+            ).all()
+            for rol_id, nombre_rol, principal in rows:
+                roles.append(
+                    RoleAssignmentItem(
+                        rolID=int(rol_id),
+                        nombreRol=str(nombre_rol or ""),
+                        principal=bool(principal),
+                    )
+                )
+    except SQLAlchemyError:
+        db.rollback()
+
+    if not roles and primary_role_id:
+        rol = (
+            db.query(Rol)
+            .filter(Rol.idRol == int(primary_role_id), Rol.empresaID == int(empresa_id))
+            .first()
+        )
+        if rol:
+            roles.append(
+                RoleAssignmentItem(
+                    rolID=int(rol.idRol),
+                    nombreRol=str(rol.nombreRol or "SinRol"),
+                    principal=True,
+                )
+            )
+
+    seen: set[int] = set()
+    normalized: list[RoleAssignmentItem] = []
+    for role in roles:
+        role_id = int(role.rolID)
+        if role_id in seen:
+            continue
+        seen.add(role_id)
+        normalized.append(role)
+
+    if normalized and not any(role.principal for role in normalized):
+        normalized[0].principal = True
+    return normalized
+
+
+def _merge_permission_rows(rows) -> dict[str, dict[str, bool]]:
+    permisos: dict[str, dict[str, bool]] = {}
+    for row in rows:
+        modulo = normalize_module_name(row.get("modulo"))
+        if not modulo:
+            continue
+        current = permisos.setdefault(
+            modulo,
+            {
+                "puedeVer": False,
+                "puedeCrear": False,
+                "puedeEditar": False,
+                "puedeEliminar": False,
+            },
+        )
+        current["puedeVer"] = bool(current["puedeVer"] or row.get("puede_ver"))
+        current["puedeCrear"] = bool(current["puedeCrear"] or row.get("puede_crear"))
+        current["puedeEditar"] = bool(current["puedeEditar"] or row.get("puede_editar"))
+        current["puedeEliminar"] = bool(current["puedeEliminar"] or row.get("puede_eliminar"))
+    return permisos
+
+
 def _build_auth_context(db: Session, payload: dict) -> AuthContext:
     user_id = _safe_int(payload.get("userID"))
     if user_id is None:
@@ -579,6 +686,13 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             }
             for modulo in modulos_plan
         }
+        role_assignments = [
+            RoleAssignmentItem(
+                rolID=rol_id,
+                nombreRol=rol_nombre,
+                principal=True,
+            )
+        ]
         if empresa_id:
             empresa_meta = load_empresa_auth_meta(db, empresa_id)
             empresa_nombre = empresa_meta.get("nombre")
@@ -660,6 +774,13 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             }
             for modulo in modulos_plan
         }
+        role_assignments = [
+            RoleAssignmentItem(
+                rolID=rol_id,
+                nombreRol=rol_nombre,
+                principal=True,
+            )
+        ]
     else:
         if usuario.empresaID is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario invalido o inactivo")
@@ -681,6 +802,13 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol invalido para la empresa")
 
         rol_nombre = str(rol.nombreRol or "SinRol")
+        role_assignments = _load_usuario_role_assignments(
+            db,
+            user_id=user_id,
+            empresa_id=empresa_id,
+            primary_role_id=rol_id,
+        )
+        role_ids = [int(item.rolID) for item in role_assignments] or [int(rol_id)]
 
         permiso_table, permiso_columns = _resolve_table_spec(
             db,
@@ -705,20 +833,12 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
                            {_quote_ident(permiso_columns["puede_editar"])} AS puede_editar,
                            {_quote_ident(permiso_columns["puede_eliminar"])} AS puede_eliminar
                     FROM petalops.{_quote_ident(permiso_table)}
-                    WHERE {_quote_ident(permiso_columns["rol_id"])} = :rol_id
+                    WHERE {_quote_ident(permiso_columns["rol_id"])} = ANY(:role_ids)
                     """
                 ),
-                {"rol_id": int(rol_id)},
+                {"role_ids": role_ids},
             ).mappings().all()
-        permisos = {}
-        for row in permisos_rows:
-            modulo = normalize_module_name(row.get("modulo"))
-            permisos[modulo] = {
-                "puedeVer": bool(row.get("puede_ver")),
-                "puedeCrear": bool(row.get("puede_crear")),
-                "puedeEditar": bool(row.get("puede_editar")),
-                "puedeEliminar": bool(row.get("puede_eliminar")),
-            }
+        permisos = _merge_permission_rows(permisos_rows)
 
         effective_plan_id = (
             empresa_meta["planID"]
@@ -767,7 +887,11 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
                     data["puedeEditar"] = False
                     data["puedeEliminar"] = False
 
-        modulos_plan, permisos = apply_role_module_limits(rol_nombre, modulos_plan, permisos)
+        # Los roles multiples son acumulativos. Los limites legacy por rol solo
+        # aplican cuando el usuario tiene un unico rol para preservar el flujo
+        # anterior de cuentas operativas simples.
+        if len(role_ids) == 1:
+            modulos_plan, permisos = apply_role_module_limits(rol_nombre, modulos_plan, permisos)
 
     return AuthContext(
         userID=user_id,
@@ -778,6 +902,7 @@ def _build_auth_context(db: Session, payload: dict) -> AuthContext:
         rolID=rol_id,
         planID=effective_plan_id,
         rol=rol_nombre,
+        roles=role_assignments,
         nombre=str(usuario.nombre or ""),
         login=str(usuario.login or ""),
         email=str(usuario.email or ""),
