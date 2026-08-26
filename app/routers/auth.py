@@ -674,10 +674,26 @@ def _employee_sync_email_value(db: Session, usuario: Usuario, empleado_id: int |
     return f"{login_base}+emp{int(usuario.empresaID)}@empleado.local"
 
 
-def _sync_employee_profile_for_operational_user(db: Session, usuario: Usuario, rol_nombre: str) -> None:
-    role_name = normalize_role_name(rol_nombre)
-    cargo = str(rol_nombre or "").strip() or "Operativo"
-    is_florista_role = role_name == "florista"
+def _sync_employee_profile_for_operational_user(
+    db: Session,
+    usuario: Usuario,
+    rol_nombre: str,
+    roles_nombres: list[str] | None = None,
+) -> None:
+    normalized_roles = {
+        normalize_role_name(role_name)
+        for role_name in ([rol_nombre, *(roles_nombres or [])])
+        if str(role_name or "").strip()
+    }
+    is_florista_role = "florista" in normalized_roles
+    is_domiciliario_role = "domiciliario" in normalized_roles
+
+    if is_florista_role:
+        cargo = "Florista"
+    elif is_domiciliario_role:
+        cargo = "Domiciliario"
+    else:
+        cargo = str(rol_nombre or "").strip() or "Operativo"
 
     empleado = db.execute(
         text(
@@ -1249,7 +1265,12 @@ def crear_usuario(
         db.add(usuario)
         db.flush()
         _sync_user_roles(db, usuario, assigned_role_ids)
-        _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
+        _sync_employee_profile_for_operational_user(
+            db,
+            usuario,
+            str(rol.nombreRol or ""),
+            [str(role.nombreRol or "") for role in assigned_roles],
+        )
         if payload.modulosAcceso is not None:
             _ensure_usuario_modulo_table(db)
             db.execute(
@@ -1462,7 +1483,12 @@ def actualizar_usuario(
             usuario.passwordHash = pwd_context.hash(payload.password)
         usuario.updatedAt = datetime.now(timezone.utc)
         _sync_user_roles(db, usuario, assigned_role_ids)
-        _sync_employee_profile_for_operational_user(db, usuario, str(rol.nombreRol or ""))
+        _sync_employee_profile_for_operational_user(
+            db,
+            usuario,
+            str(rol.nombreRol or ""),
+            [str(role.nombreRol or "") for role in assigned_roles],
+        )
 
         if payload.modulosAcceso is not None:
             _ensure_usuario_modulo_table(db)
