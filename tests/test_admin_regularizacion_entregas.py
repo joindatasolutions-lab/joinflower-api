@@ -1,4 +1,5 @@
 from datetime import date, datetime, time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -58,3 +59,56 @@ def test_timeline_regularizacion_rejects_delivery_before_schedule():
         )
 
     assert exc.value.status_code == 400
+
+
+class FakePedidoQuery:
+    def __init__(self, *, first_result=None, all_results=None):
+        self.first_result = first_result
+        self.all_results = list(all_results or [])
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def with_for_update(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return self.first_result
+
+    def all(self):
+        if self.all_results:
+            return self.all_results.pop(0)
+        return []
+
+
+class FakePedidoDb:
+    def __init__(self, *, first_result=None, all_results=None):
+        self.query_obj = FakePedidoQuery(first_result=first_result, all_results=all_results)
+
+    def query(self, *_args, **_kwargs):
+        return self.query_obj
+
+
+def test_resolve_pedido_regularizacion_prefers_internal_id():
+    pedido = SimpleNamespace(idPedido=20, numeroPedido=98037, codigoPedido="FLR-98037")
+
+    resolved = admin_router._resolve_pedido_for_regularizacion(
+        FakePedidoDb(first_result=pedido),
+        empresa_id=3,
+        pedido_ref=20,
+    )
+
+    assert resolved is pedido
+
+
+def test_resolve_pedido_regularizacion_accepts_visible_numero_pedido():
+    pedido = SimpleNamespace(idPedido=20, numeroPedido=98037, codigoPedido="FLR-98037")
+
+    resolved = admin_router._resolve_pedido_for_regularizacion(
+        FakePedidoDb(all_results=[[], [pedido]]),
+        empresa_id=3,
+        pedido_ref=98037,
+        sucursal_id=3,
+    )
+
+    assert resolved is pedido

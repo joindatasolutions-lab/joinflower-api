@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.security import (
@@ -166,6 +167,50 @@ def _assert_domiciliario_valido(domiciliario: Domiciliario | None, empresa_id: i
     return domiciliario
 
 
+def _resolve_pedido_for_regularizacion(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_ref: int,
+    sucursal_id: int | None = None,
+) -> Pedido | None:
+    base = db.query(Pedido).filter(Pedido.empresaID == int(empresa_id))
+
+    pedido = base.filter(Pedido.idPedido == int(pedido_ref)).with_for_update().first()
+    if pedido:
+        return pedido
+
+    ref_text = str(pedido_ref).strip()
+    codigo_matches = (
+        base.filter(func.upper(func.coalesce(Pedido.codigoPedido, "")) == ref_text.upper())
+        .with_for_update()
+        .all()
+    )
+    if len(codigo_matches) == 1:
+        return codigo_matches[0]
+    if len(codigo_matches) > 1:
+        raise _err(
+            "REGULARIZACION_PEDIDO_AMBIGUO",
+            f"El codigo de pedido {pedido_ref} coincide con varios pedidos; envie id_pedido",
+            status_code=409,
+        )
+
+    numero_query = base.filter(Pedido.numeroPedido == int(pedido_ref))
+    if sucursal_id is not None:
+        numero_query = numero_query.filter(Pedido.sucursalID == int(sucursal_id))
+    numero_matches = numero_query.with_for_update().all()
+    if len(numero_matches) == 1:
+        return numero_matches[0]
+    if len(numero_matches) > 1:
+        raise _err(
+            "REGULARIZACION_PEDIDO_AMBIGUO",
+            f"El numero de pedido {pedido_ref} coincide con varios pedidos; envie id_pedido",
+            status_code=409,
+        )
+
+    return None
+
+
 def _assert_transition_path(db: Session, entrega: Entrega, estado_anterior: str):
     if estado_anterior == ESTADO_ENTREGADO:
         return
@@ -283,14 +328,19 @@ def regularizar_entregas_historicas(
         )
 
         for item in items:
-            pedido = (
-                db.query(Pedido)
-                .filter(
-                    Pedido.idPedido == int(item.pedido_id),
-                    Pedido.empresaID == int(auth.empresaID),
-                )
-                .with_for_update()
-                .first()
+            pedido = _resolve_pedido_for_regularizacion(
+                db,
+                empresa_id=int(auth.empresaID),
+                pedido_ref=int(item.pedido_id),
+                sucursal_id=(
+                    int(getattr(auth, "sucursalID", None))
+                    if getattr(auth, "sucursalID", None) is not None
+                    else (
+                        int(getattr(domiciliario, "sucursalID", None))
+                        if getattr(domiciliario, "sucursalID", None) is not None
+                        else None
+                    )
+                ),
             )
             if not pedido:
                 raise _err("PEDIDO_NOT_FOUND", f"Pedido {item.pedido_id} no encontrado", status_code=404)
