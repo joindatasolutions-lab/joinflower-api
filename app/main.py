@@ -16,6 +16,7 @@ from app.jobs.produccion_autoassign_job import ProduccionAutoassignJob, autoassi
 from app.jobs.whatsapp_dispatch_job import WhatsAppDispatchJob, whatsapp_dispatch_enabled
 from app.middlewares.rate_limit import limiter
 from app.routers import auth
+from app.routers import admin
 from app.routers import barrios
 from app.routers import catalogo
 from app.routers import cliente
@@ -96,6 +97,7 @@ app.add_middleware(
 )
 
 # Routers
+app.include_router(admin.router)
 app.include_router(catalogo.router)
 app.include_router(pedido.router)
 app.include_router(cliente.router)
