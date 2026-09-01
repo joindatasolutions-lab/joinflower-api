@@ -109,6 +109,20 @@ const buildProduccionQuery = () => {
   return qs.toString();
 };
 
+const buildInventarioQuery = () => {
+  const empresa = document.getElementById("empresaInventario").value.trim() || "1";
+  const categoria = document.getElementById("categoriaInventario").value;
+  const qs = new URLSearchParams({
+    empresaID: empresa,
+    page: "1",
+    pageSize: "50",
+  });
+  if (categoria) {
+    qs.set("categoria", categoria);
+  }
+  return qs.toString();
+};
+
 document.getElementById("btnPing").addEventListener("click", () => {
   request("/ping");
 });
@@ -192,6 +206,34 @@ document.getElementById("btnPedidos").addEventListener("click", async () => {
       detail: String(error),
     });
   }
+});
+
+document.getElementById("btnInventario").addEventListener("click", () => {
+  request(`/inventario?${buildInventarioQuery()}`);
+});
+
+document.getElementById("btnInventarioMetricas").addEventListener("click", () => {
+  const empresa = document.getElementById("empresaInventario").value.trim() || "1";
+  const categoria = document.getElementById("categoriaInventario").value;
+  const qs = new URLSearchParams({ empresaID: empresa, diasVencimiento: "7" });
+  if (categoria) {
+    qs.set("categoria", categoria);
+  }
+  request(`/inventario/metricas?${qs.toString()}`);
+});
+
+document.getElementById("btnInventarioCategorias").addEventListener("click", () => {
+  request("/inventario/categorias");
+});
+
+document.getElementById("btnInventarioMovimientos").addEventListener("click", () => {
+  const empresa = document.getElementById("empresaInventario").value.trim() || "1";
+  const categoria = document.getElementById("categoriaInventario").value;
+  const qs = new URLSearchParams({ empresaID: empresa });
+  if (categoria) {
+    qs.set("modulo", categoria);
+  }
+  request(`/inventario/movimientos?${qs.toString()}`);
 });
 
 document.getElementById("fechaProduccion").value = getTodayIso();

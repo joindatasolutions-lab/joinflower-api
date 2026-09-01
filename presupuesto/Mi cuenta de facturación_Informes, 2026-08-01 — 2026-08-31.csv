@@ -1,0 +1,8 @@
+Descripción del servicio,ID de servicio,Costo de lista ($),Ahorros negociados ($),Programas de ahorros ($),Otros ahorros ($),Subtotal sin redondear ($),Subtotal ($),Cambio porcentual en el subtotal en comparación con el período anterior
+Cloud SQL,9662-B51E-5089,161411,0,0,0,161410.865123,161411,624%
+Cloud Run,152E-C115-5142,71074,0,0,-16782,54292.001901,54292,-25%
+Artifact Registry,149C-F9EC-3994,2872,0,0,0,2872.346038,2872,22%
+Cloud Build,8B5D-EF7D-EB12,2,0,0,0,1.928165,2,-58%
+,,,,,Subtotal,218577.141227,218577
+,,,,,Impuesto,0.000000,0
+,,,,,Total,218577.141227,218577

@@ -4,7 +4,7 @@ import os
 pg_config = {
     "host": os.getenv("PGHOST", "136.119.27.100"),
     "user": os.getenv("PGUSER", "joindata"),
-    "password": os.getenv("PGPASSWORD", "Emprender2026#"),
+    "password": os.getenv("PGPASSWORD", "Francia2026##"),
     "dbname": os.getenv("PGDATABASE", "joinflower-dev"),
     "port": int(os.getenv("PGPORT", "5432")),
 }
