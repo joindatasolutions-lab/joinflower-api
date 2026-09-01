@@ -45,6 +45,7 @@ from app.services import caja_service
 from app.services import domicilio_service
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
+from app.services.inventario_cupo_service import validar_cupos_recetas_para_productos
 from app.services import produccion_service
 from app.services.produccion_service import asegurar_produccion_desde_pedido_aprobado_por_detalle
 from app.core.logger import get_logger
@@ -495,6 +496,29 @@ def _audit_pedido_action(
             "detalle_json": payload,
         },
     )
+
+
+def _pedido_detalle_audit_snapshot(detalle: PedidoDetalle | None) -> dict | None:
+    if not detalle:
+        return None
+    return {
+        "detalleID": (int(detalle.idPedidoDetalle) if detalle.idPedidoDetalle is not None else None),
+        "productoID": (int(detalle.productoID) if detalle.productoID is not None else None),
+        "cantidad": float(Decimal(str(detalle.cantidad or 0))),
+        "precioUnitario": float(Decimal(str(detalle.precioUnitario or 0))),
+        "subtotal": float(Decimal(str(detalle.subtotal or 0))),
+    }
+
+
+def _pedido_detalle_audit_changes(before: dict | None, after: dict | None) -> dict:
+    if not before or not after:
+        return {}
+    keys = ("productoID", "cantidad", "precioUnitario", "subtotal")
+    return {
+        key: {"antes": before.get(key), "despues": after.get(key)}
+        for key in keys
+        if before.get(key) != after.get(key)
+    }
 
 
 def _scheduled_entrega_datetime(entrega: Entrega | None) -> datetime | None:
@@ -1854,6 +1878,27 @@ def _approval_gate_summary(
     return {"puedeAprobar": False, "motivo": motivo, "pagoResumen": pago_resumen}
 
 
+def _validar_cupos_inventario_pedido(db: Session, pedido: Pedido) -> None:
+    detalles = (
+        db.query(PedidoDetalle)
+        .filter(
+            PedidoDetalle.pedidoID == int(pedido.idPedido),
+            PedidoDetalle.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    validar_cupos_recetas_para_productos(
+        db,
+        empresa_id=int(pedido.empresaID),
+        pedido_id=int(pedido.idPedido),
+        productos=[
+            {"productoID": int(detalle.productoID), "cantidad": Decimal(str(detalle.cantidad or 0))}
+            for detalle in detalles
+            if detalle.productoID is not None
+        ],
+    )
+
+
 def _upsert_pago_flora(
     db: Session,
     *,
@@ -2184,7 +2229,7 @@ def _upsert_pago_flora(
             )
 
 
-def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
+def _sync_existing_pago_total(db: Session, *, pedido: Pedido, usuario_id: int | None = None) -> None:
     pago_row = db.execute(
         text(
             """
@@ -2222,13 +2267,13 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
     )
 
     if not _flora_phase2_ready(db):
-        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
         return
 
     pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
     metodos_pago = list(pago_resumen.get("metodosPago") or [])
     if len(metodos_pago) != 1:
-        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
         return
 
     metodo_row = db.execute(
@@ -2251,7 +2296,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
         },
     ).first()
     if not metodo_row:
-        caja_service.refresh_caja_por_pedido(db, pedido=pedido)
+        caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
         return
 
     db.execute(
@@ -2270,7 +2315,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido) -> None:
             "monto": monto,
         },
     )
-    caja_service.refresh_caja_por_pedido(db, pedido=pedido)
+    caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
 
 
 def _build_pedido_list_kpis(
@@ -3023,6 +3068,7 @@ def actualizar_detalle_pedido(
             )
         if not detalle:
             detalle = detalle_query.order_by(PedidoDetalle.idPedidoDetalle.asc()).first()
+        detalle_audit_antes = _pedido_detalle_audit_snapshot(detalle)
         needs_totals_recalc = False
         producto_detalle_actual: Producto | None = None
         missing_payload = object()
@@ -3380,7 +3426,11 @@ def actualizar_detalle_pedido(
                 pedido=pedido,
                 aplica_iva=_normalize_ident_type(cliente.tipoIdent) == "NIT",
             )
-            _sync_existing_pago_total(db, pedido=pedido)
+            _sync_existing_pago_total(
+                db,
+                pedido=pedido,
+                usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
+            )
             _invalidate_factura_impresa(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
 
         if (
@@ -3528,6 +3578,7 @@ def actualizar_detalle_pedido(
                 usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
             )
 
+        detalle_audit_despues = _pedido_detalle_audit_snapshot(detalle)
         _audit_pedido_action(
             db=db,
             actor=auth,
@@ -3541,6 +3592,9 @@ def actualizar_detalle_pedido(
                 "barrioNombre": payload.barrioNombre,
                 "fechaEntrega": payload.fechaEntrega,
                 "horaEntrega": payload.horaEntrega,
+                "detalleAntes": detalle_audit_antes,
+                "detalleDespues": detalle_audit_despues,
+                "detalleCambios": _pedido_detalle_audit_changes(detalle_audit_antes, detalle_audit_despues),
             },
         )
 
@@ -3702,7 +3756,11 @@ def agregar_detalle_pedido(
             pedido=pedido,
             aplica_iva=_normalize_ident_type(getattr(cliente, "tipoIdent", None)) == "NIT",
         )
-        _sync_existing_pago_total(db, pedido=pedido)
+        _sync_existing_pago_total(
+            db,
+            pedido=pedido,
+            usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
+        )
         db.commit()
         return {
             "status": "ok",
@@ -3839,7 +3897,11 @@ def eliminar_detalle_pedido(
             pedido=pedido,
             aplica_iva=_normalize_ident_type(getattr(cliente, "tipoIdent", None)) == "NIT",
         )
-        _sync_existing_pago_total(db, pedido=pedido)
+        _sync_existing_pago_total(
+            db,
+            pedido=pedido,
+            usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
+        )
         db.commit()
         return {"status": "ok", "pedidoID": int(pedido.idPedido), "detalleID": int(detalle_id)}
     except HTTPException:
@@ -4631,6 +4693,8 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     pedido.motivoRechazo = None
     pedido.updatedAt = datetime.now(timezone.utc)
 
+    _validar_cupos_inventario_pedido(db, pedido)
+
     produccion = asegurar_produccion_desde_pedido_aprobado_por_detalle(
         db=db,
         pedido=pedido,
@@ -4740,6 +4804,106 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     }
 
 
+@router.put("/pedido/{pedido_id}/finalizar", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
+def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    pedido_query = db.query(Pedido).filter(Pedido.idPedido == pedido_id)
+    if not is_super_admin_context(auth):
+        pedido_query = pedido_query.filter(Pedido.empresaID == int(auth.empresaID))
+    try:
+        pedido = pedido_query.with_for_update(nowait=True).first()
+    except OperationalError as exc:
+        db.rollback()
+        if _is_lock_not_available_error(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="Otro usuario esta actualizando este pedido en este momento. Intenta nuevamente en unos segundos.",
+            ) from exc
+        raise
+    if not pedido:
+        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    assert_same_empresa(auth, int(pedido.empresaID))
+
+    entrega = (
+        db.query(Entrega)
+        .filter(
+            Entrega.pedidoID == int(pedido.idPedido),
+            Entrega.empresaID == int(pedido.empresaID),
+        )
+        .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
+        .with_for_update()
+        .first()
+    )
+    if not entrega:
+        raise HTTPException(status_code=400, detail="Este pedido no tiene una entrega asociada para finalizar.")
+
+    if not _is_store_pickup_delivery(
+        tipo_entrega=getattr(entrega, "tipoEntrega", None),
+        barrio_nombre=getattr(entrega, "barrioNombre", None),
+    ):
+        raise HTTPException(status_code=400, detail="La opcion Finalizar solo aplica para pedidos de recogida en tienda.")
+
+    producciones = (
+        db.query(Produccion)
+        .filter(
+            Produccion.pedidoID == int(pedido.idPedido),
+            Produccion.empresaID == int(pedido.empresaID),
+        )
+        .all()
+    )
+    producciones_activas = [
+        produccion
+        for produccion in producciones
+        if produccion_service.estado_produccion_norm(getattr(produccion, "estado", None), db=db)
+        != produccion_service.ESTADO_CANCELADO
+    ]
+    if not producciones_activas:
+        raise HTTPException(
+            status_code=409,
+            detail="Para finalizar el pedido, primero debe existir produccion activa en estado ParaEntrega.",
+        )
+    if any(
+        produccion_service.estado_produccion_norm(getattr(produccion, "estado", None), db=db)
+        != produccion_service.ESTADO_PARA_ENTREGA
+        for produccion in producciones_activas
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Para finalizar este pedido, produccion debe estar en estado ParaEntrega.",
+        )
+
+    estado_entregado_id = domicilio_service.resolve_estado_entrega_id(db, domicilio_service.ESTADO_ENTREGADO)
+    estado_entrega_origen_id = int(entrega.estadoEntregaID or 0)
+    now = datetime.now(timezone.utc)
+    entrega.estadoEntregaID = int(estado_entregado_id)
+    entrega.fechaEntrega = now
+    entrega.updatedAt = now
+
+    _audit_pedido_action(
+        db=db,
+        actor=auth,
+        pedido=pedido,
+        accion="FINALIZAR_RECOGIDA_TIENDA",
+        estado_origen_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
+        estado_destino_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
+        extra={
+            "entregaID": int(entrega.idEntrega),
+            "estadoEntregaOrigenID": estado_entrega_origen_id,
+            "estadoEntregaDestinoID": int(estado_entregado_id),
+            "produccionesValidadas": len(producciones_activas),
+            "tipoEntrega": getattr(entrega, "tipoEntrega", None),
+            "barrioNombre": getattr(entrega, "barrioNombre", None),
+        },
+    )
+    db.commit()
+
+    return {
+        "status": "ok",
+        "pedidoID": int(pedido.idPedido),
+        "entregaID": int(entrega.idEntrega),
+        "estadoEntrega": domicilio_service.ESTADO_ENTREGADO,
+    }
+
+
 @router.post("/pedido/checkout", response_model=PedidoCheckoutResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
 @limiter.limit(rate_limit("pedido_checkout", "60/minute"))
 def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
@@ -4816,6 +4980,12 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
         productos_map = {int(producto.idProducto): producto for producto in productos_db}
         if len(productos_map) != len(producto_ids):
             raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_PRODUCT_NOT_FOUND", "message": "Uno o más productos no existen o están inactivos"})
+
+        validar_cupos_recetas_para_productos(
+            db,
+            empresa_id=empresa_id,
+            productos=productos_normalizados,
+        )
 
         cliente_id_payload = data.cliente.clienteID if data.cliente.clienteID is not None else data.cliente.clienteId
         if cliente_id_payload is not None:
@@ -5033,6 +5203,12 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             raise HTTPException(status_code=400, detail="Producto inválido")
 
         # 2️⃣ Calcular totales
+        validar_cupos_recetas_para_productos(
+            db,
+            empresa_id=int(data.empresaId),
+            productos=[{"productoID": int(item.productoId), "cantidad": Decimal(str(item.cantidad or 0))} for item in data.items],
+        )
+
         subtotal = Decimal("0.00")
         total_iva = Decimal("0.00")
 

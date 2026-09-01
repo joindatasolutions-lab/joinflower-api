@@ -1,9 +1,13 @@
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
 from sqlalchemy import String, func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -18,14 +22,21 @@ from app.models.receta import Receta, RecetaDetalle
 from app.services.cache import invalidate_cache_prefix
 from app.schemas.inventario import (
     InventarioActivoRequest,
+    InventarioCategoriaConfig,
+    InventarioCategoriasResponse,
+    InventarioCompraRequest,
     InventarioCreateRequest,
+    InventarioDanoRequest,
     InventarioItem,
     InventarioListResponse,
+    InventarioMetricasResponse,
     InventarioMutationResponse,
     InventarioStockAdjustRequest,
     InventarioUpdateRequest,
     MovimientoInventarioItem,
+    MovimientoInventarioAnularRequest,
     MovimientoInventarioListResponse,
+    MovimientoInventarioMetricasResponse,
     ProveedorCreateRequest,
     ProveedorItem,
     ProveedorListResponse,
@@ -157,6 +168,59 @@ MOVIMIENTO_TIPO_ID_A_LABEL = {
 }
 
 
+INVENTARIO_CATEGORIAS = {
+    "FLORES": {
+        "subcategorias": ["Rosas", "Follajes", "Tropicales", "Hortensias", "Lirios", "Orquideas", "Otro"],
+        "unidades": ["Tallo", "Paquete", "Ramo", "Unidad"],
+        "motivosSalida": ["Venta", "Produccion", "Muestra", "Consumo interno", "Regalo"],
+        "motivosDano": [
+            "Marchita",
+            "Mal estado al recibir",
+            "Daño por transporte",
+            "Daño en produccion",
+            "Plaga",
+            "Regalo",
+            "Otro",
+        ],
+        "motivosAjuste": ["Conteo fisico", "Error anterior", "Flor encontrada", "Flor extraviada"],
+    },
+    "BASES": {
+        "subcategorias": ["Box", "Ceramica", "Vidrio", "Canasta", "Madera", "Otro"],
+        "unidades": ["Unidad", "Caja", "Paquete"],
+        "motivosSalida": ["Venta", "Produccion", "Daño"],
+        "motivosDano": ["Rota", "Quebrada", "Golpe transporte", "Defecto de fabrica", "Otro"],
+        "motivosAjuste": ["Conteo fisico", "Error anterior", "Base encontrada", "Base extraviada"],
+    },
+    "MATERIALES": {
+        "subcategorias": [
+            "Cintas",
+            "Papeles",
+            "Papel Coreano",
+            "Celofan",
+            "Moños",
+            "Yute",
+            "Oasis",
+            "Plastico",
+            "Frascos",
+            "Tarjetas",
+            "Sticker",
+            "Herramientas",
+        ],
+        "unidades": ["Metro", "Rollo", "Unidad", "Paquete", "Caja", "Bolsa", "Frasco", "Kilogramo"],
+        "motivosSalida": ["Produccion", "Venta", "Muestra", "Consumo interno", "Regalo"],
+        "motivosDano": ["Mojado", "Roto", "Manchado", "Deteriorado", "Quebrado", "Dañado"],
+        "motivosAjuste": ["Conteo fisico", "Error anterior", "Material encontrado", "Material extraviado"],
+    },
+    "ADICIONALES": {
+        "subcategorias": ["Chocolates", "Peluche", "Vino", "Topper", "Otro"],
+        "unidades": ["Unidad", "Caja", "Paquete", "Botella", "Bolsa", "Kit"],
+        "motivosSalida": ["Venta", "Produccion", "Muestra", "Consumo interno", "Regalo"],
+        "motivosDano": ["Vencimiento", "Chocolate vencido", "Botella rota", "Peluche manchado", "Otro"],
+        "motivosAjuste": ["Conteo fisico", "Error anterior", "Producto encontrado", "Producto extraviado"],
+    },
+}
+
+
 def _resolve_movimiento_tipo_id(db: Session, value: str) -> int:
     tipo = _normalize_movimiento_tipo(value)
     codigo_key = tipo.lower().replace("é", "e").replace("é", "e")
@@ -239,6 +303,178 @@ def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
         proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
         codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
     )
+
+
+def _categoria_expr(has_categoria_col: bool):
+    return Insumo.categoria if has_categoria_col else Insumo.unidadMedida
+
+
+def _normalize_categoria(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped.upper() if stripped else None
+
+
+def _movement_note(prefix: str, fields: dict[str, object | None]) -> str:
+    extras = []
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        extras.append(f"{key}: {value}")
+    detail = " | ".join(extras)
+    note = f"{prefix} | {detail}" if detail else prefix
+    return note[:250]
+
+
+def _movement_tipo_key(value: int | str | None) -> str:
+    label = _movimiento_tipo_label(value) if value is not None else ""
+    normalized = (
+        str(label or "")
+        .strip()
+        .lower()
+        .replace("ÃƒÂ©", "e")
+        .replace("Ã©", "e")
+        .replace("é", "e")
+    )
+    if normalized in {"perdida", "perdidas", "dano", "danos", "daño"}:
+        return "perdida"
+    if normalized in {"entrada", "salida", "ajuste"}:
+        return normalized
+    return normalized
+
+
+def _movement_estado(value: str | None) -> str:
+    estado = str(value or "Registrado").strip()
+    return estado or "Registrado"
+
+
+def _movement_referencia(movimiento: MovimientoInventario) -> str:
+    return str(getattr(movimiento, "referencia", None) or f"MOV-{int(movimiento.idMovimiento)}")
+
+
+def _movimiento_item_response(
+    mov: MovimientoInventario,
+    inv: Inventario,
+    ins: Insumo | None,
+    *,
+    has_categoria_col: bool,
+) -> MovimientoInventarioItem:
+    return MovimientoInventarioItem(
+        movimientoID=int(mov.idMovimiento),
+        inventarioID=int(mov.inventarioID),
+        codigo=(str(ins.codigoBarra) if ins and ins.codigoBarra else f"INS-{int(inv.insumoID)}"),
+        nombre=(str(ins.nombreInsumo) if ins and ins.nombreInsumo else f"Insumo {int(inv.insumoID)}"),
+        categoria=(str(ins.categoria) if ins and has_categoria_col and ins.categoria else (str(ins.unidadMedida) if ins and ins.unidadMedida else None)),
+        unidadMedida=(str(ins.unidadMedida) if ins and ins.unidadMedida else None),
+        tipoMovimiento=_movimiento_tipo_label(mov.tipoMovimiento),
+        cantidad=Decimal(mov.cantidad or 0),
+        fecha=mov.fecha,
+        motivo=(str(mov.motivo) if mov.motivo is not None else None),
+        usuarioID=(int(mov.usuarioID) if mov.usuarioID is not None else None),
+        estado=_movement_estado(getattr(mov, "estado", None)),
+        referencia=_movement_referencia(mov),
+        stockAnterior=(Decimal(mov.stockAnterior) if getattr(mov, "stockAnterior", None) is not None else None),
+        stockNuevo=(Decimal(mov.stockNuevo) if getattr(mov, "stockNuevo", None) is not None else None),
+        proveedorID=(int(mov.proveedorID) if getattr(mov, "proveedorID", None) is not None else None),
+        numeroFactura=(str(mov.numeroFactura) if getattr(mov, "numeroFactura", None) is not None else None),
+        responsable=(str(mov.responsable) if getattr(mov, "responsable", None) is not None else None),
+        precioUnitario=(Decimal(mov.precioUnitario) if getattr(mov, "precioUnitario", None) is not None else None),
+        fechaVencimiento=getattr(mov, "fechaVencimiento", None),
+        evidenciaUrl=(str(mov.evidenciaUrl) if getattr(mov, "evidenciaUrl", None) is not None else None),
+        pedidoReferencia=(str(mov.pedidoReferencia) if getattr(mov, "pedidoReferencia", None) is not None else None),
+        observaciones=(str(mov.observaciones) if getattr(mov, "observaciones", None) is not None else None),
+        anuladoAt=getattr(mov, "anuladoAt", None),
+        anuladoPorUsuarioID=(int(mov.anuladoPorUsuarioID) if getattr(mov, "anuladoPorUsuarioID", None) is not None else None),
+        motivoAnulacion=(str(mov.motivoAnulacion) if getattr(mov, "motivoAnulacion", None) is not None else None),
+        movimientoOrigenID=(int(mov.movimientoOrigenID) if getattr(mov, "movimientoOrigenID", None) is not None else None),
+    )
+
+
+def _apply_stock_movement(
+    *,
+    db: Session,
+    auth,
+    item: Inventario,
+    tipo_movimiento: str,
+    cantidad: Decimal,
+    motivo: str,
+    fecha: datetime | None = None,
+    stock_objetivo: Decimal | None = None,
+    proveedor_id: int | None = None,
+    numero_factura: str | None = None,
+    responsable: str | None = None,
+    unidad: str | None = None,
+    precio_unitario: Decimal | None = None,
+    fecha_vencimiento: date | None = None,
+    evidencia_url: str | None = None,
+    pedido_referencia: str | None = None,
+    observaciones: str | None = None,
+    referencia: str | None = None,
+    movimiento_origen_id: int | None = None,
+) -> Inventario:
+    assert_same_empresa(auth, int(item.empresaID))
+
+    movimiento_tipo = _normalize_movimiento_tipo(tipo_movimiento)
+    movimiento_tipo_id = _resolve_movimiento_tipo_id(db, movimiento_tipo)
+    cantidad = Decimal(cantidad or 0)
+    now = datetime.now(timezone.utc)
+    fecha_movimiento = fecha or now
+    stock_actual = Decimal(item.stockActual or 0)
+    tipo_key = _movement_tipo_key(movimiento_tipo)
+
+    if tipo_key == "entrada":
+        if cantidad <= 0:
+            raise HTTPException(status_code=400, detail="cantidad debe ser mayor a 0 para Entrada")
+        nuevo_stock = stock_actual + cantidad
+        cantidad_mov = cantidad
+    elif tipo_key in {'salida', 'perdida'}:
+        if cantidad <= 0:
+            raise HTTPException(status_code=400, detail=f"cantidad debe ser mayor a 0 para {movimiento_tipo}")
+        nuevo_stock = stock_actual - cantidad
+        if nuevo_stock < 0:
+            raise HTTPException(status_code=400, detail="No se permite stock negativo")
+        cantidad_mov = cantidad
+    else:
+        if stock_objetivo is None:
+            raise HTTPException(status_code=400, detail="stockObjetivo es obligatorio para Ajuste")
+        objetivo = Decimal(stock_objetivo)
+        if objetivo < 0:
+            raise HTTPException(status_code=400, detail="No se permite stock negativo")
+        nuevo_stock = objetivo
+        cantidad_mov = abs(nuevo_stock - stock_actual)
+
+    item.stockActual = nuevo_stock
+    item.fechaUltimaActualizacion = now
+    item.updatedAt = now
+
+    db.add(
+        MovimientoInventario(
+            empresaID=int(item.empresaID),
+            inventarioID=int(item.idInventario),
+            tipoMovimiento=movimiento_tipo_id,
+            cantidad=cantidad_mov,
+            fecha=fecha_movimiento,
+            motivo=motivo.strip(),
+            usuarioID=int(auth.userID),
+            createdAt=now,
+            estado="Registrado",
+            stockAnterior=stock_actual,
+            stockNuevo=nuevo_stock,
+            referencia=referencia,
+            proveedorID=(int(proveedor_id) if proveedor_id is not None else None),
+            numeroFactura=numero_factura,
+            responsable=responsable,
+            unidad=unidad,
+            precioUnitario=precio_unitario,
+            fechaVencimiento=fecha_vencimiento,
+            evidenciaUrl=evidencia_url,
+            pedidoReferencia=pedido_referencia,
+            observaciones=observaciones,
+            movimientoOrigenID=movimiento_origen_id,
+        )
+    )
+    return item
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +632,86 @@ def actualizar_proveedor(
 # ---------------------------------------------------------------------------
 # Inventario
 # ---------------------------------------------------------------------------
+
+@router.get("/categorias", response_model=InventarioCategoriasResponse)
+def listar_categorias_inventario():
+    items = [
+        InventarioCategoriaConfig(
+            categoria=categoria,
+            subcategorias=list(config["subcategorias"]),
+            unidades=list(config["unidades"]),
+            motivosSalida=list(config["motivosSalida"]),
+            motivosDano=list(config["motivosDano"]),
+            motivosAjuste=list(config["motivosAjuste"]),
+        )
+        for categoria, config in INVENTARIO_CATEGORIAS.items()
+    ]
+    return InventarioCategoriasResponse(items=items)
+
+
+@router.get("/metricas", response_model=InventarioMetricasResponse)
+def obtener_metricas_inventario(
+    empresa_id: int = Query(..., alias="empresaID"),
+    categoria: str | None = Query(None),
+    dias_vencimiento: int = Query(default=7, ge=1, le=365, alias="diasVencimiento"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    has_categoria_col = _has_column(db, "insumo", "categoria")
+    categoria_norm = _normalize_categoria(categoria)
+    query = (
+        db.query(Inventario, Insumo)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .filter(Inventario.empresaID == int(empresa_id))
+    )
+    if categoria_norm:
+        query = query.filter(func.upper(_categoria_expr(has_categoria_col)) == categoria_norm)
+
+    today = date.today()
+    vence_hasta = today + timedelta(days=int(dias_vencimiento))
+    total_referencias = 0
+    disponibles = 0
+    stock_bajo = 0
+    agotados = 0
+    inactivos = 0
+    por_vencer = 0
+    valor_inventario = Decimal("0")
+
+    for item, insumo in query.all():
+        total_referencias += 1
+        stock_actual = Decimal(item.stockActual or 0)
+        stock_minimo = Decimal(item.stockMinimo or 0)
+        valor_inventario += stock_actual * Decimal(item.valorUnitario or 0)
+        estado = _status_stock(bool(item.activo), stock_actual, stock_minimo)
+
+        if estado == "Disponible":
+            disponibles += 1
+        elif estado == "Bajo Stock":
+            stock_bajo += 1
+        elif estado == "Agotado":
+            agotados += 1
+        elif estado == "Inactivo":
+            inactivos += 1
+
+        fecha_vencimiento = insumo.fechaVencimiento if insumo and has_categoria_col else None
+        if fecha_vencimiento and today <= fecha_vencimiento <= vence_hasta:
+            por_vencer += 1
+
+    return InventarioMetricasResponse(
+        empresaID=int(empresa_id),
+        categoria=categoria_norm,
+        totalReferencias=total_referencias,
+        disponibles=disponibles,
+        stockBajo=stock_bajo,
+        agotados=agotados,
+        inactivos=inactivos,
+        porVencer=por_vencer,
+        diasVencimiento=int(dias_vencimiento),
+        valorInventario=valor_inventario,
+    )
+
 
 @router.get("", response_model=InventarioListResponse)
 def listar_inventario(
@@ -777,6 +1093,13 @@ def ajustar_stock_inventario(
             raise HTTPException(status_code=400, detail="cantidad debe ser mayor a 0 para Entrada")
         nuevo_stock = stock_actual + cantidad
         cantidad_mov = cantidad
+    elif _movement_tipo_key(movimiento_tipo) == "perdida":
+        if cantidad <= 0:
+            raise HTTPException(status_code=400, detail="cantidad debe ser mayor a 0 para Perdida")
+        nuevo_stock = stock_actual - cantidad
+        if nuevo_stock < 0:
+            raise HTTPException(status_code=400, detail="No se permite stock negativo")
+        cantidad_mov = cantidad
     elif movimiento_tipo in ("Salida", "Pérdida"):
         if cantidad <= 0:
             raise HTTPException(status_code=400, detail=f"cantidad debe ser mayor a 0 para {movimiento_tipo}")
@@ -806,6 +1129,9 @@ def ajustar_stock_inventario(
         motivo=payload.motivo.strip(),
         usuarioID=int(auth.userID),
         createdAt=now,
+        estado="Registrado",
+        stockAnterior=stock_actual,
+        stockNuevo=nuevo_stock,
     )
     db.add(movimiento)
 
@@ -815,6 +1141,117 @@ def ajustar_stock_inventario(
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible ajustar stock")
+
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
+
+
+@router.post("/compras", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def registrar_compra_inventario(
+    payload: InventarioCompraRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    item = db.query(Inventario).filter(Inventario.idInventario == int(payload.inventarioID)).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item no encontrado")
+    assert_same_empresa(auth, int(item.empresaID))
+
+    if payload.proveedorID is not None:
+        proveedor = _get_proveedor_for_empresa(db, int(item.empresaID), int(payload.proveedorID))
+        if not proveedor:
+            raise HTTPException(status_code=400, detail="Proveedor no valido para la empresa")
+
+    insumo = db.query(Insumo).filter(Insumo.idInsumo == int(item.insumoID), Insumo.empresaID == int(item.empresaID)).first()
+    if insumo and payload.fechaVencimiento and _has_column(db, "insumo", "fecha_vencimiento"):
+        insumo.fechaVencimiento = payload.fechaVencimiento
+        insumo.updatedAt = datetime.now(timezone.utc)
+    if insumo and payload.proveedorID is not None:
+        insumo.proveedorID = int(payload.proveedorID)
+        insumo.updatedAt = datetime.now(timezone.utc)
+
+    motivo = _movement_note(
+        "Compra registrada",
+        {
+            "factura": payload.numeroFactura,
+            "proveedorID": payload.proveedorID,
+            "responsable": payload.responsable,
+            "unidad": payload.unidad,
+            "precioUnitario": payload.precioUnitario,
+            "calidad": payload.calidad,
+            "estadoRecibido": payload.estadoRecibido,
+            "vencimiento": payload.fechaVencimiento,
+            "observaciones": payload.observaciones,
+        },
+    )
+    _apply_stock_movement(
+        db=db,
+        auth=auth,
+        item=item,
+        tipo_movimiento="Entrada",
+        cantidad=payload.cantidad,
+        fecha=payload.fecha,
+        motivo=motivo,
+        proveedor_id=payload.proveedorID,
+        numero_factura=payload.numeroFactura,
+        responsable=payload.responsable,
+        unidad=payload.unidad,
+        precio_unitario=payload.precioUnitario,
+        fecha_vencimiento=payload.fechaVencimiento,
+        observaciones=payload.observaciones,
+    )
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible registrar compra")
+
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
+
+
+@router.post("/danos", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def registrar_dano_inventario(
+    payload: InventarioDanoRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    item = db.query(Inventario).filter(Inventario.idInventario == int(payload.inventarioID)).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item no encontrado")
+
+    motivo = _movement_note(
+        "Daño registrado",
+        {
+            "motivo": payload.motivo,
+            "responsable": payload.responsable,
+            "unidad": payload.unidad,
+            "evidencia": payload.evidenciaUrl,
+            "pedido": payload.pedidoReferencia,
+            "observaciones": payload.observaciones,
+        },
+    )
+    _apply_stock_movement(
+        db=db,
+        auth=auth,
+        item=item,
+        tipo_movimiento="perdida",
+        cantidad=payload.cantidad,
+        fecha=payload.fecha,
+        motivo=motivo,
+        responsable=payload.responsable,
+        unidad=payload.unidad,
+        evidencia_url=payload.evidenciaUrl,
+        pedido_referencia=payload.pedidoReferencia,
+        observaciones=payload.observaciones,
+    )
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible registrar daño")
 
     return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
 
@@ -856,18 +1293,23 @@ def listar_movimientos_inventario(
     empresa_id: int = Query(..., alias="empresaID"),
     inventario_id: int | None = Query(None, alias="inventarioID"),
     tipo: str | None = Query(None),
+    categoria: str | None = Query(None, alias="modulo"),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    usuario_id: int | None = Query(None, alias="usuarioID"),
+    estado: str | None = Query(None),
     q: str | None = Query(None),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
-
     query = (
         db.query(MovimientoInventario, Inventario, Insumo)
         .join(Inventario, Inventario.idInventario == MovimientoInventario.inventarioID)
         .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
         .filter(MovimientoInventario.empresaID == empresa_id)
     )
+    has_categoria_col = _has_column(db, "insumo", "categoria")
 
     if inventario_id is not None:
         query = query.filter(MovimientoInventario.inventarioID == inventario_id)
@@ -875,6 +1317,21 @@ def listar_movimientos_inventario(
     if tipo:
         tipo_id = _resolve_movimiento_tipo_id(db, tipo)
         query = query.filter(MovimientoInventario.tipoMovimiento == tipo_id)
+
+    if categoria:
+        query = query.filter(func.upper(_categoria_expr(has_categoria_col)) == str(categoria).strip().upper())
+
+    if fecha_desde:
+        query = query.filter(MovimientoInventario.fecha >= datetime.combine(fecha_desde, datetime.min.time()))
+
+    if fecha_hasta:
+        query = query.filter(MovimientoInventario.fecha <= datetime.combine(fecha_hasta, datetime.max.time()))
+
+    if usuario_id is not None:
+        query = query.filter(MovimientoInventario.usuarioID == int(usuario_id))
+
+    if estado and str(estado).strip().lower() not in {"todos", "todo"}:
+        query = query.filter(func.lower(MovimientoInventario.estado) == str(estado).strip().lower())
 
     if q:
         term = f"%{q.strip()}%"
@@ -886,21 +1343,278 @@ def listar_movimientos_inventario(
 
     rows = query.order_by(MovimientoInventario.fecha.desc(), MovimientoInventario.idMovimiento.desc()).all()
 
-    items = [
-        MovimientoInventarioItem(
-            movimientoID=int(mov.idMovimiento),
-            inventarioID=int(mov.inventarioID),
-            codigo=(str(ins.codigoBarra) if ins and ins.codigoBarra else f"INS-{int(inv.insumoID)}"),
-            nombre=(str(ins.nombreInsumo) if ins and ins.nombreInsumo else f"Insumo {int(inv.insumoID)}"),
-            tipoMovimiento=_movimiento_tipo_label(mov.tipoMovimiento),
-            cantidad=Decimal(mov.cantidad or 0),
-            fecha=mov.fecha,
-            motivo=(str(mov.motivo) if mov.motivo is not None else None),
-            usuarioID=(int(mov.usuarioID) if mov.usuarioID is not None else None),
-        )
-        for mov, inv, ins in rows
-    ]
+    items = [_movimiento_item_response(mov, inv, ins, has_categoria_col=has_categoria_col) for mov, inv, ins in rows]
     return MovimientoInventarioListResponse(items=items, total=len(items))
+
+
+@router.get("/movimientos/metricas", response_model=MovimientoInventarioMetricasResponse)
+def obtener_metricas_movimientos_inventario(
+    empresa_id: int = Query(..., alias="empresaID"),
+    categoria: str | None = Query(None, alias="modulo"),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+
+    query = (
+        db.query(MovimientoInventario, Inventario, Insumo)
+        .join(Inventario, Inventario.idInventario == MovimientoInventario.inventarioID)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .filter(MovimientoInventario.empresaID == int(empresa_id))
+        .filter(func.lower(MovimientoInventario.estado) != "anulado")
+    )
+    has_categoria_col = _has_column(db, "insumo", "categoria")
+    if categoria:
+        query = query.filter(func.upper(_categoria_expr(has_categoria_col)) == str(categoria).strip().upper())
+    if fecha_desde:
+        query = query.filter(MovimientoInventario.fecha >= datetime.combine(fecha_desde, datetime.min.time()))
+    if fecha_hasta:
+        query = query.filter(MovimientoInventario.fecha <= datetime.combine(fecha_hasta, datetime.max.time()))
+
+    entradas = Decimal("0")
+    salidas = Decimal("0")
+    ajustes = Decimal("0")
+    danos = Decimal("0")
+    total_hoy = 0
+    today = date.today()
+
+    for mov, _inv, _ins in query.all():
+        tipo = _movimiento_tipo_label(mov.tipoMovimiento).lower()
+        cantidad = Decimal(mov.cantidad or 0)
+        if tipo == "entrada":
+            entradas += cantidad
+        elif tipo == "salida":
+            salidas += cantidad
+        elif tipo == "ajuste":
+            ajustes += cantidad
+        else:
+            danos += cantidad
+        if mov.fecha and mov.fecha.date() == today:
+            total_hoy += 1
+
+    return MovimientoInventarioMetricasResponse(
+        entradas=entradas,
+        salidas=salidas,
+        ajustes=ajustes,
+        danos=danos,
+        totalHoy=total_hoy,
+    )
+
+
+@router.get("/compras", response_model=MovimientoInventarioListResponse)
+def listar_compras_inventario(
+    empresa_id: int = Query(..., alias="empresaID"),
+    inventario_id: int | None = Query(None, alias="inventarioID"),
+    fecha_desde: date | None = Query(None, alias="fechaDesde"),
+    fecha_hasta: date | None = Query(None, alias="fechaHasta"),
+    q: str | None = Query(None),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    entrada_id = _resolve_movimiento_tipo_id(db, "Entrada")
+    query = (
+        db.query(MovimientoInventario, Inventario, Insumo)
+        .join(Inventario, Inventario.idInventario == MovimientoInventario.inventarioID)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .filter(
+            MovimientoInventario.empresaID == int(empresa_id),
+            MovimientoInventario.tipoMovimiento == entrada_id,
+            func.lower(MovimientoInventario.estado) != "anulado",
+        )
+        .filter(
+            (MovimientoInventario.numeroFactura.isnot(None))
+            | (MovimientoInventario.proveedorID.isnot(None))
+            | (MovimientoInventario.motivo.ilike("Compra registrada%"))
+        )
+    )
+    if inventario_id is not None:
+        query = query.filter(MovimientoInventario.inventarioID == int(inventario_id))
+    if fecha_desde:
+        query = query.filter(MovimientoInventario.fecha >= datetime.combine(fecha_desde, datetime.min.time()))
+    if fecha_hasta:
+        query = query.filter(MovimientoInventario.fecha <= datetime.combine(fecha_hasta, datetime.max.time()))
+    if q:
+        term = f"%{q.strip()}%"
+        query = query.filter(
+            Insumo.nombreInsumo.ilike(term)
+            | Insumo.codigoBarra.ilike(term)
+            | MovimientoInventario.numeroFactura.ilike(term)
+            | MovimientoInventario.motivo.ilike(term)
+        )
+
+    has_categoria_col = _has_column(db, "insumo", "categoria")
+    rows = query.order_by(MovimientoInventario.fecha.desc(), MovimientoInventario.idMovimiento.desc()).all()
+    items = [_movimiento_item_response(mov, inv, ins, has_categoria_col=has_categoria_col) for mov, inv, ins in rows]
+    return MovimientoInventarioListResponse(items=items, total=len(items))
+
+
+@router.post("/movimientos/{movimiento_id}/anular", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
+def anular_movimiento_inventario(
+    movimiento_id: int,
+    payload: MovimientoInventarioAnularRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    mov = (
+        db.query(MovimientoInventario)
+        .filter(MovimientoInventario.idMovimiento == int(movimiento_id))
+        .with_for_update()
+        .first()
+    )
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    assert_same_empresa(auth, int(mov.empresaID))
+    if _movement_estado(getattr(mov, "estado", None)).lower() == "anulado":
+        raise HTTPException(status_code=409, detail="El movimiento ya esta anulado")
+    if getattr(mov, "movimientoOrigenID", None) is not None:
+        raise HTTPException(status_code=409, detail="No se puede anular un movimiento de reverso")
+
+    item = (
+        db.query(Inventario)
+        .filter(Inventario.idInventario == int(mov.inventarioID))
+        .with_for_update()
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Item de inventario no encontrado")
+
+    now = datetime.now(timezone.utc)
+    stock_actual = Decimal(item.stockActual or 0)
+    cantidad = Decimal(mov.cantidad or 0)
+    tipo_key = _movement_tipo_key(mov.tipoMovimiento)
+
+    if tipo_key == "entrada":
+        nuevo_stock = stock_actual - cantidad
+        if nuevo_stock < 0:
+            raise HTTPException(status_code=409, detail="No se puede anular porque generaria stock negativo")
+    elif tipo_key in {"salida", "perdida"}:
+        nuevo_stock = stock_actual + cantidad
+    elif tipo_key == "ajuste":
+        if getattr(mov, "stockAnterior", None) is None:
+            raise HTTPException(status_code=409, detail="Este ajuste no tiene stock anterior registrado")
+        nuevo_stock = Decimal(mov.stockAnterior or 0)
+        cantidad = abs(nuevo_stock - stock_actual)
+    else:
+        raise HTTPException(status_code=400, detail="Tipo de movimiento no soportado para anulacion")
+
+    mov.estado = "Anulado"
+    mov.anuladoAt = now
+    mov.anuladoPorUsuarioID = int(auth.userID)
+    mov.motivoAnulacion = payload.motivo.strip()
+
+    item.stockActual = nuevo_stock
+    item.fechaUltimaActualizacion = now
+    item.updatedAt = now
+
+    ajuste_id = _resolve_movimiento_tipo_id(db, "Ajuste")
+    db.add(
+        MovimientoInventario(
+            empresaID=int(item.empresaID),
+            inventarioID=int(item.idInventario),
+            tipoMovimiento=ajuste_id,
+            cantidad=cantidad,
+            fecha=now,
+            motivo=_movement_note("Anulacion de movimiento", {"referencia": _movement_referencia(mov), "motivo": payload.motivo}),
+            usuarioID=int(auth.userID),
+            createdAt=now,
+            estado="Registrado",
+            stockAnterior=stock_actual,
+            stockNuevo=nuevo_stock,
+            referencia=f"ANU-{int(mov.idMovimiento)}",
+            movimientoOrigenID=int(mov.idMovimiento),
+            observaciones=payload.motivo.strip(),
+        )
+    )
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No fue posible anular el movimiento")
+
+    return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
+
+
+def _pdf_line(canvas_obj, y: float, label: str, value: object | None) -> float:
+    canvas_obj.setFont("Helvetica-Bold", 9)
+    canvas_obj.drawString(18 * mm, y, f"{label}:")
+    canvas_obj.setFont("Helvetica", 9)
+    canvas_obj.drawString(58 * mm, y, str(value if value is not None else ""))
+    return y - 7 * mm
+
+
+@router.get("/movimientos/{movimiento_id}/pdf", dependencies=[Depends(require_module_access("inventario", "puedeVer"))])
+def imprimir_movimiento_inventario(
+    movimiento_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    row = (
+        db.query(MovimientoInventario, Inventario, Insumo)
+        .join(Inventario, Inventario.idInventario == MovimientoInventario.inventarioID)
+        .outerjoin(Insumo, Insumo.idInsumo == Inventario.insumoID)
+        .filter(MovimientoInventario.idMovimiento == int(movimiento_id))
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    mov, inv, ins = row
+    assert_same_empresa(auth, int(mov.empresaID))
+
+    from io import BytesIO
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+    y = height - 22 * mm
+    pdf.setTitle(f"Movimiento inventario {_movement_referencia(mov)}")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(18 * mm, y, "Movimiento de inventario")
+    y -= 12 * mm
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(18 * mm, y, f"Referencia: {_movement_referencia(mov)}")
+    y -= 12 * mm
+
+    data = _movimiento_item_response(mov, inv, ins, has_categoria_col=_has_column(db, "insumo", "categoria"))
+    campos = [
+        ("Movimiento", data.movimientoID),
+        ("Estado", data.estado),
+        ("Tipo", data.tipoMovimiento),
+        ("Fecha", data.fecha),
+        ("Codigo", data.codigo),
+        ("Item", data.nombre),
+        ("Categoria", data.categoria),
+        ("Cantidad", data.cantidad),
+        ("Stock anterior", data.stockAnterior),
+        ("Stock nuevo", data.stockNuevo),
+        ("Factura", data.numeroFactura),
+        ("Proveedor", data.proveedorID),
+        ("Responsable", data.responsable),
+        ("Evidencia", data.evidenciaUrl),
+        ("Pedido ref.", data.pedidoReferencia),
+        ("Motivo", data.motivo),
+        ("Anulado por", data.anuladoPorUsuarioID),
+        ("Motivo anulacion", data.motivoAnulacion),
+    ]
+    for label, value in campos:
+        if y < 24 * mm:
+            pdf.showPage()
+            y = height - 22 * mm
+        y = _pdf_line(pdf, y, label, value)
+    pdf.setFont("Helvetica", 8)
+    pdf.drawRightString(width - 18 * mm, 14 * mm, f"Generado: {datetime.now(timezone.utc).isoformat()}")
+    pdf.save()
+    content = buffer.getvalue()
+    filename = f"movimiento-inventario-{int(mov.idMovimiento)}.pdf"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from app.models.producto import Producto
 from app.models.sucursal import Sucursal
 from app.schemas.pedido import PedidoCheckoutRequest
 from app.core.timezone import colombia_now_naive
+from app.services.inventario_cupo_service import validar_cupos_recetas_para_productos
 
 
 def _activo_truthy(column):
@@ -422,6 +423,12 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
         productos_normalizados = _normalize_checkout_productos(payload.productos)
         if not productos_normalizados:
             raise HTTPException(status_code=400, detail="productos no puede estar vacÃ­o")
+
+        validar_cupos_recetas_para_productos(
+            db,
+            empresa_id=int(payload.empresaID),
+            productos=productos_normalizados,
+        )
 
         pedido = _crear_pedido_checkout_compuesto(
             db,

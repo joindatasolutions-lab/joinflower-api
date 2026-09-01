@@ -82,6 +82,37 @@ class InventarioStockAdjustRequest(BaseModel):
     motivo: str = Field(min_length=3, max_length=250)
 
 
+class InventarioCompraRequest(BaseModel):
+    inventarioID: int
+    cantidad: Decimal = Field(gt=Decimal("0"))
+    fecha: datetime | None = None
+    proveedorID: int | None = None
+    numeroFactura: str | None = Field(default=None, max_length=80)
+    responsable: str | None = Field(default=None, max_length=150)
+    unidad: str | None = Field(default=None, max_length=50)
+    precioUnitario: Decimal | None = Field(default=None, ge=Decimal("0"))
+    calidad: str | None = Field(default=None, max_length=50)
+    estadoRecibido: str | None = Field(default=None, max_length=50)
+    fechaVencimiento: date | None = None
+    observaciones: str | None = Field(default=None, max_length=250)
+
+
+class InventarioDanoRequest(BaseModel):
+    inventarioID: int
+    cantidad: Decimal = Field(gt=Decimal("0"))
+    fecha: datetime | None = None
+    motivo: str = Field(min_length=2, max_length=120)
+    responsable: str | None = Field(default=None, max_length=150)
+    unidad: str | None = Field(default=None, max_length=50)
+    evidenciaUrl: str | None = Field(default=None, max_length=500)
+    pedidoReferencia: str | None = Field(default=None, max_length=80)
+    observaciones: str | None = Field(default=None, max_length=250)
+
+
+class MovimientoInventarioAnularRequest(BaseModel):
+    motivo: str = Field(min_length=3, max_length=300)
+
+
 class InventarioActivoRequest(BaseModel):
     activo: bool
 
@@ -118,6 +149,32 @@ class InventarioListResponse(BaseModel):
     pageSize: int = 500
 
 
+class InventarioMetricasResponse(BaseModel):
+    empresaID: int
+    categoria: str | None = None
+    totalReferencias: int
+    disponibles: int
+    stockBajo: int
+    agotados: int
+    inactivos: int
+    porVencer: int
+    diasVencimiento: int
+    valorInventario: Decimal
+
+
+class InventarioCategoriaConfig(BaseModel):
+    categoria: str
+    subcategorias: list[str]
+    unidades: list[str]
+    motivosSalida: list[str]
+    motivosDano: list[str]
+    motivosAjuste: list[str]
+
+
+class InventarioCategoriasResponse(BaseModel):
+    items: list[InventarioCategoriaConfig]
+
+
 class InventarioMutationResponse(BaseModel):
     status: str
     item: InventarioItem
@@ -128,16 +185,42 @@ class MovimientoInventarioItem(BaseModel):
     inventarioID: int
     codigo: str
     nombre: str
+    categoria: str | None = None
+    unidadMedida: str | None = None
     tipoMovimiento: str
     cantidad: Decimal
     fecha: datetime
     motivo: str | None = None
     usuarioID: int | None = None
+    estado: str = "Registrado"
+    referencia: str | None = None
+    stockAnterior: Decimal | None = None
+    stockNuevo: Decimal | None = None
+    proveedorID: int | None = None
+    numeroFactura: str | None = None
+    responsable: str | None = None
+    precioUnitario: Decimal | None = None
+    fechaVencimiento: date | None = None
+    evidenciaUrl: str | None = None
+    pedidoReferencia: str | None = None
+    observaciones: str | None = None
+    anuladoAt: datetime | None = None
+    anuladoPorUsuarioID: int | None = None
+    motivoAnulacion: str | None = None
+    movimientoOrigenID: int | None = None
 
 
 class MovimientoInventarioListResponse(BaseModel):
     items: list[MovimientoInventarioItem]
     total: int
+
+
+class MovimientoInventarioMetricasResponse(BaseModel):
+    entradas: Decimal
+    salidas: Decimal
+    ajustes: Decimal
+    danos: Decimal
+    totalHoy: int
 
 
 # Schemas para Arreglos / Recetas

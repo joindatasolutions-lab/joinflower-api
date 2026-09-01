@@ -106,6 +106,32 @@
           </div>
           <button id="btnPedidos" class="btn">Ver pedidos</button>
         </article>
+
+        <article class="panel reveal delay-6">
+          <h2>Inventario</h2>
+          <div class="field">
+            <label for="empresaInventario">Empresa ID</label>
+            <input id="empresaInventario" type="number" value="1" min="1" />
+          </div>
+          <div class="field">
+            <label for="categoriaInventario">Categoria</label>
+            <select id="categoriaInventario">
+              <option value="">Todas</option>
+              <option value="FLORES">Flores</option>
+              <option value="BASES">Bases</option>
+              <option value="MATERIALES">Materiales</option>
+              <option value="ADICIONALES">Adicionales</option>
+            </select>
+          </div>
+          <div class="row">
+            <button id="btnInventario" class="btn">Ver inventario</button>
+            <button id="btnInventarioMetricas" class="btn btn-alt">Metricas</button>
+          </div>
+          <div class="row row-spaced">
+            <button id="btnInventarioCategorias" class="btn btn-ghost">Categorias</button>
+            <button id="btnInventarioMovimientos" class="btn btn-ghost">Movimientos</button>
+          </div>
+        </article>
       </section>
 
       <section class="panel reveal delay-7">

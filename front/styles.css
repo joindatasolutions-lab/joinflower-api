@@ -105,7 +105,8 @@ label {
   font-size: 0.86rem;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid rgba(31, 37, 20, 0.2);
   border-radius: 10px;
@@ -152,6 +153,15 @@ input {
 
 .btn-alt {
   background: var(--accent-2);
+}
+
+.btn-ghost {
+  background: rgba(31, 37, 20, 0.09);
+  color: var(--text);
+}
+
+.row-spaced {
+  margin-top: 0.6rem;
 }
 
 pre {
