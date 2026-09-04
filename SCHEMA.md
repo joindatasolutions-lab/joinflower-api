@@ -143,6 +143,7 @@
 | slug | character varying(50) | SÍ |  |
 | logo_url | character varying(500) | SÍ |  |
 | nombre_comercial | character varying(180) | SÍ |  |
+| celular | character varying(40) | SÍ |  |
 | plan_id | bigint | SÍ | FK → plan |
 ## empresa_menu
 | columna | tipo | null | descripción |

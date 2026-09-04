@@ -14,3 +14,4 @@ class Empresa(Base):
     nombreEmpresa = Column("nombre_empresa", String(150), nullable=True)
     nombreComercial = Column("nombre_comercial", String(180), nullable=True)
     slug = Column("slug", String(50), nullable=True)
+    celular = Column("celular", String(40), nullable=True)

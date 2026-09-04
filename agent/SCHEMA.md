@@ -70,6 +70,7 @@ Entidad raíz del sistema. Representa una floristería cliente de la plataforma.
 | slug | varchar(50) | SÍ | Identificador URL. UNIQUE |
 | logo_url | varchar(500) | SÍ | URL del logo en S3 |
 | nombre_comercial | varchar(180) | SÍ | Nombre visible en catálogo |
+| celular | varchar(40) | SÍ | Número celular de contacto |
 | plan_id | bigint | SÍ | FK → plan. Plan contratado |
 | created_at | timestamp | NO | |
 | updated_at | timestamp | NO | |

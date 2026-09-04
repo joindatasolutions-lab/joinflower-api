@@ -42,11 +42,13 @@ from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
 from app.services.cache import cache_ttl, get_cache, set_cache
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
+from app.services.s3_tenant_assets import S3TenantAssetsError, ensure_tenant_asset_structure
 from app.schemas.auth import (
     AdminProductosSessionResponse,
     AuthMeResponse,
     EmpresaCreateRequest,
     EmpresaCreateResponse,
+    EmpresaAssetsProvisionResponse,
     EmpresaListResponse,
     EmpresaModuloResumenItem,
     EmpresaModuloResumenResponse,
@@ -1870,6 +1872,56 @@ def listar_empresas_modulos(
     return EmpresaModuloResumenResponse(items=items)
 
 
+def _tenant_slug_from_empresa_row(row) -> str:
+    raw_slug = str(row[1] or "").strip().lower()
+    raw_name = str(row[2] or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9-]+", "-", raw_slug or raw_name).strip("-")[:80]
+    if len(slug) < 3:
+        raise HTTPException(status_code=400, detail="La empresa no tiene slug valido para S3")
+    return slug
+
+
+@router.post("/usuarios/empresas/{empresa_id}/assets", response_model=EmpresaAssetsProvisionResponse)
+def provisionar_assets_empresa(
+    empresa_id: int,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_global_join_user),
+):
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT id_empresa,
+                       slug,
+                       COALESCE(nombre_comercial, nombre_empresa, CONCAT('Empresa ', id_empresa)) AS nombre
+                FROM petalops.empresa
+                WHERE id_empresa = :empresa_id
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": int(empresa_id)},
+        ).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Empresa no encontrada")
+
+        slug = _tenant_slug_from_empresa_row(row)
+        assets_result = ensure_tenant_asset_structure(slug, required=True)
+        return EmpresaAssetsProvisionResponse(
+            status="ok",
+            empresaID=int(row[0]),
+            empresaSlug=slug,
+            assetsPrefix=str(assets_result["prefix"]),
+            createdKeys=[str(key) for key in assets_result.get("createdKeys", [])],
+        )
+    except S3TenantAssetsError:
+        auth_logger.error("Error provisionando estructura S3 para empresa %s", empresa_id, exc_info=True)
+        raise _err("AUTH_EMPRESA_ASSETS_S3_ERROR", "No fue posible crear la estructura S3 del tenant", status_code=502)
+    except SQLAlchemyError:
+        db.rollback()
+        auth_logger.error("Error SQL consultando empresa para assets", exc_info=True)
+        raise _err("AUTH_EMPRESA_ASSETS_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
 @router.post("/usuarios/empresas", response_model=EmpresaCreateResponse)
 def crear_empresa(
     payload: EmpresaCreateRequest,
@@ -2080,6 +2132,8 @@ def crear_empresa(
                 ).scalar_one()
             )
 
+        assets_result = ensure_tenant_asset_structure(slug, required=True)
+
         db.commit()
 
         return EmpresaCreateResponse(
@@ -2090,7 +2144,12 @@ def crear_empresa(
             estado=estado,
             sucursalID=next_sucursal_id,
             adminUserID=admin_user_id,
+            assetsPrefix=(str(assets_result.get("prefix")) if assets_result.get("enabled") else None),
         )
+    except S3TenantAssetsError:
+        db.rollback()
+        auth_logger.error("Error creando estructura S3 para empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_CREATE_S3_ERROR", "No fue posible crear la estructura S3 del tenant", status_code=502)
     except SQLAlchemyError as exc:
         db.rollback()
         auth_logger.error("Error SQL creando empresa", exc_info=True)

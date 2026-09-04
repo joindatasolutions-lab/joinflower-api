@@ -253,6 +253,15 @@ class EmpresaCreateResponse(BaseModel):
     estado: str
     sucursalID: int | None = None
     adminUserID: int | None = None
+    assetsPrefix: str | None = None
+
+
+class EmpresaAssetsProvisionResponse(BaseModel):
+    status: str
+    empresaID: int
+    empresaSlug: str
+    assetsPrefix: str
+    createdKeys: list[str] = Field(default_factory=list)
 
 
 class EmpresaModuloItem(BaseModel):

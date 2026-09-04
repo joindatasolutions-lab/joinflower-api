@@ -13,3 +13,4 @@ httpx
 slowapi
 python-multipart
 tzdata
+boto3

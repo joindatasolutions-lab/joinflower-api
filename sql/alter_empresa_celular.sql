@@ -1,0 +1,2 @@
+ALTER TABLE petalops.empresa
+  ADD COLUMN IF NOT EXISTS celular VARCHAR(40) NULL;

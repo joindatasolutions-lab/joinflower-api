@@ -51,7 +51,12 @@ DB_POOL_SIZE=8
 DB_MAX_OVERFLOW=4
 DB_POOL_TIMEOUT=15
 DB_POOL_RECYCLE=1800
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=petalops-assets
+S3_TENANT_ASSETS_ROOT_PREFIX=tenants
 ```
+
+Al crear una empresa desde `POST /auth/usuarios/empresas`, si `AWS_S3_BUCKET` o `S3_TENANT_ASSETS_BUCKET` esta configurado, el backend crea la estructura base en S3 usando el slug de la empresa. Ejemplo para slug `lafiore`: `tenants/lafiore/`, `banners/`, `domicilios/`, `empleados/`, `logos/` y `productos/`. Las credenciales se resuelven con la cadena normal de AWS/IAM usada por `boto3`, por ejemplo variables de entorno `AWS_ACCESS_KEY_ID` y `AWS_SECRET_ACCESS_KEY` o un rol IAM asociado al servicio.
 
 Para Cloud Run/Cloud SQL conviene mantener un pool pequeno por instancia y escalar por concurrencia del servicio, no por conexiones abiertas a PostgreSQL. Para el arranque con 10 floristerias, la recomendacion inicial es `DB_POOL_SIZE=8`, `DB_MAX_OVERFLOW=4`, `DB_POOL_TIMEOUT=15` y `DB_POOL_RECYCLE=1800`, que permite hasta 12 conexiones por instancia.
 
