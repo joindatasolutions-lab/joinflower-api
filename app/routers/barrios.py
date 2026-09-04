@@ -220,6 +220,7 @@ def search_barrios(
             _activo_truthy(Barrio.activo),
             Barrio.empresaID == empresa_id,
             Barrio.sucursalID == sucursal_id,
+            func.lower(func.trim(Barrio.nombreBarrio)) != "recoger en tienda",
         )
     )
 
@@ -241,14 +242,6 @@ def search_barrios(
         }
         for barrio in barrios
     ]
-
-    if modo_base:
-        response.sort(
-            key=lambda item: (
-                0 if str(item.get("nombreBarrio", "")).strip().lower() == "recoger en tienda" else 1,
-                str(item.get("nombreBarrio", "")).lower(),
-            )
-        )
 
     # Neighborhood lookups are frequently repeated by destination autocomplete.
     set_cache(cache_key, response, ttl=cache_ttl("barrios", 300))

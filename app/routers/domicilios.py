@@ -133,6 +133,33 @@ def _activo_truthy(column):
     return func.lower(cast(column, String)).in_(["true", "t", "1"])
 
 
+def _store_pickup_norm_expr(column):
+    return func.lower(
+        func.replace(
+            func.replace(func.coalesce(column, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
+
+
+def _not_store_pickup_condition(entrega_actual):
+    return and_(
+        _store_pickup_norm_expr(entrega_actual.tipoEntrega).notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+        _store_pickup_norm_expr(entrega_actual.direccion).notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+        _store_pickup_norm_expr(entrega_actual.barrioNombre).notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+    )
+
+
+def _not_store_pickup_sql(alias: str = "e") -> str:
+    values = ", ".join(f"'{value}'" for value in sorted(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES))
+    return f"""
+        AND lower(replace(replace(coalesce({alias}.tipoentrega, ''), '-', '_'), ' ', '_')) NOT IN ({values})
+        AND lower(replace(replace(coalesce({alias}.direccion, ''), '-', '_'), ' ', '_')) NOT IN ({values})
+        AND lower(replace(replace(coalesce({alias}.barrionombre, ''), '-', '_'), ' ', '_')) NOT IN ({values})
+    """
+
+
 def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -856,20 +883,6 @@ def _build_mis_entregas_query(
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
-    tipo_entrega_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
-    direccion_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
 
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
@@ -893,8 +906,7 @@ def _build_mis_entregas_query(
             ),
             Produccion.estado == estado_para_entrega,
             _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
-            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            _not_store_pickup_condition(entrega_actual),
         )
         .order_by(
             func.coalesce(
@@ -925,20 +937,6 @@ def _build_pedidos_disponibles_query(
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
-    tipo_entrega_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
-    direccion_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     estado_no_entregado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_NO_ENTREGADO)
 
@@ -963,8 +961,7 @@ def _build_pedidos_disponibles_query(
                 entrega_actual.domiciliarioID == None,
                 entrega_actual.domiciliarioID == int(domiciliario_id),
             ),
-            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            _not_store_pickup_condition(entrega_actual),
         )
     )
 
@@ -994,20 +991,6 @@ def _build_pedidos_sin_asignar_query(
     estado_pendiente_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
-    tipo_entrega_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.tipoEntrega, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
-    direccion_norm = func.lower(
-        func.replace(
-            func.replace(func.coalesce(entrega_actual.direccion, ""), "-", "_"),
-            " ",
-            "_",
-        )
-    )
 
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
@@ -1026,8 +1009,7 @@ def _build_pedidos_sin_asignar_query(
                 entrega_actual.fechaEntregaProgramada,
                 entrega_actual.fechaEntrega,
             ).between(fecha_desde, fecha_hasta),
-            tipo_entrega_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
-            direccion_norm.notin_(domicilio_service.STORE_PICKUP_TIPO_ENTREGA_VALUES),
+            _not_store_pickup_condition(entrega_actual),
         )
     )
 
@@ -1355,6 +1337,7 @@ def _metricas_where_sql() -> str:
         AND upper(COALESCE(ep.nombre_estado, '')) <> 'CREADO'
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) >= :fecha_desde
         AND COALESCE(e.reprogramadapara, e.fechaentregaprogramada, e.fechaentrega, e.createdat) < :fecha_hasta
+        {_not_store_pickup_sql("e")}
         {_pedido_producciones_para_entrega_sql("p")}
     """
 
@@ -2178,6 +2161,7 @@ def listar_admin(
             entrega_actual.empresaID == int(empresa_id),
             func.upper(func.coalesce(EstadoPedido.nombreEstado, "")) != "CREADO",
             _pedido_producciones_para_entrega_condition(Pedido, estado_para_entrega),
+            _not_store_pickup_condition(entrega_actual),
         )
     )
 
