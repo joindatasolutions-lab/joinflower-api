@@ -17,6 +17,7 @@ logger = get_logger("whatsapp")
 
 CANAL_WHATSAPP = "WHATSAPP"
 EVENTO_ORDER_DELIVERED = "ORDER_DELIVERED"
+MODULE_NOTIFICACIONES_WHATSAPP = "notificaciones_whatsapp"
 
 STATUS_PENDING = "PENDING"
 STATUS_SENT = "SENT"
@@ -25,11 +26,34 @@ STATUS_READ = "READ"
 STATUS_FAILED = "FAILED"
 STATUS_SKIPPED = "SKIPPED"
 
-TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedido_entregado")
-TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es")
+TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedidoentregado")
+TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
 MAX_INTENTOS = int(os.getenv("WHATSAPP_MAX_INTENTOS", "3"))
 # intento 2 a los 30s, intento 3 a los 2min, intento 4 (si MAX_INTENTOS lo permite) a los 10min
 BACKOFF_SEGUNDOS = [30, 120, 600]
+
+
+def empresa_tiene_notificaciones_whatsapp_activas(db: Session, empresa_id: int) -> bool:
+    override = getattr(db, "whatsapp_notifications_enabled", None)
+    if override is not None:
+        return bool(override)
+
+    row = db.execute(
+        text(
+            """
+            SELECT activo
+            FROM petalops.empresa_modulo
+            WHERE empresa_id = :empresa_id
+              AND modulo = :modulo
+            LIMIT 1
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "modulo": MODULE_NOTIFICACIONES_WHATSAPP,
+        },
+    ).first()
+    return bool(row and row[0])
 
 
 def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: int, entrega_id: int) -> None:
@@ -41,6 +65,12 @@ def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: i
     Nunca lanza: un fallo aqui no debe romper la confirmacion de entrega.
     """
     try:
+        if not empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id)):
+            logger.info(
+                "Notificacion WhatsApp no encolada: modulo inactivo. empresa_id=%s pedido_id=%s entrega_id=%s",
+                empresa_id, pedido_id, entrega_id,
+            )
+            return
         db.execute(
             text(
                 """
@@ -145,6 +175,17 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         _marcar(
             db, notificacion, status=STATUS_FAILED, errorCode="EMPRESA_NOT_FOUND",
             errorMessage="Empresa no encontrada", failedAt=ahora,
+        )
+        return
+
+    if not empresa_tiene_notificaciones_whatsapp_activas(db, int(notificacion.empresaID)):
+        logger.info(
+            "Notificacion WhatsApp omitida: modulo inactivo. notificacion_id=%s empresa_id=%s pedido_id=%s",
+            notificacion.idNotificacion, notificacion.empresaID, notificacion.pedidoID,
+        )
+        _marcar(
+            db, notificacion, status=STATUS_SKIPPED, errorCode="WHATSAPP_MODULE_DISABLED",
+            errorMessage="Modulo notificaciones_whatsapp inactivo para la empresa", failedAt=ahora,
         )
         return
 

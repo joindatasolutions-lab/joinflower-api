@@ -112,6 +112,10 @@ DEFAULT_MODULES = {
     "reportes",
 }
 
+OPTIONAL_MODULES_DEFAULT_INACTIVE = {
+    "notificaciones_whatsapp",
+}
+
 
 def resolve_empresa_module_candidates(db: Session, empresa_id: int) -> dict[str, bool]:
     """Todos los modulos que la empresa podria tener activos, con su estado
@@ -130,7 +134,7 @@ def resolve_empresa_module_candidates(db: Session, empresa_id: int) -> dict[str,
     empresa_meta = load_empresa_auth_meta(db, empresa_id)
     effective_plan_id = empresa_meta.get("planID")
 
-    module_candidates = set(DEFAULT_MODULES)
+    module_candidates = set(DEFAULT_MODULES) | set(OPTIONAL_MODULES_DEFAULT_INACTIVE)
     has_plan_rows = False
 
     if effective_plan_id is not None:

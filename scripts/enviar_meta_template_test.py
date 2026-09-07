@@ -35,9 +35,9 @@ def main() -> int:
     graph_version = os.getenv("META_WHATSAPP_API_VERSION", DEFAULT_GRAPH_VERSION)
     template_name = os.getenv("WHATSAPP_TEMPLATE_NAME") or os.getenv(
         "WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO",
-        "pedido_entregado",
+        "pedidoentregado",
     )
-    language = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es")
+    language = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
     to = _normalize_phone(os.getenv("WHATSAPP_TEST_TO", DEFAULT_TO))
     parameters = _template_parameters(os.getenv("WHATSAPP_TEMPLATE_PARAMS"))
 

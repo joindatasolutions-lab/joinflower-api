@@ -31,10 +31,11 @@ class FakeQuery:
 
 
 class FakeSession:
-    def __init__(self, por_modelo):
+    def __init__(self, por_modelo, whatsapp_notifications_enabled=True):
         self._por_modelo = por_modelo
         self.commits = 0
         self.rollbacks = 0
+        self.whatsapp_notifications_enabled = whatsapp_notifications_enabled
 
     def query(self, modelo):
         return FakeQuery(self._por_modelo.get(modelo, []))
@@ -76,13 +77,13 @@ def _notificacion(empresa_id, pedido_id, entrega_id):
     )
 
 
-def _session_para(empresa, cliente, pedido, entrega):
+def _session_para(empresa, cliente, pedido, entrega, whatsapp_notifications_enabled=True):
     return FakeSession({
         Empresa: [empresa] if empresa else [],
         Cliente: [cliente] if cliente else [],
         Pedido: [pedido] if pedido else [],
         Entrega: [entrega] if entrega else [],
-    })
+    }, whatsapp_notifications_enabled=whatsapp_notifications_enabled)
 
 
 # --- Caso 1: Pedido FLORA + cliente FLORA: envia correctamente ---------------------------
@@ -174,6 +175,8 @@ def test_caso4_idempotencia_no_duplica_fila_pendiente():
     ejecuciones = []
 
     class DummyDb:
+        whatsapp_notifications_enabled = True
+
         def execute(self, statement, params):
             ejecuciones.append(dict(params))
 
@@ -189,6 +192,23 @@ def test_caso4_idempotencia_no_duplica_fila_pendiente():
     assert "ON CONFLICT" not in ""  # marcador: la garantia real vive en el SQL, no aqui
 
 
+def test_encolar_notificacion_no_inserta_si_modulo_whatsapp_inactivo():
+    ejecuciones = []
+
+    class DummyDb:
+        whatsapp_notifications_enabled = False
+
+        def execute(self, statement, params):
+            ejecuciones.append(dict(params))
+
+        def commit(self):
+            pass
+
+    whatsapp_service.encolar_notificacion_entregado(DummyDb(), empresa_id=3, pedido_id=100, entrega_id=1000)
+
+    assert ejecuciones == []
+
+
 def test_encolar_notificacion_nunca_lanza_si_falla_el_insert():
     class DbQueRompe:
         def execute(self, *a, **k):
@@ -196,6 +216,24 @@ def test_encolar_notificacion_nunca_lanza_si_falla_el_insert():
 
     # No debe lanzar excepcion -- nunca debe romper la confirmacion de entrega.
     whatsapp_service.encolar_notificacion_entregado(DbQueRompe(), empresa_id=3, pedido_id=100, entrega_id=1000)
+
+
+def test_modulo_whatsapp_inactivo_no_envia_y_marca_skipped(monkeypatch):
+    empresa = _empresa(3, "Flora")
+    cliente = _cliente(10, empresa_id=3)
+    pedido = _pedido(100, empresa_id=3, cliente_id=10)
+    entrega = _entrega(1000, empresa_id=3)
+    notificacion = _notificacion(empresa_id=3, pedido_id=100, entrega_id=1000)
+    db = _session_para(empresa, cliente, pedido, entrega, whatsapp_notifications_enabled=False)
+
+    llamadas = []
+    monkeypatch.setattr(whatsapp_client, "enviar_plantilla", lambda **kwargs: llamadas.append(kwargs))
+
+    whatsapp_service._procesar_una(db, notificacion)
+
+    assert notificacion.status == whatsapp_service.STATUS_SKIPPED
+    assert notificacion.errorCode == "WHATSAPP_MODULE_DISABLED"
+    assert llamadas == []
 
 
 # --- Caso 5: Telefono invalido: NO envia, SKIPPED ----------------------------------------
