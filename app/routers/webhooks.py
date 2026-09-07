@@ -2,10 +2,13 @@ import hashlib
 import hmac
 import os
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
+from app.database import get_db
+from app.services import whatsapp_service
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["webhooks"])
 webhooks_logger = get_logger("webhooks.whatsapp")
@@ -45,6 +48,7 @@ def _verificar_firma_meta(raw_body: bytes, signature_header: str | None) -> bool
 async def recibir_evento_webhook(
     request: Request,
     x_hub_signature_256: str | None = Header(None),
+    db: Session = Depends(get_db),
 ):
     raw_body = await request.body()
 
@@ -53,11 +57,13 @@ async def recibir_evento_webhook(
         raise HTTPException(status_code=401, detail="Firma invalida")
 
     payload = await request.json()
-    webhooks_logger.info("Evento de WhatsApp recibido: object=%s", payload.get("object"))
+    resultado = whatsapp_service.procesar_webhook_meta(db, payload)
+    webhooks_logger.info(
+        "Evento de WhatsApp recibido: object=%s statuses_received=%s statuses_applied=%s statuses_unknown=%s",
+        payload.get("object"),
+        resultado["statuses_received"],
+        resultado["statuses_applied"],
+        resultado["statuses_unknown"],
+    )
 
-    # TODO: procesar los eventos reales (mensajes entrantes, confirmaciones de entrega,
-    # cambios de estado, etc.) segun lo que se decida hacer con ellos. Por ahora solo se
-    # registra y se confirma recepcion -- es lo unico que Meta exige para no reintentar
-    # el envio del mismo evento.
-
-    return {"status": "ok"}
+    return {"status": "ok", **resultado}

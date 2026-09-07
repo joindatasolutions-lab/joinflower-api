@@ -236,6 +236,95 @@ def test_modulo_whatsapp_inactivo_no_envia_y_marca_skipped(monkeypatch):
     assert llamadas == []
 
 
+def test_webhook_delivered_actualiza_notificacion_existente():
+    notificacion = _notificacion(empresa_id=2, pedido_id=4456, entrega_id=4425)
+    notificacion.status = whatsapp_service.STATUS_SENT
+    notificacion.metaMessageId = "wamid.TEST123"
+    db = FakeSession({WhatsappNotificacion: [notificacion]})
+
+    resultado = whatsapp_service.procesar_webhook_meta(db, {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "statuses": [{
+                        "id": "wamid.TEST123",
+                        "status": "delivered",
+                        "timestamp": "1788810000",
+                    }]
+                }
+            }]
+        }]
+    })
+
+    assert resultado == {"statuses_received": 1, "statuses_applied": 1, "statuses_unknown": 0}
+    assert notificacion.status == whatsapp_service.STATUS_DELIVERED
+    assert notificacion.deliveredAt is not None
+    assert db.commits == 1
+
+
+def test_webhook_read_no_degrada_y_marca_read():
+    notificacion = _notificacion(empresa_id=2, pedido_id=4456, entrega_id=4425)
+    notificacion.status = whatsapp_service.STATUS_DELIVERED
+    notificacion.metaMessageId = "wamid.TESTREAD"
+    db = FakeSession({WhatsappNotificacion: [notificacion]})
+
+    whatsapp_service.procesar_estado_webhook_meta(db, {
+        "id": "wamid.TESTREAD",
+        "status": "read",
+        "timestamp": "1788810100",
+    })
+
+    assert notificacion.status == whatsapp_service.STATUS_READ
+    assert notificacion.deliveredAt is not None
+    assert notificacion.readAt is not None
+
+
+def test_webhook_failed_guarda_error_meta():
+    notificacion = _notificacion(empresa_id=2, pedido_id=4456, entrega_id=4425)
+    notificacion.status = whatsapp_service.STATUS_SENT
+    notificacion.metaMessageId = "wamid.TESTFAILED"
+    db = FakeSession({WhatsappNotificacion: [notificacion]})
+
+    whatsapp_service.procesar_estado_webhook_meta(db, {
+        "id": "wamid.TESTFAILED",
+        "status": "failed",
+        "timestamp": "1788810200",
+        "errors": [{
+            "code": 131026,
+            "title": "Message undeliverable",
+            "message": "Message was not delivered",
+            "error_data": {"details": "Recipient phone number is invalid"},
+        }],
+    })
+
+    assert notificacion.status == whatsapp_service.STATUS_FAILED
+    assert notificacion.failedAt is not None
+    assert notificacion.errorCode == "131026"
+    assert "Message undeliverable" in notificacion.errorMessage
+    assert "Recipient phone number is invalid" in notificacion.errorMessage
+
+
+def test_webhook_message_id_desconocido_no_actualiza():
+    db = FakeSession({WhatsappNotificacion: []})
+
+    resultado = whatsapp_service.procesar_webhook_meta(db, {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "statuses": [{
+                        "id": "wamid.NOEXISTE",
+                        "status": "delivered",
+                        "timestamp": "1788810000",
+                    }]
+                }
+            }]
+        }]
+    })
+
+    assert resultado == {"statuses_received": 1, "statuses_applied": 0, "statuses_unknown": 1}
+    assert db.commits == 0
+
+
 # --- Caso 5: Telefono invalido: NO envia, SKIPPED ----------------------------------------
 
 @pytest.mark.parametrize("telefono_completo", ["", None, "abc", "123"])

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routers import webhooks
+from app.services import whatsapp_service
 
 
 client = TestClient(app)
@@ -74,7 +75,12 @@ def test_evento_webhook_firma_valida(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "statuses_received": 0,
+        "statuses_applied": 0,
+        "statuses_unknown": 0,
+    }
 
 
 def test_evento_webhook_firma_invalida_se_rechaza(monkeypatch):
@@ -113,3 +119,40 @@ def test_evento_webhook_sin_secreto_configurado_se_acepta(monkeypatch):
     response = client.post("/webhooks/whatsapp", json=payload)
 
     assert response.status_code == 200
+
+
+def test_evento_webhook_delega_procesamiento_de_statuses(monkeypatch):
+    monkeypatch.setattr(webhooks, "WHATSAPP_APP_SECRET", "")
+    llamadas = []
+
+    def _procesar(db, payload):
+        llamadas.append(payload)
+        return {"statuses_received": 1, "statuses_applied": 1, "statuses_unknown": 0}
+
+    monkeypatch.setattr(whatsapp_service, "procesar_webhook_meta", _procesar)
+
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "statuses": [{
+                        "id": "wamid.TEST123",
+                        "status": "delivered",
+                        "timestamp": "1788810000",
+                    }]
+                }
+            }]
+        }],
+    }
+
+    response = client.post("/webhooks/whatsapp", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "statuses_received": 1,
+        "statuses_applied": 1,
+        "statuses_unknown": 0,
+    }
+    assert llamadas == [payload]

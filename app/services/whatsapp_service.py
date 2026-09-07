@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -48,6 +49,14 @@ def _env_int(name: str, default: int, minimum: int) -> int:
 MAX_INTENTOS = _env_int("WHATSAPP_MAX_INTENTOS", default=3, minimum=1)
 # intento 2 a los 30s, intento 3 a los 2min, intento 4 (si MAX_INTENTOS lo permite) a los 10min
 BACKOFF_SEGUNDOS = [30, 120, 600]
+STATUS_PRIORITY = {
+    STATUS_PENDING: 0,
+    STATUS_SENT: 1,
+    STATUS_DELIVERED: 2,
+    STATUS_READ: 3,
+    STATUS_FAILED: 4,
+    STATUS_SKIPPED: 4,
+}
 
 
 def empresa_tiene_notificaciones_whatsapp_activas(db: Session, empresa_id: int) -> bool:
@@ -149,6 +158,116 @@ def _marcar(db: Session, notificacion: WhatsappNotificacion, **campos) -> None:
     for nombre, valor in campos.items():
         setattr(notificacion, nombre, valor)
     db.commit()
+
+
+def _datetime_from_meta_timestamp(timestamp: Any) -> datetime:
+    try:
+        return datetime.utcfromtimestamp(int(timestamp))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return datetime.utcnow()
+
+
+def _error_message_from_meta_status(status_payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    errors = status_payload.get("errors") or []
+    if not errors:
+        return None, None
+
+    error = errors[0] if isinstance(errors[0], dict) else {}
+    code = str(error.get("code") or error.get("error_code") or "META_STATUS_FAILED")
+    parts = [
+        str(error.get("title") or "").strip(),
+        str(error.get("message") or "").strip(),
+    ]
+    error_data = error.get("error_data") if isinstance(error.get("error_data"), dict) else {}
+    details = str(error_data.get("details") or "").strip()
+    if details:
+        parts.append(details)
+    message = " | ".join(part for part in parts if part) or "Meta reporto fallo en la entrega"
+    return code[:60], message[:500]
+
+
+def _mantener_estado_mas_avanzado(actual: str | None, nuevo: str) -> str:
+    actual_normalizado = str(actual or "").upper()
+    if STATUS_PRIORITY.get(actual_normalizado, -1) > STATUS_PRIORITY.get(nuevo, -1):
+        return actual_normalizado
+    return nuevo
+
+
+def procesar_estado_webhook_meta(db: Session, status_payload: dict[str, Any]) -> bool:
+    """Actualiza una notificacion local con el estado asincrono enviado por Meta.
+
+    Retorna True cuando encontro una notificacion local por meta_message_id. Retorna False
+    si el webhook corresponde a un mensaje que este backend no conoce.
+    """
+    meta_message_id = str(status_payload.get("id") or "").strip()
+    estado_meta = str(status_payload.get("status") or "").strip().lower()
+    if not meta_message_id or not estado_meta:
+        return False
+
+    notificacion = (
+        db.query(WhatsappNotificacion)
+        .filter(WhatsappNotificacion.metaMessageId == meta_message_id)
+        .first()
+    )
+    if not notificacion:
+        logger.warning("Webhook WhatsApp sin notificacion local. meta_message_id=%s estado=%s", meta_message_id, estado_meta)
+        return False
+
+    momento = _datetime_from_meta_timestamp(status_payload.get("timestamp"))
+    if estado_meta == "sent":
+        notificacion.status = _mantener_estado_mas_avanzado(notificacion.status, STATUS_SENT)
+        notificacion.sentAt = notificacion.sentAt or momento
+    elif estado_meta == "delivered":
+        notificacion.status = _mantener_estado_mas_avanzado(notificacion.status, STATUS_DELIVERED)
+        notificacion.sentAt = notificacion.sentAt or momento
+        notificacion.deliveredAt = notificacion.deliveredAt or momento
+    elif estado_meta == "read":
+        notificacion.status = _mantener_estado_mas_avanzado(notificacion.status, STATUS_READ)
+        notificacion.sentAt = notificacion.sentAt or momento
+        notificacion.deliveredAt = notificacion.deliveredAt or momento
+        notificacion.readAt = notificacion.readAt or momento
+    elif estado_meta == "failed":
+        error_code, error_message = _error_message_from_meta_status(status_payload)
+        notificacion.status = STATUS_FAILED
+        notificacion.failedAt = momento
+        notificacion.errorCode = error_code or "META_STATUS_FAILED"
+        notificacion.errorMessage = error_message or "Meta reporto fallo en la entrega"
+    else:
+        logger.info("Estado WhatsApp ignorado. meta_message_id=%s estado=%s", meta_message_id, estado_meta)
+        return False
+
+    db.commit()
+    logger.info(
+        "Webhook WhatsApp aplicado. notification_id=%s meta_message_id=%s status=%s",
+        notificacion.idNotificacion, meta_message_id, notificacion.status,
+    )
+    return True
+
+
+def procesar_webhook_meta(db: Session, payload: dict[str, Any]) -> dict[str, int]:
+    recibidos = 0
+    aplicados = 0
+    desconocidos = 0
+
+    for entry in payload.get("entry") or []:
+        for change in entry.get("changes") or []:
+            value = change.get("value") if isinstance(change, dict) else {}
+            if not isinstance(value, dict):
+                continue
+            for status_payload in value.get("statuses") or []:
+                if not isinstance(status_payload, dict):
+                    continue
+                recibidos += 1
+                if procesar_estado_webhook_meta(db, status_payload):
+                    aplicados += 1
+                else:
+                    desconocidos += 1
+
+    return {
+        "statuses_received": recibidos,
+        "statuses_applied": aplicados,
+        "statuses_unknown": desconocidos,
+    }
 
 
 def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
