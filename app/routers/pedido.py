@@ -43,6 +43,7 @@ from app.schemas.pedido import (
 )
 from app.services import caja_service
 from app.services import domicilio_service
+from app.services import whatsapp_service
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
 from app.services.pedido_service import checkout_pedido, generar_numeracion_pedido
 from app.services.inventario_cupo_service import validar_cupos_recetas_para_productos
@@ -4893,6 +4894,12 @@ def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_d
             "tipoEntrega": getattr(entrega, "tipoEntrega", None),
             "barrioNombre": getattr(entrega, "barrioNombre", None),
         },
+    )
+    whatsapp_service.encolar_notificacion_entregado(
+        db,
+        empresa_id=int(pedido.empresaID),
+        pedido_id=int(pedido.idPedido),
+        entrega_id=int(entrega.idEntrega),
     )
     db.commit()
 
