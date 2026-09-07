@@ -15,8 +15,24 @@ job_logger = get_logger("whatsapp_dispatch_job")
 # de fondo necesita su propia clave de advisory lock para no chocar entre si.
 WHATSAPP_DISPATCH_LOCK_KEY = 2026082301
 
-DEFAULT_INTERVAL_SECONDS = int(os.getenv("WHATSAPP_DISPATCH_INTERVAL_SECONDS", "30"))
-DEFAULT_BATCH_SIZE = int(os.getenv("WHATSAPP_DISPATCH_BATCH_SIZE", "20"))
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    try:
+        value = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        job_logger.warning("Valor invalido para %s=%r. Usando default %s.", name, raw_value, default)
+        return default
+    if value < minimum:
+        job_logger.warning("Valor fuera de rango para %s=%s. Minimo permitido %s.", name, value, minimum)
+        return minimum
+    return value
+
+
+DEFAULT_INTERVAL_SECONDS = _env_int("WHATSAPP_DISPATCH_INTERVAL_SECONDS", default=30, minimum=5)
+DEFAULT_BATCH_SIZE = _env_int("WHATSAPP_DISPATCH_BATCH_SIZE", default=20, minimum=1)
 
 
 def whatsapp_dispatch_enabled() -> bool:

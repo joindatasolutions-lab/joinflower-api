@@ -28,7 +28,24 @@ STATUS_SKIPPED = "SKIPPED"
 
 TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedidoentregado")
 TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
-MAX_INTENTOS = int(os.getenv("WHATSAPP_MAX_INTENTOS", "3"))
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    try:
+        value = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        logger.warning("Valor invalido para %s=%r. Usando default %s.", name, raw_value, default)
+        return default
+    if value < minimum:
+        logger.warning("Valor fuera de rango para %s=%s. Minimo permitido %s.", name, value, minimum)
+        return minimum
+    return value
+
+
+MAX_INTENTOS = _env_int("WHATSAPP_MAX_INTENTOS", default=3, minimum=1)
 # intento 2 a los 30s, intento 3 a los 2min, intento 4 (si MAX_INTENTOS lo permite) a los 10min
 BACKOFF_SEGUNDOS = [30, 120, 600]
 
