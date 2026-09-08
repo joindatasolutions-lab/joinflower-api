@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -243,6 +243,13 @@ class EmpresaCreateRequest(BaseModel):
     adminPassword: str | None = Field(default=None, min_length=6, max_length=120)
     adminEmail: str | None = None
     sucursalNombre: str | None = Field(default=None, min_length=3, max_length=120)
+
+    @field_validator("slug", "adminLogin", "adminPassword", "adminEmail", "sucursalNombre", mode="before")
+    @classmethod
+    def empty_optional_strings_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class EmpresaCreateResponse(BaseModel):
