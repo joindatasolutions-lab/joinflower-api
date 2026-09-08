@@ -2013,7 +2013,7 @@ def crear_empresa(
                 INSERT INTO petalops.sucursal
                 (id_sucursal, empresa_id, nombre_sucursal, direccion, telefono, estado, created_at, updated_at, prefijo_pedido)
                 VALUES
-                (:id_sucursal, :empresa_id, :nombre_sucursal, NULL, NULL, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :prefijo)
+                (:id_sucursal, :empresa_id, :nombre_sucursal, NULL, NULL, 'Activo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :prefijo)
                 """
             ),
             {
