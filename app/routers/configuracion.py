@@ -354,10 +354,13 @@ def obtener_configuracion_asignacion(
         .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
         .first()
     )
+    # Sin fila de configuracion = autoasignacion activa por defecto (opt-out, no opt-in):
+    # asi ninguna floristeria existente pierde la autoasignacion que ya tenia antes de
+    # que este flag existiera. El admin puede desactivarla explicitamente si no la quiere.
     return ConfiguracionAsignacionResponse(
         empresaID=empresa_id,
-        asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else False,
-        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else False,
+        asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else True,
+        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else True,
     )
 
 
@@ -375,10 +378,12 @@ def actualizar_configuracion_asignacion(
         .first()
     )
     if config is None:
+        # Misma logica de default que el GET: si esta floristeria nunca configuro nada,
+        # arranca con ambas activas (no se le quita algo que ya tenia).
         config = EmpresaConfiguracionAsignacion(
             empresaID=empresa_id,
-            asignacionProduccionActiva=False,
-            asignacionDomicilioActiva=False,
+            asignacionProduccionActiva=True,
+            asignacionDomicilioActiva=True,
             createdAt=datetime.now(timezone.utc),
             updatedAt=datetime.now(timezone.utc),
         )

@@ -2491,12 +2491,14 @@ def tomar_entrega(
     assert_same_empresa(auth, int(entrega.empresaID))
 
     if not _actor_can_override_delivery(auth):
+        # Sin fila = autoasignacion activa por defecto (opt-out); solo bloquea si el admin
+        # la desactivo explicitamente.
         config = (
             db.query(EmpresaConfiguracionAsignacion)
             .filter(EmpresaConfiguracionAsignacion.empresaID == int(entrega.empresaID))
             .first()
         )
-        if not config or not config.asignacionDomicilioActiva:
+        if config is not None and not config.asignacionDomicilioActiva:
             raise _err(
                 "DOMICILIO_AUTOASIGNACION_DESHABILITADA",
                 "Esta floristeria no permite que el domiciliario se autoasigne pedidos",

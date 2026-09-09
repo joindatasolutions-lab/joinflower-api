@@ -1150,12 +1150,14 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
 @router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        # Sin fila = autoasignacion activa por defecto (opt-out); solo bloquea si el admin
+        # la desactivo explicitamente.
         config = (
             db.query(EmpresaConfiguracionAsignacion)
             .filter(EmpresaConfiguracionAsignacion.empresaID == int(auth.empresaID))
             .first()
         )
-        if not config or not config.asignacionProduccionActiva:
+        if config is not None and not config.asignacionProduccionActiva:
             raise _err(
                 "PRODUCCION_AUTOASIGNACION_DESHABILITADA",
                 "Esta floristeria no permite que el florista se autoasigne pedidos",

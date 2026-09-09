@@ -49,7 +49,9 @@ FAKE_AUTH_TENANT = SimpleNamespace(userID=1, login="admin", empresaID=999, rol="
 FAKE_AUTH_OTHER_EMPRESA = SimpleNamespace(userID=2, login="admin2", empresaID=1, rol="Admin", esGlobalJoin=False, roles=[])
 
 
-def test_obtener_configuracion_sin_fila_retorna_ambos_flags_falsos():
+def test_obtener_configuracion_sin_fila_retorna_ambos_flags_activos_por_defecto():
+    # Opt-out, no opt-in: sin fila de configuracion, la autoasignacion sigue activa como
+    # ya lo estaba antes de que este flag existiera. El admin la desactiva explicitamente.
     db = FakeSession(config=None)
 
     resultado = configuracion_router.obtener_configuracion_asignacion(
@@ -57,6 +59,20 @@ def test_obtener_configuracion_sin_fila_retorna_ambos_flags_falsos():
     )
 
     assert resultado.empresaID == 999
+    assert resultado.asignacionProduccionActiva is True
+    assert resultado.asignacionDomicilioActiva is True
+
+
+def test_obtener_configuracion_con_fila_desactivada_respeta_el_apagado():
+    config = EmpresaConfiguracionAsignacion(
+        empresaID=999, asignacionProduccionActiva=False, asignacionDomicilioActiva=False
+    )
+    db = FakeSession(config=config)
+
+    resultado = configuracion_router.obtener_configuracion_asignacion(
+        empresa_id=999, db=db, auth=FAKE_AUTH_TENANT
+    )
+
     assert resultado.asignacionProduccionActiva is False
     assert resultado.asignacionDomicilioActiva is False
 
@@ -88,16 +104,17 @@ def test_obtener_configuracion_de_otra_empresa_rechaza_acceso():
 
 def test_actualizar_configuracion_crea_fila_si_no_existe():
     db = FakeSession(config=None)
-    payload = ConfiguracionAsignacionUpdateRequest(asignacionProduccionActiva=True)
+    payload = ConfiguracionAsignacionUpdateRequest(asignacionProduccionActiva=False)
 
     resultado = configuracion_router.actualizar_configuracion_asignacion(
         empresa_id=999, payload=payload, db=db, auth=FAKE_AUTH_TENANT
     )
 
     assert len(db.added) == 1
-    assert db.added[0].asignacionProduccionActiva is True
-    assert db.added[0].asignacionDomicilioActiva is False
-    assert resultado.asignacionProduccionActiva is True
+    assert db.added[0].asignacionProduccionActiva is False
+    # El campo no enviado arranca activo por defecto (misma convencion que el GET).
+    assert db.added[0].asignacionDomicilioActiva is True
+    assert resultado.asignacionProduccionActiva is False
     assert db.commits == 1
 
 

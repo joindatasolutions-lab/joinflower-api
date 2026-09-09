@@ -39,9 +39,10 @@ def _base_auth(rol, esGlobalJoin=False):
     return SimpleNamespace(login="user1", nombre="Usuario", empresaID=3, sucursalID=1, rol=rol, userID=9, esGlobalJoin=esGlobalJoin, roles=[])
 
 
-def test_tomar_entrega_bloquea_domiciliario_si_flag_apagado(monkeypatch):
+def test_tomar_entrega_bloquea_domiciliario_si_flag_apagado_explicitamente(monkeypatch):
     auth = _base_auth("Domiciliario")
-    db = _FakeDb(config=None)
+    config = EmpresaConfiguracionAsignacion(empresaID=3, asignacionDomicilioActiva=False)
+    db = _FakeDb(config=config)
 
     monkeypatch.setattr(domicilios_router, "_assert_auth_domiciliario", lambda db_arg, auth_arg: 55)
     monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda db_arg, empresa_id, entrega_id: FAKE_ENTREGA)
@@ -51,6 +52,23 @@ def test_tomar_entrega_bloquea_domiciliario_si_flag_apagado(monkeypatch):
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail["code"] == "DOMICILIO_AUTOASIGNACION_DESHABILITADA"
+
+
+def test_tomar_entrega_sin_fila_permite_por_defecto(monkeypatch):
+    # Opt-out, no opt-in: sin fila de configuracion, la autoasignacion sigue activa
+    # (asi ninguna floristeria existente pierde algo que ya tenia).
+    auth = _base_auth("Domiciliario")
+    db = _FakeDb(config=None)
+
+    monkeypatch.setattr(domicilios_router, "_assert_auth_domiciliario", lambda db_arg, auth_arg: 55)
+    monkeypatch.setattr(domicilios_router, "_locked_current_entrega", lambda db_arg, empresa_id, entrega_id: FAKE_ENTREGA)
+    monkeypatch.setattr(
+        domicilios_router.domicilio_service, "is_store_pickup_tipo_entrega",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("continuo mas alla del gate, como se esperaba"))
+    )
+
+    with pytest.raises(RuntimeError, match="continuo mas alla del gate"):
+        domicilios_router.tomar_entrega(42, TomarEntregaRequest(usuarioCambio="user1"), db=db, auth=auth)
 
 
 def test_tomar_entrega_permite_domiciliario_si_flag_activo(monkeypatch):

@@ -73,7 +73,9 @@ def test_reasignar_produccion_no_longer_blocks_non_admin_florista(monkeypatch):
     assert captured["wrapper"].usuarioCambio == "florista1"
 
 
-def test_reasignar_produccion_bloquea_florista_si_flag_apagado(monkeypatch):
+def test_reasignar_produccion_sin_fila_permite_por_defecto(monkeypatch):
+    # Opt-out, no opt-in: sin fila de configuracion, la autoasignacion sigue activa
+    # (asi ninguna floristeria existente pierde algo que ya tenia).
     payload = ProduccionReasignarRequest(
         floristaNuevoID=7,
         fechaProgramadaProduccion=date(2026, 5, 10),
@@ -84,7 +86,34 @@ def test_reasignar_produccion_bloquea_florista_si_flag_apagado(monkeypatch):
         login="florista1", nombre="Elibeth Salgado", empresaID=3, sucursalID=3,
         rol="Florista", userID=12, esGlobalJoin=False, roles=[],
     )
-    db = _FakeDb(config=None)  # sin fila de configuracion => autoasignacion deshabilitada por defecto
+    db = _FakeDb(config=None)
+    captured = {}
+
+    def fake_asignar(produccion_id, wrapper, db_arg, auth_arg):
+        captured["called"] = True
+        return {"status": "ok"}
+
+    monkeypatch.setattr(produccion_router, "asignar_produccion", fake_asignar)
+
+    response = produccion_router.reasignar_produccion(92, payload, db, auth)
+
+    assert response == {"status": "ok"}
+    assert captured.get("called") is True
+
+
+def test_reasignar_produccion_bloquea_florista_si_flag_apagado_explicitamente(monkeypatch):
+    payload = ProduccionReasignarRequest(
+        floristaNuevoID=7,
+        fechaProgramadaProduccion=date(2026, 5, 10),
+        motivo="Cambio manual",
+        usuarioCambio="florista1",
+    )
+    auth = SimpleNamespace(
+        login="florista1", nombre="Elibeth Salgado", empresaID=3, sucursalID=3,
+        rol="Florista", userID=12, esGlobalJoin=False, roles=[],
+    )
+    config = EmpresaConfiguracionAsignacion(empresaID=3, asignacionProduccionActiva=False)
+    db = _FakeDb(config=config)
 
     def fake_asignar(*args, **kwargs):
         raise AssertionError("no deberia llegar a asignar_produccion si el flag esta apagado")
