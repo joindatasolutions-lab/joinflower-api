@@ -90,6 +90,12 @@ class WhatsAppDispatchJob:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        try:
+            procesadas = run_dispatch_once(self.batch_size)
+            if procesadas:
+                job_logger.info("Notificaciones de WhatsApp procesadas al iniciar el job: %s", procesadas)
+        except Exception:
+            job_logger.exception("Error procesando notificaciones de WhatsApp al iniciar el job")
         self._thread = threading.Thread(
             target=self._run_loop,
             name="whatsapp-dispatch-job",
