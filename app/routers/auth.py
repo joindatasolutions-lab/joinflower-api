@@ -56,6 +56,7 @@ from app.schemas.auth import (
     EmpresaCreateRequest,
     EmpresaCreateResponse,
     EmpresaAssetsProvisionResponse,
+    EmpresaDetailResponse,
     EmpresaListResponse,
     EmpresaModuloResumenItem,
     EmpresaModuloResumenResponse,
@@ -64,6 +65,8 @@ from app.schemas.auth import (
     EmpresaModuloUpdateRequest,
     EmpresaModuloUpdateResponse,
     EmpresaOption,
+    EmpresaUpdateRequest,
+    EmpresaUpdateResponse,
     LoginRequest,
     LoginResponse,
     ImpersonateRequest,
@@ -72,6 +75,8 @@ from app.schemas.auth import (
     RoleAssignmentItem,
     SucursalListResponse,
     SucursalOption,
+    TemaResponse,
+    TemaUpdateRequest,
     UserCreateRequest,
     UserCreateResponse,
     UserDeleteResponse,
@@ -82,6 +87,7 @@ from app.schemas.auth import (
     UserStatusUpdateRequest,
     UserUpdateRequest,
 )
+from app.models.tema import Tema
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 auth_logger = get_logger("auth")
@@ -2097,15 +2103,17 @@ def crear_empresa(
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
-        nit = _build_unique_empresa_nit(db, next_empresa_id, slug)
+        nit = str(payload.nit or "").strip() or _build_unique_empresa_nit(db, next_empresa_id, slug)
 
         db.execute(
             text(
                 """
                 INSERT INTO petalops.empresa
-                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, slug, created_at, updated_at)
+                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, slug, created_at, updated_at,
+                 celular, ciudad, direccion, nombre_responsable, cargo_responsable, correo_responsable, celular_responsable)
                 VALUES
-                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, :slug, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, :slug, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                 :celular, :ciudad, :direccion, :nombre_responsable, :cargo_responsable, :correo_responsable, :celular_responsable)
                 """
             ),
             {
@@ -2116,6 +2124,13 @@ def crear_empresa(
                 "nombre_comercial": nombre,
                 "plan_id": plan_id,
                 "slug": slug,
+                "celular": payload.celular,
+                "ciudad": payload.ciudad,
+                "direccion": payload.direccion,
+                "nombre_responsable": payload.nombreResponsable,
+                "cargo_responsable": payload.cargoResponsable,
+                "correo_responsable": payload.correoResponsable,
+                "celular_responsable": payload.celularResponsable,
             },
         )
 
@@ -2276,6 +2291,161 @@ def crear_empresa(
         db.rollback()
         auth_logger.error("Error SQL creando empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+def _empresa_or_404(db: Session, empresa_id: int):
+    row = db.execute(
+        text(
+            """
+            SELECT id_empresa, nombre_empresa, nombre_comercial, nit, estado, slug, dominio,
+                   logo_url, plan_id, celular, ciudad, direccion, nombre_responsable,
+                   cargo_responsable, correo_responsable, celular_responsable
+            FROM petalops.empresa
+            WHERE id_empresa = :empresa_id
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).mappings().first()
+    if not row:
+        raise _err("AUTH_EMPRESA_NOT_FOUND", "Empresa no encontrada", status_code=404)
+    return row
+
+
+@router.get("/usuarios/empresas/{empresa_id}", response_model=EmpresaDetailResponse)
+def obtener_empresa(
+    empresa_id: int,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_global_join_user),
+):
+    row = _empresa_or_404(db, empresa_id)
+    estado_texto = "Activo" if int(row["estado"] or 0) == 1 else "Inactivo"
+    return EmpresaDetailResponse(
+        empresaID=int(row["id_empresa"]),
+        nombreComercial=str(row["nombre_comercial"] or row["nombre_empresa"] or ""),
+        nombreEmpresa=str(row["nombre_empresa"] or ""),
+        nit=row["nit"],
+        estado=estado_texto,
+        slug=row["slug"],
+        dominio=row["dominio"],
+        logoUrl=row["logo_url"],
+        planID=(int(row["plan_id"]) if row["plan_id"] is not None else None),
+        celular=row["celular"],
+        ciudad=row["ciudad"],
+        direccion=row["direccion"],
+        nombreResponsable=row["nombre_responsable"],
+        cargoResponsable=row["cargo_responsable"],
+        correoResponsable=row["correo_responsable"],
+        celularResponsable=row["celular_responsable"],
+    )
+
+
+@router.put("/usuarios/empresas/{empresa_id}", response_model=EmpresaUpdateResponse)
+def actualizar_empresa(
+    empresa_id: int,
+    payload: EmpresaUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(require_global_join_user),
+):
+    try:
+        _empresa_or_404(db, empresa_id)
+
+        campos: dict[str, object] = {}
+        if payload.nombreComercial is not None:
+            campos["nombre_comercial"] = payload.nombreComercial.strip()
+        if payload.estado is not None:
+            estado = payload.estado.strip().title()
+            if estado not in {"Activo", "Inactivo"}:
+                raise HTTPException(status_code=400, detail="estado debe ser Activo o Inactivo")
+            campos["estado"] = 1 if estado == "Activo" else 0
+        for campo_payload, columna in (
+            ("nit", "nit"),
+            ("celular", "celular"),
+            ("ciudad", "ciudad"),
+            ("direccion", "direccion"),
+            ("nombreResponsable", "nombre_responsable"),
+            ("cargoResponsable", "cargo_responsable"),
+            ("correoResponsable", "correo_responsable"),
+            ("celularResponsable", "celular_responsable"),
+        ):
+            valor = getattr(payload, campo_payload)
+            if valor is not None:
+                campos[columna] = valor.strip()
+
+        if campos:
+            set_clause = ", ".join(f"{columna} = :{columna}" for columna in campos)
+            db.execute(
+                text(f"UPDATE petalops.empresa SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id_empresa = :empresa_id"),
+                {**campos, "empresa_id": int(empresa_id)},
+            )
+            auth_logger.info(
+                "EMPRESA_UPDATED empresa_id=%s actor=%s campos=%s",
+                empresa_id, auth.login, sorted(campos.keys()),
+            )
+            db.commit()
+
+        return EmpresaUpdateResponse(status="ok", empresaID=int(empresa_id))
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        auth_logger.error("Error SQL actualizando empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+@router.get("/usuarios/empresas/{empresa_id}/tema", response_model=TemaResponse)
+def obtener_tema_empresa(
+    empresa_id: int,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_global_join_user),
+):
+    _empresa_or_404(db, empresa_id)
+    tema = db.query(Tema).filter(Tema.empresaID == empresa_id).first()
+    return TemaResponse(
+        empresaID=empresa_id,
+        colorPrimario=(tema.colorPrimario if tema else None),
+        colorSecundario=(tema.colorSecundario if tema else None),
+        fuenteFamilia=(tema.fuenteFamilia if tema else None),
+    )
+
+
+@router.put("/usuarios/empresas/{empresa_id}/tema", response_model=TemaResponse)
+def actualizar_tema_empresa(
+    empresa_id: int,
+    payload: TemaUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(require_global_join_user),
+):
+    try:
+        _empresa_or_404(db, empresa_id)
+        tema = db.query(Tema).filter(Tema.empresaID == empresa_id).first()
+        if tema is None:
+            tema = Tema(empresaID=empresa_id, activo=True, createdAt=datetime.now(timezone.utc))
+            db.add(tema)
+
+        tema.colorPrimario = payload.colorPrimario
+        tema.colorSecundario = payload.colorSecundario
+        tema.fuenteFamilia = payload.fuenteFamilia
+        tema.updatedAt = datetime.now(timezone.utc)
+
+        auth_logger.info(
+            "EMPRESA_TEMA_UPDATED empresa_id=%s actor=%s colorPrimario=%s colorSecundario=%s fuenteFamilia=%s",
+            empresa_id, auth.login, payload.colorPrimario, payload.colorSecundario, payload.fuenteFamilia,
+        )
+        db.commit()
+        db.refresh(tema)
+
+        return TemaResponse(
+            empresaID=empresa_id,
+            colorPrimario=tema.colorPrimario,
+            colorSecundario=tema.colorSecundario,
+            fuenteFamilia=tema.fuenteFamilia,
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        auth_logger.error("Error SQL actualizando tema de empresa", exc_info=True)
+        raise _err("AUTH_EMPRESA_TEMA_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
 def listar_modulos_empresa(

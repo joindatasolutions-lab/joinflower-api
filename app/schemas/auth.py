@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any
 
@@ -249,8 +250,23 @@ class EmpresaCreateRequest(BaseModel):
     adminPassword: str | None = Field(default=None, min_length=6, max_length=120)
     adminEmail: str | None = None
     sucursalNombre: str | None = Field(default=None, min_length=3, max_length=120)
+    # Datos comerciales/de contacto de la empresa -- todos opcionales, se pueden completar
+    # despues via PUT /usuarios/empresas/{id}. nit permite reemplazar el autogenerado.
+    nit: str | None = Field(default=None, max_length=30)
+    celular: str | None = Field(default=None, max_length=40)
+    ciudad: str | None = Field(default=None, max_length=100)
+    direccion: str | None = Field(default=None, max_length=255)
+    nombreResponsable: str | None = Field(default=None, max_length=150)
+    cargoResponsable: str | None = Field(default=None, max_length=100)
+    correoResponsable: str | None = Field(default=None, max_length=150)
+    celularResponsable: str | None = Field(default=None, max_length=30)
 
-    @field_validator("slug", "adminLogin", "adminPassword", "adminEmail", "sucursalNombre", mode="before")
+    @field_validator(
+        "slug", "adminLogin", "adminPassword", "adminEmail", "sucursalNombre",
+        "nit", "celular", "ciudad", "direccion", "nombreResponsable",
+        "cargoResponsable", "correoResponsable", "celularResponsable",
+        mode="before",
+    )
     @classmethod
     def empty_optional_strings_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -275,6 +291,78 @@ class EmpresaAssetsProvisionResponse(BaseModel):
     empresaSlug: str
     assetsPrefix: str
     createdKeys: list[str] = Field(default_factory=list)
+
+
+class EmpresaDetailResponse(BaseModel):
+    empresaID: int
+    nombreComercial: str
+    nombreEmpresa: str
+    nit: str | None = None
+    estado: str
+    slug: str | None = None
+    dominio: str | None = None
+    logoUrl: str | None = None
+    planID: int | None = None
+    celular: str | None = None
+    ciudad: str | None = None
+    direccion: str | None = None
+    nombreResponsable: str | None = None
+    cargoResponsable: str | None = None
+    correoResponsable: str | None = None
+    celularResponsable: str | None = None
+
+
+class EmpresaUpdateRequest(BaseModel):
+    nombreComercial: str | None = Field(default=None, min_length=3, max_length=180)
+    estado: str | None = None
+    nit: str | None = Field(default=None, max_length=30)
+    celular: str | None = Field(default=None, max_length=40)
+    ciudad: str | None = Field(default=None, max_length=100)
+    direccion: str | None = Field(default=None, max_length=255)
+    nombreResponsable: str | None = Field(default=None, max_length=150)
+    cargoResponsable: str | None = Field(default=None, max_length=100)
+    correoResponsable: str | None = Field(default=None, max_length=150)
+    celularResponsable: str | None = Field(default=None, max_length=30)
+
+    @field_validator(
+        "nit", "celular", "ciudad", "direccion", "nombreResponsable",
+        "cargoResponsable", "correoResponsable", "celularResponsable",
+        mode="before",
+    )
+    @classmethod
+    def empty_optional_strings_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
+class EmpresaUpdateResponse(BaseModel):
+    status: str
+    empresaID: int
+
+
+# Solo se exponen los campos que el panel de superusuario realmente edita hoy
+# (color primario, color secundario y tipo de letra) -- la tabla tema tiene mas
+# columnas (fondo, texto, bordes) reservadas para una fase futura.
+class TemaResponse(BaseModel):
+    empresaID: int
+    colorPrimario: str | None = None
+    colorSecundario: str | None = None
+    fuenteFamilia: str | None = None
+
+
+class TemaUpdateRequest(BaseModel):
+    colorPrimario: str = Field(min_length=4, max_length=20)
+    colorSecundario: str = Field(min_length=4, max_length=20)
+    fuenteFamilia: str = Field(min_length=3, max_length=255)
+
+    @field_validator("colorPrimario", "colorSecundario")
+    @classmethod
+    def validar_color_hex(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("El color debe ser un hexadecimal valido, ej. #3A554D")
+        return value
 
 
 class EmpresaModuloItem(BaseModel):

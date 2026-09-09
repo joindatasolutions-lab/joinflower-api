@@ -26,3 +26,4 @@ from .movimientoinventario import MovimientoInventario
 from .insumo import Insumo
 from .sucursal_contador_pedido import SucursalContadorPedido
 from .whatsapp_notificacion import WhatsappNotificacion
+from .tema import Tema
