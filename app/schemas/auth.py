@@ -4,6 +4,17 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+def _validate_optional_email(value: str | None) -> str | None:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    if not clean:
+        return None
+    if "@" not in clean or "." not in clean.rsplit("@", 1)[-1]:
+        raise ValueError("correo invalido")
+    return clean
+
+
 class LoginRequest(BaseModel):
     login: str = Field(min_length=3)
     password: str = Field(min_length=3)
@@ -242,31 +253,132 @@ class EmpresaListResponse(BaseModel):
 
 class EmpresaCreateRequest(BaseModel):
     nombreComercial: str = Field(min_length=3, max_length=180)
+    nombreEmpresa: str | None = Field(default=None, min_length=3, max_length=180)
+    nit: str | None = Field(default=None, min_length=1, max_length=40)
+    ciudad: str | None = Field(default=None, min_length=1, max_length=120)
+    direccion: str | None = Field(default=None, min_length=1, max_length=180)
+    nombreResponsable: str | None = Field(default=None, min_length=1, max_length=180)
+    cargoResponsable: str | None = Field(default=None, max_length=120)
+    correoResponsable: str | None = Field(default=None, max_length=180)
+    celularResponsable: str | None = Field(default=None, min_length=1, max_length=40)
+    celular: str | None = Field(default=None, min_length=1, max_length=40)
     planID: int = 1
     estado: str = "Activo"
     slug: str | None = Field(default=None, min_length=3, max_length=80)
     adminLogin: str | None = Field(default=None, min_length=3, max_length=80)
     adminPassword: str | None = Field(default=None, min_length=6, max_length=120)
-    adminEmail: str | None = None
+    adminEmail: str | None = Field(default=None, max_length=180)
     sucursalNombre: str | None = Field(default=None, min_length=3, max_length=120)
 
-    @field_validator("slug", "adminLogin", "adminPassword", "adminEmail", "sucursalNombre", mode="before")
+    @field_validator(
+        "nombreEmpresa",
+        "nit",
+        "ciudad",
+        "direccion",
+        "nombreResponsable",
+        "cargoResponsable",
+        "correoResponsable",
+        "celularResponsable",
+        "celular",
+        "slug",
+        "adminLogin",
+        "adminPassword",
+        "adminEmail",
+        "sucursalNombre",
+        mode="before",
+    )
     @classmethod
     def empty_optional_strings_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
             return None
         return value
 
+    @field_validator("adminEmail", "correoResponsable")
+    @classmethod
+    def validate_email_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_email(value)
+
 
 class EmpresaCreateResponse(BaseModel):
     status: str
     empresaID: int
     nombre: str
+    nombreComercial: str | None = None
+    nombreEmpresa: str | None = None
+    nit: str | None = None
+    ciudad: str | None = None
+    direccion: str | None = None
+    nombreResponsable: str | None = None
+    cargoResponsable: str | None = None
+    correoResponsable: str | None = None
+    celularResponsable: str | None = None
+    celular: str | None = None
     planID: int
     estado: str
     sucursalID: int | None = None
     adminUserID: int | None = None
     assetsPrefix: str | None = None
+
+
+class EmpresaUpdateRequest(BaseModel):
+    nombreComercial: str | None = Field(default=None, min_length=3, max_length=180)
+    nombreEmpresa: str | None = Field(default=None, min_length=3, max_length=180)
+    nit: str | None = Field(default=None, min_length=1, max_length=40)
+    ciudad: str | None = Field(default=None, min_length=1, max_length=120)
+    direccion: str | None = Field(default=None, min_length=1, max_length=180)
+    nombreResponsable: str | None = Field(default=None, min_length=1, max_length=180)
+    cargoResponsable: str | None = Field(default=None, max_length=120)
+    correoResponsable: str | None = Field(default=None, max_length=180)
+    celularResponsable: str | None = Field(default=None, min_length=1, max_length=40)
+    celular: str | None = Field(default=None, min_length=1, max_length=40)
+    planID: int | None = None
+    estado: str | None = None
+    slug: str | None = Field(default=None, min_length=3, max_length=80)
+
+    @field_validator(
+        "nombreComercial",
+        "nombreEmpresa",
+        "nit",
+        "ciudad",
+        "direccion",
+        "nombreResponsable",
+        "cargoResponsable",
+        "correoResponsable",
+        "celularResponsable",
+        "celular",
+        "estado",
+        "slug",
+        mode="before",
+    )
+    @classmethod
+    def empty_optional_strings_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("correoResponsable")
+    @classmethod
+    def validate_correo_responsable(cls, value: str | None) -> str | None:
+        return _validate_optional_email(value)
+
+
+class EmpresaDetailResponse(BaseModel):
+    status: str = "ok"
+    empresaID: int
+    nombre: str
+    nombreComercial: str | None = None
+    nombreEmpresa: str | None = None
+    nit: str | None = None
+    ciudad: str | None = None
+    direccion: str | None = None
+    nombreResponsable: str | None = None
+    cargoResponsable: str | None = None
+    correoResponsable: str | None = None
+    celularResponsable: str | None = None
+    celular: str | None = None
+    planID: int | None = None
+    estado: str
+    slug: str | None = None
 
 
 class EmpresaAssetsProvisionResponse(BaseModel):
