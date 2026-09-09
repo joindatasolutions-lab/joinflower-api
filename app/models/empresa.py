@@ -23,3 +23,4 @@ class Empresa(Base):
     cargoResponsable = Column("cargo_responsable", String(120), nullable=True)
     correoResponsable = Column("correo_responsable", String(180), nullable=True)
     celularResponsable = Column("celular_responsable", String(40), nullable=True)
+    logoUrl = Column("logo_url", String, nullable=True)

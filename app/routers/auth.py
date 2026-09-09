@@ -2167,11 +2167,59 @@ def provisionar_assets_empresa(
         raise _err("AUTH_EMPRESA_ASSETS_DB_ERROR", "Error interno del servidor", status_code=500)
 
 
-@router.post("/usuarios/empresas", response_model=EmpresaCreateResponse)
-def crear_empresa(
+EMPRESA_CREATE_FORM_FIELDS = {
+    "nombreComercial",
+    "nombreEmpresa",
+    "nit",
+    "ciudad",
+    "direccion",
+    "nombreResponsable",
+    "cargoResponsable",
+    "correoResponsable",
+    "celularResponsable",
+    "celular",
+    "planID",
+    "estado",
+    "slug",
+    "sucursalNombre",
+    "adminLogin",
+    "adminPassword",
+    "adminEmail",
+}
+
+
+async def _parse_empresa_create_request(request: Request) -> tuple[EmpresaCreateRequest, UploadFile | None]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        data = {field: form.get(field) for field in EMPRESA_CREATE_FORM_FIELDS if form.get(field) is not None}
+        raw_file = form.get("file")
+        upload = raw_file if isinstance(raw_file, UploadFile) and raw_file.filename else None
+    else:
+        upload = None
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="JSON invalido")
+
+    try:
+        return EmpresaCreateRequest.model_validate(data), upload
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_context=False))
+
+
+async def _read_logo_upload(file: UploadFile | None) -> tuple[str, bytes, str | None] | None:
+    if file is None:
+        return None
+    body = await file.read()
+    return str(file.filename or "logo"), body, file.content_type
+
+
+def _crear_empresa_core(
     payload: EmpresaCreateRequest,
+    logo_upload: tuple[str, bytes, str | None] | None,
     db: Session = Depends(get_db),
-    _auth=Depends(require_global_join_user),
+    auth=Depends(require_global_join_user),
 ):
     try:
         nombre_comercial = str(payload.nombreComercial or "").strip()
@@ -2415,6 +2463,26 @@ def crear_empresa(
 
         assets_result = ensure_tenant_asset_structure(slug, required=True)
 
+        logo_url = None
+        logo_s3_key = None
+        if logo_upload is not None:
+            if "logo_url" not in columns:
+                raise HTTPException(status_code=500, detail="Tabla empresa sin columna logo_url")
+            filename, body, content_type = logo_upload
+            logo_asset = upload_tenant_logo(slug, filename, body, content_type=content_type)
+            logo_url = logo_asset["url"]
+            logo_s3_key = logo_asset["key"]
+            db.execute(
+                text(
+                    """
+                    UPDATE petalops.empresa
+                    SET logo_url = :logo_url
+                    WHERE id_empresa = :empresa_id
+                    """
+                ),
+                {"empresa_id": next_empresa_id, "logo_url": logo_url},
+            )
+
         db.commit()
 
         return EmpresaCreateResponse(
@@ -2436,7 +2504,13 @@ def crear_empresa(
             sucursalID=next_sucursal_id,
             adminUserID=admin_user_id,
             assetsPrefix=(str(assets_result.get("prefix")) if assets_result.get("enabled") else None),
+            slug=slug,
+            logoUrl=logo_url,
+            logoS3Key=logo_s3_key,
         )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
     except S3TenantAssetsError:
         db.rollback()
         auth_logger.error("Error creando estructura S3 para empresa", exc_info=True)
@@ -2445,6 +2519,17 @@ def crear_empresa(
         db.rollback()
         auth_logger.error("Error SQL creando empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_CREATE_DB_ERROR", "Error interno del servidor", status_code=500)
+
+
+@router.post("/usuarios/empresas", response_model=EmpresaCreateResponse)
+async def crear_empresa(
+    request: Request,
+    db: Session = Depends(get_db),
+    auth=Depends(require_global_join_user),
+):
+    payload, file = await _parse_empresa_create_request(request)
+    logo_upload = await _read_logo_upload(file)
+    return _crear_empresa_core(payload, logo_upload, db=db, auth=auth)
 
 
 def _empresa_or_404(db: Session, empresa_id: int):
@@ -2611,7 +2696,6 @@ def actualizar_tema_empresa(
         db.rollback()
         auth_logger.error("Error SQL actualizando tema de empresa", exc_info=True)
         raise _err("AUTH_EMPRESA_TEMA_UPDATE_DB_ERROR", "Error interno del servidor", status_code=500)
-
 
 @router.get("/usuarios/modulos", response_model=EmpresaModuloListResponse)
 def listar_modulos_empresa(

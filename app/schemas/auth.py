@@ -374,6 +374,11 @@ class EmpresaUpdateRequest(BaseModel):
             return None
         return value
 
+    @field_validator("correoResponsable")
+    @classmethod
+    def validate_correo_responsable(cls, value: str | None) -> str | None:
+        return _validate_optional_email(value)
+
 
 class EmpresaUpdateResponse(BaseModel):
     status: str

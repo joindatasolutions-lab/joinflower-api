@@ -1,6 +1,12 @@
 import pytest
 
-from app.services.s3_tenant_assets import S3TenantAssetsError, build_tenant_asset_keys, ensure_tenant_asset_structure
+from app.services.s3_tenant_assets import (
+    S3TenantAssetsError,
+    build_tenant_asset_keys,
+    build_tenant_logo_asset,
+    ensure_tenant_asset_structure,
+    upload_tenant_logo,
+)
 
 
 class FakeS3Client:
@@ -85,3 +91,43 @@ def test_ensure_tenant_asset_structure_uses_aws_region(monkeypatch):
 def test_build_tenant_asset_keys_rejects_nested_slug():
     with pytest.raises(ValueError):
         build_tenant_asset_keys("tenant/otro")
+
+
+def test_build_tenant_logo_asset_uses_contract_paths(monkeypatch):
+    monkeypatch.delenv("S3_LOGO_BUCKET", raising=False)
+    monkeypatch.delenv("S3_LOGO_CLOUDFRONT_URL", raising=False)
+
+    asset = build_tenant_logo_asset("petalops", "Logo Principal.PNG")
+
+    assert asset == {
+        "bucket": "petalops-assets",
+        "key": "tenants/petalops/logos/logo-principal.png",
+        "url": "https://ddy2osi8uorg4.cloudfront.net/tenants/petalops/logos/logo-principal.png",
+    }
+
+
+def test_upload_tenant_logo_rejects_invalid_extension():
+    with pytest.raises(ValueError):
+        upload_tenant_logo("petalops", "logo.gif", b"fake")
+
+
+def test_upload_tenant_logo_rejects_files_over_15mb():
+    with pytest.raises(ValueError):
+        upload_tenant_logo("petalops", "logo.png", b"0" * (15 * 1024 * 1024 + 1))
+
+
+def test_upload_tenant_logo_puts_object_with_content_type(monkeypatch):
+    monkeypatch.delenv("S3_LOGO_BUCKET", raising=False)
+    s3_client = FakeS3Client()
+
+    result = upload_tenant_logo("petalops", "logo.webp", b"image-bytes", content_type="image/webp", s3_client=s3_client)
+
+    assert result["key"] == "tenants/petalops/logos/logo.webp"
+    assert s3_client.objects == [
+        {
+            "Bucket": "petalops-assets",
+            "Key": "tenants/petalops/logos/logo.webp",
+            "Body": b"image-bytes",
+            "ContentType": "image/webp",
+        }
+    ]
