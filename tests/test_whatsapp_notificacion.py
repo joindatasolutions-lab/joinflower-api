@@ -218,6 +218,85 @@ def test_encolar_notificacion_nunca_lanza_si_falla_el_insert():
     whatsapp_service.encolar_notificacion_entregado(DbQueRompe(), empresa_id=3, pedido_id=100, entrega_id=1000)
 
 
+def test_reconciliar_entregas_entregadas_sin_notificacion_es_idempotente_por_sql():
+    ejecuciones = []
+
+    class Resultado:
+        def fetchall(self):
+            return [(10,), (11,)]
+
+    class DummyDb:
+        def execute(self, statement, params):
+            ejecuciones.append((str(statement), dict(params)))
+            return Resultado()
+
+        def rollback(self):
+            raise AssertionError("no debe hacer rollback si el insert funciona")
+
+    insertadas = whatsapp_service.reconciliar_entregas_entregadas_sin_notificacion(
+        DummyDb(),
+        limite=50,
+        horas_atras=24,
+    )
+
+    assert insertadas == 2
+    sql, params = ejecuciones[0]
+    assert "ON CONFLICT (empresa_id, pedido_id, evento, canal) DO NOTHING" in sql
+    assert "petalops.empresa_modulo" in sql
+    assert "petalops.estado_entrega" in sql
+    assert params["modulo"] == whatsapp_service.MODULE_NOTIFICACIONES_WHATSAPP
+    assert params["estado_entregado"] == ESTADO_ENTREGADO
+    assert params["horas_atras"] == 24
+    assert params["limite"] == 50
+
+
+def test_reconciliar_entregas_se_puede_apagar_por_config(monkeypatch):
+    monkeypatch.setattr(whatsapp_service, "RECONCILIAR_ENTREGAS_ENABLED", False)
+
+    class DummyDb:
+        def execute(self, *args, **kwargs):
+            raise AssertionError("no debe consultar si la reconciliacion esta apagada")
+
+    assert whatsapp_service.reconciliar_entregas_entregadas_sin_notificacion(DummyDb()) == 0
+
+
+def test_procesar_pendientes_reconcilia_antes_de_leer_cola(monkeypatch):
+    llamadas = []
+
+    class QueryVacia:
+        def filter(self, *args, **kwargs):
+            llamadas.append("filter")
+            return self
+
+        def order_by(self, *args, **kwargs):
+            llamadas.append("order_by")
+            return self
+
+        def limit(self, limite):
+            llamadas.append(("limit", limite))
+            return self
+
+        def all(self):
+            llamadas.append("all")
+            return []
+
+    class DummyDb:
+        def query(self, modelo):
+            llamadas.append(("query", modelo))
+            return QueryVacia()
+
+    monkeypatch.setattr(
+        whatsapp_service,
+        "reconciliar_entregas_entregadas_sin_notificacion",
+        lambda db, limite: llamadas.append(("reconciliar", limite)) or 3,
+    )
+
+    procesadas = whatsapp_service.procesar_notificaciones_pendientes(DummyDb(), limite=20)
+
+    assert procesadas == 0
+    assert llamadas[0] == ("reconciliar", whatsapp_service.RECONCILIAR_ENTREGAS_BATCH_SIZE)
+
+
 def test_modulo_whatsapp_inactivo_no_envia_y_marca_skipped(monkeypatch):
     empresa = _empresa(3, "Flora")
     cliente = _cliente(10, empresa_id=3)

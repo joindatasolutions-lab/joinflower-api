@@ -46,7 +46,17 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     return value
 
 
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or str(raw_value).strip() == "":
+        return default
+    return str(raw_value).strip().lower() not in {"0", "false", "no", "off"}
+
+
 MAX_INTENTOS = _env_int("WHATSAPP_MAX_INTENTOS", default=3, minimum=1)
+RECONCILIAR_ENTREGAS_ENABLED = _env_bool("WHATSAPP_RECONCILIAR_ENTREGAS_ENABLED", default=True)
+RECONCILIAR_ENTREGAS_HORAS = _env_int("WHATSAPP_RECONCILIAR_ENTREGAS_HORAS", default=72, minimum=1)
+RECONCILIAR_ENTREGAS_BATCH_SIZE = _env_int("WHATSAPP_RECONCILIAR_ENTREGAS_BATCH_SIZE", default=100, minimum=1)
 # intento 2 a los 30s, intento 3 a los 2min, intento 4 (si MAX_INTENTOS lo permite) a los 10min
 BACKOFF_SEGUNDOS = [30, 120, 600]
 STATUS_PRIORITY = {
@@ -121,6 +131,93 @@ def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: i
             "No fue posible encolar notificacion de WhatsApp. empresa_id=%s pedido_id=%s entrega_id=%s",
             empresa_id, pedido_id, entrega_id,
         )
+
+
+def reconciliar_entregas_entregadas_sin_notificacion(
+    db: Session,
+    *,
+    limite: int = RECONCILIAR_ENTREGAS_BATCH_SIZE,
+    horas_atras: int = RECONCILIAR_ENTREGAS_HORAS,
+) -> int:
+    """Encola entregas ya confirmadas que quedaron sin notificacion.
+
+    Cubre integraciones externas que cambian la entrega a ENTREGADO sin pasar por
+    _marcar_entregado_impl. Es idempotente por el UNIQUE (empresa_id, pedido_id, evento, canal)
+    y respeta el modulo activo por empresa.
+    """
+    if not RECONCILIAR_ENTREGAS_ENABLED:
+        return 0
+
+    try:
+        result = db.execute(
+            text(
+                """
+                INSERT INTO petalops.whatsapp_notificacion
+                    (empresa_id, pedido_id, entrega_id, canal, evento, status, attempts, next_attempt_at, created_at)
+                SELECT pendientes.empresa_id,
+                       pendientes.pedido_id,
+                       pendientes.id_entrega,
+                       :canal,
+                       :evento,
+                       :status,
+                       0,
+                       now(),
+                       now()
+                FROM (
+                    SELECT e.empresa_id, e.pedido_id, e.id_entrega
+                    FROM petalops.entrega e
+                    JOIN petalops.estado_entrega ee
+                      ON ee.id_estado_entrega = e.estadoentregaid
+                    JOIN petalops.empresa_modulo em
+                      ON em.empresa_id = e.empresa_id
+                     AND em.modulo = :modulo
+                     AND em.activo = TRUE
+                    WHERE e.pedido_id IS NOT NULL
+                      AND lower(coalesce(ee.codigo, ee.nombre, '')) = :estado_entregado
+                      AND greatest(
+                            coalesce(e.updatedat, timestamp '1970-01-01'),
+                            coalesce(e.fechaentrega, timestamp '1970-01-01')
+                          ) >= now() - (CAST(:horas_atras AS integer) * interval '1 hour')
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM petalops.whatsapp_notificacion wn
+                          WHERE wn.empresa_id = e.empresa_id
+                            AND wn.pedido_id = e.pedido_id
+                            AND wn.evento = :evento
+                            AND wn.canal = :canal
+                      )
+                    ORDER BY greatest(
+                               coalesce(e.updatedat, timestamp '1970-01-01'),
+                               coalesce(e.fechaentrega, timestamp '1970-01-01')
+                             ) DESC,
+                             e.id_entrega DESC
+                    LIMIT :limite
+                ) pendientes
+                ON CONFLICT (empresa_id, pedido_id, evento, canal) DO NOTHING
+                RETURNING id_notificacion
+                """
+            ),
+            {
+                "canal": CANAL_WHATSAPP,
+                "evento": EVENTO_ORDER_DELIVERED,
+                "status": STATUS_PENDING,
+                "modulo": MODULE_NOTIFICACIONES_WHATSAPP,
+                "estado_entregado": ESTADO_ENTREGADO,
+                "horas_atras": int(horas_atras),
+                "limite": int(limite),
+            },
+        )
+        insertadas = len(result.fetchall())
+        if insertadas:
+            logger.info(
+                "Reconciliacion WhatsApp encolo entregas entregadas sin notificacion. total=%s horas_atras=%s",
+                insertadas, horas_atras,
+            )
+        return insertadas
+    except Exception:
+        db.rollback()
+        logger.exception("No fue posible reconciliar entregas entregadas sin notificacion de WhatsApp")
+        return 0
 
 
 def _enmascarar_telefono(telefono: str | None) -> str:
@@ -444,6 +541,8 @@ def procesar_notificaciones_pendientes(db: Session, *, limite: int = 20) -> int:
     nunca desde el ciclo de una peticion HTTP -- el envio a Meta no debe bloquear ninguna
     respuesta al usuario.
     """
+    reconciliar_entregas_entregadas_sin_notificacion(db, limite=RECONCILIAR_ENTREGAS_BATCH_SIZE)
+
     ahora = datetime.utcnow()
     pendientes = (
         db.query(WhatsappNotificacion)
