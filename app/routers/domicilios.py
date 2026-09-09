@@ -30,6 +30,7 @@ from app.models.barrio import Barrio
 from app.models.cliente import Cliente
 from app.models.domiciliario import Domiciliario
 from app.models.empresa import Empresa
+from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
 from app.models.pedido import Pedido
@@ -2488,6 +2489,19 @@ def tomar_entrega(
     domiciliario_id = _assert_auth_domiciliario(db, auth)
     entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
     assert_same_empresa(auth, int(entrega.empresaID))
+
+    if not _actor_can_override_delivery(auth):
+        config = (
+            db.query(EmpresaConfiguracionAsignacion)
+            .filter(EmpresaConfiguracionAsignacion.empresaID == int(entrega.empresaID))
+            .first()
+        )
+        if not config or not config.asignacionDomicilioActiva:
+            raise _err(
+                "DOMICILIO_AUTOASIGNACION_DESHABILITADA",
+                "Esta floristeria no permite que el domiciliario se autoasigne pedidos",
+                status_code=403,
+            )
 
     if domicilio_service.is_store_pickup_tipo_entrega(entrega.tipoEntrega):
         raise _err(

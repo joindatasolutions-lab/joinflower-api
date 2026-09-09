@@ -10,6 +10,7 @@ from app.core.logger import get_logger
 from app.core.ordering import sort_operativo
 from app.database import get_db
 from app.models.cliente import Cliente
+from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.models.entrega import Entrega
 from app.models.estadopedido import EstadoPedido
 from app.models.florista import Florista
@@ -1148,6 +1149,19 @@ def asignar_produccion(produccion_id: int, payload: ProduccionAsignarRequest, db
 
 @router.put("/{produccion_id}/reasignar", dependencies=[Depends(require_module_access("produccion", "puedeEditar"))])
 def reasignar_produccion(produccion_id: int, payload: ProduccionReasignarRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        config = (
+            db.query(EmpresaConfiguracionAsignacion)
+            .filter(EmpresaConfiguracionAsignacion.empresaID == int(auth.empresaID))
+            .first()
+        )
+        if not config or not config.asignacionProduccionActiva:
+            raise _err(
+                "PRODUCCION_AUTOASIGNACION_DESHABILITADA",
+                "Esta floristeria no permite que el florista se autoasigne pedidos",
+                status_code=403,
+            )
+
     usuario_cambio = str(payload.usuarioCambio or auth.login or auth.nombre or "system").strip()
     if not usuario_cambio:
         usuario_cambio = "system"

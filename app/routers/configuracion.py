@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.security import assert_same_empresa, require_admin_role
+from app.core.security import assert_same_empresa, get_current_auth_context, require_admin_role
 from app.database import get_db
 from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.schemas.configuracion import (
@@ -343,8 +343,11 @@ def actualizar_menu_pedido(
 
 @router.get("/empresas/{empresa_id}/asignacion", response_model=ConfiguracionAsignacionResponse)
 def obtener_configuracion_asignacion(
-    empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)
+    empresa_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)
 ):
+    # Lectura abierta a cualquier usuario autenticado (florista/domiciliario incluidos):
+    # ProductionPage/DeliveryPage necesitan leer este flag para decidir si muestran el
+    # boton de autoasignacion. Solo la escritura (PUT, abajo) sigue restringida a admins.
     assert_same_empresa(auth, empresa_id)
     config = (
         db.query(EmpresaConfiguracionAsignacion)
