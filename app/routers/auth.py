@@ -6,9 +6,11 @@ import uuid
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from jose import JWTError, jwt
+from pydantic import ValidationError
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile
 
 from app.core.logger import get_logger
 from app.core.security import (
@@ -49,14 +51,14 @@ from app.services.password_vault import (
     mark_password_vault_viewed,
     upsert_user_password_vault,
 )
-from app.services.s3_tenant_assets import S3TenantAssetsError, ensure_tenant_asset_structure
+from app.services.s3_tenant_assets import S3TenantAssetsError, ensure_tenant_asset_structure, upload_tenant_logo
 from app.schemas.auth import (
     AdminProductosSessionResponse,
     AuthMeResponse,
     EmpresaCreateRequest,
     EmpresaCreateResponse,
-    EmpresaAssetsProvisionResponse,
     EmpresaDetailResponse,
+    EmpresaAssetsProvisionResponse,
     EmpresaListResponse,
     EmpresaModuloResumenItem,
     EmpresaModuloResumenResponse,
@@ -511,30 +513,152 @@ def _load_empresa_columns(db: Session) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def _build_unique_empresa_nit(db: Session, empresa_id: int, slug: str) -> str:
-    base_slug = re.sub(r"[^A-Z0-9]+", "", str(slug or "").upper())[:12] or "TENANT"
-    candidates = [
-        f"NIT-{empresa_id}",
-        f"NIT-{base_slug}-{empresa_id}",
-    ]
-    candidates.extend(f"NIT-{base_slug}-{empresa_id}-{suffix}" for suffix in range(2, 100))
+EMPRESA_PROFILE_FIELDS = (
+    ("nombre_comercial", "nombreComercial"),
+    ("nombre_empresa", "nombreEmpresa"),
+    ("nit", "nit"),
+    ("ciudad", "ciudad"),
+    ("direccion", "direccion"),
+    ("nombre_responsable", "nombreResponsable"),
+    ("cargo_responsable", "cargoResponsable"),
+    ("correo_responsable", "correoResponsable"),
+    ("celular_responsable", "celularResponsable"),
+    ("celular", "celular"),
+)
 
-    for candidate in candidates:
+EMPRESA_PROFILE_PAYLOAD_TO_COLUMN = {
+    "nombreComercial": "nombre_comercial",
+    "nombreEmpresa": "nombre_empresa",
+    "nit": "nit",
+    "ciudad": "ciudad",
+    "direccion": "direccion",
+    "nombreResponsable": "nombre_responsable",
+    "cargoResponsable": "cargo_responsable",
+    "correoResponsable": "correo_responsable",
+    "celularResponsable": "celular_responsable",
+    "celular": "celular",
+    "planID": "plan_id",
+    "estado": "estado",
+    "slug": "slug",
+}
+
+EMPRESA_REQUIRED_UPDATE_FIELDS = {"nombreComercial", "nombreEmpresa", "planID", "estado", "slug"}
+
+
+def _clean_optional_text(value: str | None, max_length: int | None = None) -> str | None:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    if not clean:
+        return None
+    return clean[:max_length] if max_length else clean
+
+
+def _build_unique_empresa_nit(db: Session, empresa_id: int, slug: str) -> str:
+    base_candidates = [
+        f"NIT-{int(empresa_id)}",
+        f"NIT-{re.sub(r'[^A-Z0-9]+', '', str(slug or '').upper())[:40]}-{int(empresa_id)}",
+    ]
+    for base in base_candidates:
+        candidate = base[:40]
         exists = db.execute(
-            text(
-                """
-                SELECT 1
-                FROM petalops.empresa
-                WHERE lower(COALESCE(nit, '')) = lower(:nit)
-                LIMIT 1
-                """
-            ),
+            text("SELECT 1 FROM petalops.empresa WHERE lower(COALESCE(nit, '')) = lower(:nit) LIMIT 1"),
             {"nit": candidate},
         ).first()
         if not exists:
             return candidate
 
-    raise HTTPException(status_code=409, detail="No fue posible generar un NIT interno unico para la empresa")
+    prefix = base_candidates[-1][:35].rstrip("-")
+    suffix = 2
+    while True:
+        candidate = f"{prefix}-{suffix}"[:40]
+        exists = db.execute(
+            text("SELECT 1 FROM petalops.empresa WHERE lower(COALESCE(nit, '')) = lower(:nit) LIMIT 1"),
+            {"nit": candidate},
+        ).first()
+        if not exists:
+            return candidate
+        suffix += 1
+
+
+def _estado_empresa_label(value) -> str:
+    if value is None:
+        return "Activo"
+    if isinstance(value, bool):
+        return "Activo" if value else "Inactivo"
+    raw = str(value).strip()
+    lowered = raw.lower()
+    if lowered in {"1", "activo", "activa", "true", "t"}:
+        return "Activo"
+    if lowered in {"0", "inactivo", "inactiva", "false", "f"}:
+        return "Inactivo"
+    return raw.title()
+
+
+def _estado_empresa_db_value(estado: str) -> int:
+    estado_label = str(estado or "Activo").strip().title()
+    if estado_label not in {"Activo", "Inactivo"}:
+        raise HTTPException(status_code=400, detail="estado debe ser Activo o Inactivo")
+    return 1 if estado_label == "Activo" else 0
+
+
+def _empresa_select_sql(columns: set[str]) -> str:
+    optional_fields = [
+        f"{column} AS \"{label}\"" if column in columns else f"NULL AS \"{label}\""
+        for column, label in EMPRESA_PROFILE_FIELDS
+    ]
+    plan_expr = "plan_id AS \"planID\"" if "plan_id" in columns else "NULL AS \"planID\""
+    estado_expr = "estado AS estado" if "estado" in columns else "'Activo' AS estado"
+    slug_expr = "slug AS slug" if "slug" in columns else "NULL AS slug"
+    return ",\n                       ".join(
+        [
+            "id_empresa AS \"empresaID\"",
+            "COALESCE(nombre_comercial, nombre_empresa, CONCAT('Empresa ', id_empresa)) AS nombre",
+            *optional_fields,
+            plan_expr,
+            estado_expr,
+            slug_expr,
+        ]
+    )
+
+
+def _empresa_detail_from_row(row) -> EmpresaDetailResponse:
+    data = dict(row._mapping)
+    return EmpresaDetailResponse(
+        empresaID=int(data["empresaID"]),
+        nombre=str(data.get("nombre") or f"Empresa {int(data['empresaID'])}"),
+        nombreComercial=data.get("nombreComercial"),
+        nombreEmpresa=data.get("nombreEmpresa"),
+        nit=data.get("nit"),
+        ciudad=data.get("ciudad"),
+        direccion=data.get("direccion"),
+        nombreResponsable=data.get("nombreResponsable"),
+        cargoResponsable=data.get("cargoResponsable"),
+        correoResponsable=data.get("correoResponsable"),
+        celularResponsable=data.get("celularResponsable"),
+        celular=data.get("celular"),
+        planID=(int(data["planID"]) if data.get("planID") is not None else None),
+        estado=_estado_empresa_label(data.get("estado")),
+        slug=(str(data["slug"]).strip() if data.get("slug") is not None else None),
+    )
+
+
+def _load_empresa_detail_response(db: Session, empresa_id: int) -> EmpresaDetailResponse:
+    columns = _load_empresa_columns(db)
+    row = db.execute(
+        text(
+            f"""
+            SELECT {_empresa_select_sql(columns)}
+            FROM petalops.empresa
+            WHERE id_empresa = :empresa_id
+            LIMIT 1
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    return _empresa_detail_from_row(row)
 
 
 def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaModuloItem]:
@@ -2050,9 +2174,10 @@ def crear_empresa(
     _auth=Depends(require_global_join_user),
 ):
     try:
-        nombre = str(payload.nombreComercial or "").strip()
-        if len(nombre) < 3:
+        nombre_comercial = str(payload.nombreComercial or "").strip()
+        if len(nombre_comercial) < 3:
             raise HTTPException(status_code=400, detail="nombreComercial debe tener al menos 3 caracteres")
+        nombre_empresa = _clean_optional_text(payload.nombreEmpresa, 180) or nombre_comercial
 
         estado = str(payload.estado or "Activo").strip().title()
         if estado not in {"Activo", "Inactivo"}:
@@ -2063,7 +2188,7 @@ def crear_empresa(
             raise HTTPException(status_code=400, detail="planID debe ser mayor o igual a 1")
 
         requested_slug = str(payload.slug or "").strip().lower()
-        slug = re.sub(r"[^a-z0-9-]+", "-", requested_slug or nombre.lower()).strip("-")[:80]
+        slug = re.sub(r"[^a-z0-9-]+", "-", requested_slug or nombre_comercial.lower()).strip("-")[:80]
         if len(slug) < 3:
             raise HTTPException(status_code=400, detail="slug debe tener al menos 3 caracteres validos")
 
@@ -2085,57 +2210,76 @@ def crear_empresa(
         if "nombre_empresa" not in columns or "nit" not in columns:
             raise HTTPException(status_code=500, detail="Tabla empresa sin columnas obligatorias nombre_empresa/nit")
 
+        requested_nit = _clean_optional_text(payload.nit, 40)
         existing_empresa = db.execute(
             text(
                 """
                 SELECT id_empresa
                 FROM petalops.empresa
                 WHERE lower(COALESCE(slug, '')) = :slug
-                   OR lower(COALESCE(nombre_empresa, '')) = lower(:nombre)
-                   OR lower(COALESCE(nombre_comercial, '')) = lower(:nombre)
+                   OR lower(COALESCE(nombre_empresa, '')) = lower(:nombre_empresa)
+                   OR lower(COALESCE(nombre_comercial, '')) = lower(:nombre_comercial)
+                   OR (:nit IS NOT NULL AND lower(COALESCE(nit, '')) = lower(:nit))
                 LIMIT 1
                 """
             ),
-            {"slug": slug, "nombre": nombre},
+            {
+                "slug": slug,
+                "nombre_empresa": nombre_empresa,
+                "nombre_comercial": nombre_comercial,
+                "nit": requested_nit,
+            },
         ).first()
         if existing_empresa:
-            raise HTTPException(status_code=409, detail="Ya existe una empresa con ese nombre o slug")
+            raise HTTPException(status_code=409, detail="Ya existe una empresa con ese nombre, slug o NIT")
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
-        nit = str(payload.nit or "").strip() or _build_unique_empresa_nit(db, next_empresa_id, slug)
+        nit = requested_nit or _build_unique_empresa_nit(db, next_empresa_id, slug)
+
+        empresa_values = {
+            "id_empresa": next_empresa_id,
+            "nombre_empresa": nombre_empresa,
+            "nit": nit,
+            "estado": 1 if estado == "Activo" else 0,
+            "nombre_comercial": nombre_comercial,
+            "plan_id": plan_id,
+            "slug": slug,
+            "ciudad": _clean_optional_text(payload.ciudad, 120),
+            "direccion": _clean_optional_text(payload.direccion, 180),
+            "nombre_responsable": _clean_optional_text(payload.nombreResponsable, 180),
+            "cargo_responsable": _clean_optional_text(payload.cargoResponsable, 120),
+            "correo_responsable": _clean_optional_text(payload.correoResponsable, 180),
+            "celular_responsable": _clean_optional_text(payload.celularResponsable, 40),
+            "celular": _clean_optional_text(payload.celular, 40),
+        }
+        insert_columns = [
+            column
+            for column in empresa_values.keys()
+            if column == "id_empresa" or column in columns
+        ]
+        insert_values = [f":{column}" for column in insert_columns]
+        if "created_at" in columns:
+            insert_columns.append("created_at")
+            insert_values.append("CURRENT_TIMESTAMP")
+        if "updated_at" in columns:
+            insert_columns.append("updated_at")
+            insert_values.append("CURRENT_TIMESTAMP")
 
         db.execute(
             text(
-                """
+                f"""
                 INSERT INTO petalops.empresa
-                (id_empresa, nombre_empresa, nit, estado, nombre_comercial, plan_id, slug, created_at, updated_at,
-                 celular, ciudad, direccion, nombre_responsable, cargo_responsable, correo_responsable, celular_responsable)
+                ({", ".join(insert_columns)})
                 VALUES
-                (:id_empresa, :nombre_empresa, :nit, :estado, :nombre_comercial, :plan_id, :slug, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
-                 :celular, :ciudad, :direccion, :nombre_responsable, :cargo_responsable, :correo_responsable, :celular_responsable)
+                ({", ".join(insert_values)})
                 """
             ),
-            {
-                "id_empresa": next_empresa_id,
-                "nombre_empresa": nombre,
-                "nit": nit,
-                "estado": 1 if estado == "Activo" else 0,
-                "nombre_comercial": nombre,
-                "plan_id": plan_id,
-                "slug": slug,
-                "celular": payload.celular,
-                "ciudad": payload.ciudad,
-                "direccion": payload.direccion,
-                "nombre_responsable": payload.nombreResponsable,
-                "cargo_responsable": payload.cargoResponsable,
-                "correo_responsable": payload.correoResponsable,
-                "celular_responsable": payload.celularResponsable,
-            },
+            {column: empresa_values[column] for column in empresa_values.keys()},
         )
 
         next_sucursal_id = int(db.execute(text("SELECT COALESCE(MAX(id_sucursal), 0) + 1 FROM petalops.sucursal")).scalar_one())
-        sucursal_nombre = str(payload.sucursalNombre or f"Principal {nombre}").strip()[:120]
+        sucursal_nombre = str(payload.sucursalNombre or f"Principal {nombre_comercial}").strip()[:120]
         prefijo = re.sub(r"[^A-Z0-9]+", "", slug.upper())[:3] or "TEN"
         db.execute(
             text(
@@ -2253,7 +2397,7 @@ def crear_empresa(
                     {
                         "empresa_id": next_empresa_id,
                         "sucursal_id": next_sucursal_id,
-                        "nombre": nombre,
+                        "nombre": nombre_comercial,
                         "login": admin_login,
                         "email": email,
                         "password_hash": pwd_context.hash(str(payload.adminPassword)),
@@ -2276,7 +2420,17 @@ def crear_empresa(
         return EmpresaCreateResponse(
             status="ok",
             empresaID=next_empresa_id,
-            nombre=nombre,
+            nombre=nombre_comercial,
+            nombreComercial=nombre_comercial,
+            nombreEmpresa=nombre_empresa,
+            nit=nit,
+            ciudad=empresa_values["ciudad"],
+            direccion=empresa_values["direccion"],
+            nombreResponsable=empresa_values["nombre_responsable"],
+            cargoResponsable=empresa_values["cargo_responsable"],
+            correoResponsable=empresa_values["correo_responsable"],
+            celularResponsable=empresa_values["celular_responsable"],
+            celular=empresa_values["celular"],
             planID=plan_id,
             estado=estado,
             sucursalID=next_sucursal_id,
