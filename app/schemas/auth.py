@@ -189,6 +189,12 @@ class UserDetailResponse(BaseModel):
     ultimoLogin: datetime | None = None
 
 
+class UserPasswordVaultResponse(BaseModel):
+    available: bool
+    password: str | None = None
+    message: str | None = None
+
+
 class UserUpdateRequest(BaseModel):
     nombre: str = Field(min_length=3)
     login: str = Field(min_length=3)

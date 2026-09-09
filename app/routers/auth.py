@@ -42,6 +42,13 @@ from app.models.sucursal import Sucursal
 from app.models.usuario import Usuario
 from app.services.cache import cache_ttl, get_cache, set_cache
 from app.services.empresa_menu_service import sync_empresa_menu_opciones
+from app.services.password_vault import (
+    PasswordVaultError,
+    get_user_password_from_vault,
+    is_password_vault_enabled,
+    mark_password_vault_viewed,
+    upsert_user_password_vault,
+)
 from app.services.s3_tenant_assets import S3TenantAssetsError, ensure_tenant_asset_structure
 from app.schemas.auth import (
     AdminProductosSessionResponse,
@@ -71,6 +78,7 @@ from app.schemas.auth import (
     UserDetailResponse,
     UserListItem,
     UserListResponse,
+    UserPasswordVaultResponse,
     UserStatusUpdateRequest,
     UserUpdateRequest,
 )
@@ -1292,6 +1300,13 @@ def crear_usuario(
         )
         db.add(usuario)
         db.flush()
+        vault_saved = upsert_user_password_vault(
+            db,
+            user_id=int(usuario.idusuario),
+            empresa_id=target_empresa_id,
+            plain_password=payload.password,
+            actor_user_id=int(auth.userID),
+        )
         _sync_user_roles(db, usuario, assigned_role_ids)
         _sync_employee_profile_for_operational_user(
             db,
@@ -1325,6 +1340,7 @@ def crear_usuario(
                 "rolesIDs": assigned_role_ids,
                 "sucursalID": int(usuario.sucursalID),
                 "modulosAcceso": selected_user_modules,
+                "passwordVaultSaved": vault_saved,
             },
         )
         db.commit()
@@ -1438,6 +1454,70 @@ def obtener_usuario(
     )
 
 
+@router.get("/usuarios/id/{user_id}/password-vault", response_model=UserPasswordVaultResponse)
+def obtener_usuario_password_vault(
+    user_id: int,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    if not is_empresa_admin_context(auth) and not is_super_admin_context(auth):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sin permisos para consultar contrasenas")
+
+    usuario, _target_role = _get_target_user_for_admin(db, auth, user_id)
+    if not is_password_vault_enabled():
+        _audit_user_action(
+            db,
+            actor=auth,
+            action="USER_PASSWORD_VIEW_UNAVAILABLE",
+            target=usuario,
+            extra={"reason": "vault_key_not_configured"},
+        )
+        db.commit()
+        return UserPasswordVaultResponse(
+            available=False,
+            message="El vault de contrasenas no esta configurado.",
+        )
+
+    try:
+        password = get_user_password_from_vault(db, user_id=int(usuario.idusuario))
+    except PasswordVaultError:
+        _audit_user_action(
+            db,
+            actor=auth,
+            action="USER_PASSWORD_VIEW_FAILED",
+            target=usuario,
+            extra={"reason": "decrypt_failed"},
+        )
+        db.commit()
+        auth_logger.error("Error desencriptando contrasena de usuario", exc_info=True)
+        raise _err("AUTH_USER_PASSWORD_VAULT_DECRYPT_ERROR", "No fue posible leer la contrasena almacenada", status_code=500)
+
+    if not password:
+        _audit_user_action(
+            db,
+            actor=auth,
+            action="USER_PASSWORD_VIEW_UNAVAILABLE",
+            target=usuario,
+            extra={"reason": "password_not_stored"},
+        )
+        db.commit()
+        return UserPasswordVaultResponse(
+            available=False,
+            message="Este usuario no tiene contrasena recuperable. Restablece la contrasena para guardarla desde ahora.",
+        )
+
+    mark_password_vault_viewed(db, user_id=int(usuario.idusuario), viewer_user_id=int(auth.userID))
+    _audit_user_action(
+        db,
+        actor=auth,
+        action="USER_PASSWORD_VIEWED",
+        target=usuario,
+        extra={"source": "password_vault"},
+    )
+    db.commit()
+    return UserPasswordVaultResponse(available=True, password=password)
+
+
 @router.put("/usuarios/id/{user_id}", response_model=UserCreateResponse)
 def actualizar_usuario(
     user_id: int,
@@ -1507,8 +1587,16 @@ def actualizar_usuario(
         usuario.rolID = int(payload.rolID)
         usuario.sucursalID = int(payload.sucursalID)
         usuario.estado = estado
+        vault_saved = False
         if payload.password:
             usuario.passwordHash = pwd_context.hash(payload.password)
+            vault_saved = upsert_user_password_vault(
+                db,
+                user_id=int(usuario.idusuario),
+                empresa_id=target_empresa_id,
+                plain_password=payload.password,
+                actor_user_id=int(auth.userID),
+            )
         usuario.updatedAt = datetime.now(timezone.utc)
         _sync_user_roles(db, usuario, assigned_role_ids)
         _sync_employee_profile_for_operational_user(
@@ -1547,6 +1635,7 @@ def actualizar_usuario(
                 "estado": estado,
                 "modulosAcceso": selected_user_modules,
                 "passwordUpdated": bool(payload.password),
+                "passwordVaultSaved": vault_saved,
             },
         )
         db.commit()
@@ -2156,6 +2245,13 @@ def crear_empresa(
                         "rol_id": admin_role_id,
                     },
                 ).scalar_one()
+            )
+            upsert_user_password_vault(
+                db,
+                user_id=admin_user_id,
+                empresa_id=next_empresa_id,
+                plain_password=str(payload.adminPassword),
+                actor_user_id=int(auth.userID),
             )
 
         assets_result = ensure_tenant_asset_structure(slug, required=True)
