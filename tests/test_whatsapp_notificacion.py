@@ -244,6 +244,7 @@ def test_reconciliar_entregas_entregadas_sin_notificacion_es_idempotente_por_sql
     assert "ON CONFLICT (empresa_id, pedido_id, evento, canal) DO NOTHING" in sql
     assert "petalops.empresa_modulo" in sql
     assert "petalops.estado_entrega" in sql
+    assert "coalesce(em.activo, 0) = 1" in sql
     assert params["modulo"] == whatsapp_service.MODULE_NOTIFICACIONES_WHATSAPP
     assert params["estado_entregado"] == ESTADO_ENTREGADO
     assert params["horas_atras"] == 24

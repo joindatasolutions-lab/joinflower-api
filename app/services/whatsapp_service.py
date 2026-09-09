@@ -171,7 +171,7 @@ def reconciliar_entregas_entregadas_sin_notificacion(
                     JOIN petalops.empresa_modulo em
                       ON em.empresa_id = e.empresa_id
                      AND em.modulo = :modulo
-                     AND em.activo = TRUE
+                     AND coalesce(em.activo, 0) = 1
                     WHERE e.pedido_id IS NOT NULL
                       AND lower(coalesce(ee.codigo, ee.nombre, '')) = :estado_entregado
                       AND greatest(
