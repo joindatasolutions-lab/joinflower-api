@@ -202,7 +202,7 @@ def reconciliar_entregas_entregadas_sin_notificacion(
                 "evento": EVENTO_ORDER_DELIVERED,
                 "status": STATUS_PENDING,
                 "modulo": MODULE_NOTIFICACIONES_WHATSAPP,
-                "estado_entregado": ESTADO_ENTREGADO,
+                "estado_entregado": ESTADO_ENTREGADO.lower(),
                 "horas_atras": int(horas_atras),
                 "limite": int(limite),
             },
