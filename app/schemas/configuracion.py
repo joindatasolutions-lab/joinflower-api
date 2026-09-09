@@ -43,3 +43,14 @@ class MenuCampoUpdateRequest(BaseModel):
     titulo: str | None = Field(default=None, min_length=1, max_length=120)
     requeridoAprobacion: bool | None = None
     activo: bool | None = None
+
+
+class ConfiguracionAsignacionResponse(BaseModel):
+    empresaID: int
+    asignacionProduccionActiva: bool
+    asignacionDomicilioActiva: bool
+
+
+class ConfiguracionAsignacionUpdateRequest(BaseModel):
+    asignacionProduccionActiva: bool | None = None
+    asignacionDomicilioActiva: bool | None = None

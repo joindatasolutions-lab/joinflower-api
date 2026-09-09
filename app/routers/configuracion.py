@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
@@ -6,11 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.core.security import assert_same_empresa, require_admin_role
 from app.database import get_db
+from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.schemas.configuracion import (
     CatalogoCreateRequest,
     CatalogoItem,
     CatalogoListResponse,
     CatalogoUpdateRequest,
+    ConfiguracionAsignacionResponse,
+    ConfiguracionAsignacionUpdateRequest,
     MenuCampoItem,
     MenuCampoListResponse,
     MenuCampoUpdateRequest,
@@ -334,4 +338,60 @@ def actualizar_menu_pedido(
         activo=bool(nuevo_activo),
         orden=int(row["orden"] or 0),
         totalOpciones=total_opciones,
+    )
+
+
+@router.get("/empresas/{empresa_id}/asignacion", response_model=ConfiguracionAsignacionResponse)
+def obtener_configuracion_asignacion(
+    empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)
+):
+    assert_same_empresa(auth, empresa_id)
+    config = (
+        db.query(EmpresaConfiguracionAsignacion)
+        .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
+        .first()
+    )
+    return ConfiguracionAsignacionResponse(
+        empresaID=empresa_id,
+        asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else False,
+        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else False,
+    )
+
+
+@router.put("/empresas/{empresa_id}/asignacion", response_model=ConfiguracionAsignacionResponse)
+def actualizar_configuracion_asignacion(
+    empresa_id: int,
+    payload: ConfiguracionAsignacionUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(require_admin_role),
+):
+    assert_same_empresa(auth, empresa_id)
+    config = (
+        db.query(EmpresaConfiguracionAsignacion)
+        .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
+        .first()
+    )
+    if config is None:
+        config = EmpresaConfiguracionAsignacion(
+            empresaID=empresa_id,
+            asignacionProduccionActiva=False,
+            asignacionDomicilioActiva=False,
+            createdAt=datetime.now(timezone.utc),
+            updatedAt=datetime.now(timezone.utc),
+        )
+        db.add(config)
+
+    if payload.asignacionProduccionActiva is not None:
+        config.asignacionProduccionActiva = payload.asignacionProduccionActiva
+    if payload.asignacionDomicilioActiva is not None:
+        config.asignacionDomicilioActiva = payload.asignacionDomicilioActiva
+    config.updatedAt = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(config)
+
+    return ConfiguracionAsignacionResponse(
+        empresaID=empresa_id,
+        asignacionProduccionActiva=bool(config.asignacionProduccionActiva),
+        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva),
     )
