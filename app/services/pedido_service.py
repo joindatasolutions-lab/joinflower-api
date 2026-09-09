@@ -113,8 +113,15 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
     row = db.execute(
         text(
             """
+            WITH max_actual AS (
+                SELECT COALESCE(MAX(numero_pedido), 0) AS ultimo_real
+                FROM petalops.pedido
+                WHERE empresa_id = :empresa_id
+                  AND sucursal_id = :sucursal_id
+                  AND numero_pedido > 0
+            )
             UPDATE petalops.sucursal_contador_pedido
-            SET ultimo_pedido = ultimo_pedido + 1,
+            SET ultimo_pedido = GREATEST(ultimo_pedido, (SELECT ultimo_real FROM max_actual)) + 1,
                 updated_at = :updated_at
             WHERE empresa_id = :empresa_id
               AND sucursal_id = :sucursal_id
