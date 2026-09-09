@@ -2420,7 +2420,19 @@ def actualizar_tema_empresa(
         _empresa_or_404(db, empresa_id)
         tema = db.query(Tema).filter(Tema.empresaID == empresa_id).first()
         if tema is None:
-            tema = Tema(empresaID=empresa_id, activo=True, createdAt=datetime.now(timezone.utc))
+            # La columna color_fondo (y otras de esta familia) son NOT NULL en BD;
+            # el modelo no declara defaults, asi que hay que fijarlas al crear el tema.
+            tema = Tema(
+                empresaID=empresa_id,
+                activo=True,
+                createdAt=datetime.now(timezone.utc),
+                colorFondo="#FFFFFF",
+                colorFondoSuave="#F8F6F1",
+                colorTexto="#1F2937",
+                colorTextoSuave="#6B7280",
+                colorBorde="#E5E7EB",
+                fuenteTamanoBase="16px",
+            )
             db.add(tema)
 
         tema.colorPrimario = payload.colorPrimario
