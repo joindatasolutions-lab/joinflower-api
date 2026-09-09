@@ -49,8 +49,10 @@ class ConfiguracionAsignacionResponse(BaseModel):
     empresaID: int
     asignacionProduccionActiva: bool
     asignacionDomicilioActiva: bool
+    autoAsignacionProduccionActiva: bool
 
 
 class ConfiguracionAsignacionUpdateRequest(BaseModel):
     asignacionProduccionActiva: bool | None = None
     asignacionDomicilioActiva: bool | None = None
+    autoAsignacionProduccionActiva: bool | None = None

@@ -361,6 +361,7 @@ def obtener_configuracion_asignacion(
         empresaID=empresa_id,
         asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else True,
         asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else True,
+        autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva) if config else True,
     )
 
 
@@ -384,6 +385,7 @@ def actualizar_configuracion_asignacion(
             empresaID=empresa_id,
             asignacionProduccionActiva=True,
             asignacionDomicilioActiva=True,
+            autoAsignacionProduccionActiva=True,
             createdAt=datetime.now(timezone.utc),
             updatedAt=datetime.now(timezone.utc),
         )
@@ -393,6 +395,8 @@ def actualizar_configuracion_asignacion(
         config.asignacionProduccionActiva = payload.asignacionProduccionActiva
     if payload.asignacionDomicilioActiva is not None:
         config.asignacionDomicilioActiva = payload.asignacionDomicilioActiva
+    if payload.autoAsignacionProduccionActiva is not None:
+        config.autoAsignacionProduccionActiva = payload.autoAsignacionProduccionActiva
     config.updatedAt = datetime.now(timezone.utc)
 
     db.commit()
@@ -402,4 +406,5 @@ def actualizar_configuracion_asignacion(
         empresaID=empresa_id,
         asignacionProduccionActiva=bool(config.asignacionProduccionActiva),
         asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva),
+        autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva),
     )

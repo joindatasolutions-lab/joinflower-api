@@ -806,6 +806,28 @@ def sincronizar_incapacidades(
     return {"status": "ok", **resumen}
 
 
+def _debe_autoasignar_pendientes_hoy(
+    db: Session,
+    *,
+    empresa_id: int,
+    auto_asignar_pendientes_hoy: bool,
+    metric_filter: str | None,
+    q: str | None,
+    target_fecha,
+    today,
+) -> bool:
+    if not (auto_asignar_pendientes_hoy and not metric_filter and not q and target_fecha == today):
+        return False
+    config = (
+        db.query(EmpresaConfiguracionAsignacion)
+        .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
+        .first()
+    )
+    # Sin fila = autoasignacion automatica activa por defecto (ya corria para todas
+    # las empresas antes de que este flag existiera); el admin la apaga desde Acciones.
+    return config is None or bool(config.autoAsignacionProduccionActiva)
+
+
 @router.get("", response_model=ProduccionListResponse)
 def listar_produccion(
     empresa_id: int = Query(..., alias="empresaID"),
@@ -838,7 +860,15 @@ def listar_produccion(
         sinDisponibilidad=0,
     )
 
-    if auto_asignar_pendientes_hoy and not metric_filter and not q and target_fecha == today:
+    if _debe_autoasignar_pendientes_hoy(
+        db,
+        empresa_id=empresa_id,
+        auto_asignar_pendientes_hoy=auto_asignar_pendientes_hoy,
+        metric_filter=metric_filter,
+        q=q,
+        target_fecha=target_fecha,
+        today=today,
+    ):
         stats = produccion_service.asignar_pendientes_por_fecha(
             db=db,
             empresa_id=empresa_id,
