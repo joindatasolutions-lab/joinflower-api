@@ -55,7 +55,7 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 MAX_INTENTOS = _env_int("WHATSAPP_MAX_INTENTOS", default=3, minimum=1)
 RECONCILIAR_ENTREGAS_ENABLED = _env_bool("WHATSAPP_RECONCILIAR_ENTREGAS_ENABLED", default=True)
-RECONCILIAR_ENTREGAS_HORAS = _env_int("WHATSAPP_RECONCILIAR_ENTREGAS_HORAS", default=72, minimum=1)
+RECONCILIAR_ENTREGAS_HORAS = _env_int("WHATSAPP_RECONCILIAR_ENTREGAS_HORAS", default=6, minimum=1)
 RECONCILIAR_ENTREGAS_BATCH_SIZE = _env_int("WHATSAPP_RECONCILIAR_ENTREGAS_BATCH_SIZE", default=100, minimum=1)
 # intento 2 a los 30s, intento 3 a los 2min, intento 4 (si MAX_INTENTOS lo permite) a los 10min
 BACKOFF_SEGUNDOS = [30, 120, 600]

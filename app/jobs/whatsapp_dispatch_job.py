@@ -109,8 +109,6 @@ class WhatsAppDispatchJob:
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
-            if self._stop_event.wait(self.interval_seconds):
-                break
             try:
                 procesadas = run_dispatch_once(self.batch_size)
                 if procesadas:
@@ -118,3 +116,5 @@ class WhatsAppDispatchJob:
             except Exception:
                 # Ya se registra el error dentro de run_dispatch_once.
                 pass
+            if self._stop_event.wait(self.interval_seconds):
+                break
