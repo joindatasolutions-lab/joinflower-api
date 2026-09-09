@@ -497,6 +497,32 @@ def _load_empresa_columns(db: Session) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _build_unique_empresa_nit(db: Session, empresa_id: int, slug: str) -> str:
+    base_slug = re.sub(r"[^A-Z0-9]+", "", str(slug or "").upper())[:12] or "TENANT"
+    candidates = [
+        f"NIT-{empresa_id}",
+        f"NIT-{base_slug}-{empresa_id}",
+    ]
+    candidates.extend(f"NIT-{base_slug}-{empresa_id}-{suffix}" for suffix in range(2, 100))
+
+    for candidate in candidates:
+        exists = db.execute(
+            text(
+                """
+                SELECT 1
+                FROM petalops.empresa
+                WHERE lower(COALESCE(nit, '')) = lower(:nit)
+                LIMIT 1
+                """
+            ),
+            {"nit": candidate},
+        ).first()
+        if not exists:
+            return candidate
+
+    raise HTTPException(status_code=409, detail="No fue posible generar un NIT interno unico para la empresa")
+
+
 def _build_empresa_module_items(db: Session, empresa_id: int) -> list[EmpresaModuloItem]:
     _ensure_empresa_modulo_table(db)
     candidates = resolve_empresa_module_candidates(db, empresa_id)
@@ -1982,7 +2008,7 @@ def crear_empresa(
 
         next_id_row = db.execute(text("SELECT COALESCE(MAX(id_empresa), 0) + 1 FROM petalops.empresa")).first()
         next_empresa_id = int(next_id_row[0] if next_id_row and next_id_row[0] is not None else 1)
-        nit = f"NIT-{next_empresa_id}"
+        nit = _build_unique_empresa_nit(db, next_empresa_id, slug)
 
         db.execute(
             text(
