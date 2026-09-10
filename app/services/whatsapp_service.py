@@ -765,3 +765,43 @@ def procesar_notificaciones_pendientes(db: Session, *, limite: int = 20) -> int:
                 "Error procesando notificacion de WhatsApp. notificacion_id=%s", notificacion.idNotificacion
             )
     return len(pendientes)
+
+
+def procesar_notificacion_pendiente(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_id: int,
+    evento: str,
+) -> bool:
+    """Procesa una notificacion especifica si quedo PENDING.
+
+    Se usa para flujos donde el usuario espera el envio inmediato, como la aprobacion del
+    pedido. Si falla, queda marcada con la misma logica de reintentos/errores del worker.
+    """
+    try:
+        ahora = datetime.utcnow()
+        notificacion = (
+            db.query(WhatsappNotificacion)
+            .filter(
+                WhatsappNotificacion.empresaID == int(empresa_id),
+                WhatsappNotificacion.pedidoID == int(pedido_id),
+                WhatsappNotificacion.evento == str(evento).strip().upper(),
+                WhatsappNotificacion.canal == CANAL_WHATSAPP,
+                WhatsappNotificacion.status == STATUS_PENDING,
+                (WhatsappNotificacion.nextAttemptAt.is_(None)) | (WhatsappNotificacion.nextAttemptAt <= ahora),
+            )
+            .order_by(WhatsappNotificacion.createdAt.asc())
+            .first()
+        )
+        if not notificacion:
+            return False
+        _procesar_una(db, notificacion)
+        return True
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Error procesando notificacion especifica de WhatsApp. empresa_id=%s pedido_id=%s evento=%s",
+            empresa_id, pedido_id, evento,
+        )
+        return False

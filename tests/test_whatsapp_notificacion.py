@@ -316,6 +316,25 @@ def test_procesar_pendientes_reconcilia_antes_de_leer_cola(monkeypatch):
     assert llamadas[0] == ("reconciliar", whatsapp_service.RECONCILIAR_ENTREGAS_BATCH_SIZE)
 
 
+def test_procesar_notificacion_pendiente_procesa_evento_especifico(monkeypatch):
+    notificacion = _notificacion(empresa_id=3, pedido_id=100, entrega_id=1000)
+    notificacion.evento = whatsapp_service.EVENTO_ORDER_ACCEPTED
+    db = FakeSession({WhatsappNotificacion: [notificacion]})
+    llamadas = []
+
+    monkeypatch.setattr(whatsapp_service, "_procesar_una", lambda db_arg, notif: llamadas.append((db_arg, notif)))
+
+    procesada = whatsapp_service.procesar_notificacion_pendiente(
+        db,
+        empresa_id=3,
+        pedido_id=100,
+        evento=whatsapp_service.EVENTO_ORDER_ACCEPTED,
+    )
+
+    assert procesada is True
+    assert llamadas == [(db, notificacion)]
+
+
 def test_modulo_whatsapp_inactivo_no_envia_y_marca_skipped(monkeypatch):
     empresa = _empresa(3, "Flora")
     cliente = _cliente(10, empresa_id=3)

@@ -4721,6 +4721,12 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
     )
 
     db.commit()
+    whatsapp_service.procesar_notificacion_pendiente(
+        db,
+        empresa_id=int(pedido.empresaID),
+        pedido_id=int(pedido.idPedido),
+        evento=whatsapp_service.EVENTO_ORDER_ACCEPTED,
+    )
 
     return {
         "status": "ok",
@@ -4800,6 +4806,13 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
     )
     db.commit()
+    if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
+        whatsapp_service.procesar_notificacion_pendiente(
+            db,
+            empresa_id=int(pedido.empresaID),
+            pedido_id=int(pedido.idPedido),
+            evento=whatsapp_service.EVENTO_ORDER_ACCEPTED,
+        )
 
     return {
         "status": "ok",
