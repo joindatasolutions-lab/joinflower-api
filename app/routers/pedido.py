@@ -4714,6 +4714,11 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
             "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
         },
     )
+    whatsapp_service.encolar_notificacion_pedido_aceptado(
+        db,
+        empresa_id=int(pedido.empresaID),
+        pedido_id=int(pedido.idPedido),
+    )
 
     db.commit()
 
@@ -5438,6 +5443,11 @@ def cambiar_estado(
                 "numeroPedido": int(pedido.numeroPedido or 0),
                 "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
             },
+        )
+        whatsapp_service.encolar_notificacion_pedido_aceptado(
+            db,
+            empresa_id=int(pedido.empresaID),
+            pedido_id=int(pedido.idPedido),
         )
     elif str(estado_destino.nombreEstado or "").strip().upper() in {"CANCELADO", "RECHAZADO"}:
         cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(

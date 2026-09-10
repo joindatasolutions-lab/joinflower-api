@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
@@ -10,6 +11,8 @@ from app.models.cliente import Cliente
 from app.models.empresa import Empresa
 from app.models.entrega import Entrega
 from app.models.pedido import Pedido
+from app.models.pedidodetalle import PedidoDetalle
+from app.models.producto import Producto
 from app.models.whatsapp_notificacion import WhatsappNotificacion
 from app.schemas.domicilios import ESTADO_ENTREGADO
 from app.services import domicilio_service, whatsapp_client
@@ -18,6 +21,7 @@ logger = get_logger("whatsapp")
 
 CANAL_WHATSAPP = "WHATSAPP"
 EVENTO_ORDER_DELIVERED = "ORDER_DELIVERED"
+EVENTO_ORDER_ACCEPTED = "ORDER_ACCEPTED"
 MODULE_NOTIFICACIONES_WHATSAPP = "notificaciones_whatsapp"
 
 STATUS_PENDING = "PENDING"
@@ -28,6 +32,7 @@ STATUS_FAILED = "FAILED"
 STATUS_SKIPPED = "SKIPPED"
 
 TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedidoentregado")
+TEMPLATE_PEDIDO_ACEPTADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO", "pedidos_aceptado")
 TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
 
 
@@ -130,6 +135,58 @@ def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: i
         logger.exception(
             "No fue posible encolar notificacion de WhatsApp. empresa_id=%s pedido_id=%s entrega_id=%s",
             empresa_id, pedido_id, entrega_id,
+        )
+
+
+def encolar_notificacion_pedido_aceptado(db: Session, *, empresa_id: int, pedido_id: int) -> None:
+    """Crea la notificacion PENDING cuando un pedido pasa a APROBADO/PAGADO.
+
+    Usa la misma cola de WhatsApp existente e idempotencia por evento para no duplicar
+    mensajes si el pedido se intenta aprobar dos veces.
+    """
+    try:
+        if not empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id)):
+            logger.info(
+                "Notificacion WhatsApp de pedido aceptado no encolada: modulo inactivo. empresa_id=%s pedido_id=%s",
+                empresa_id, pedido_id,
+            )
+            return
+        entrega_id = db.execute(
+            text(
+                """
+                SELECT id_entrega
+                FROM petalops.entrega
+                WHERE empresa_id = :empresa_id
+                  AND pedido_id = :pedido_id
+                ORDER BY intentonumero DESC NULLS LAST, id_entrega DESC
+                LIMIT 1
+                """
+            ),
+            {"empresa_id": int(empresa_id), "pedido_id": int(pedido_id)},
+        ).scalar()
+        db.execute(
+            text(
+                """
+                INSERT INTO petalops.whatsapp_notificacion
+                    (empresa_id, pedido_id, entrega_id, canal, evento, status, attempts, next_attempt_at, created_at)
+                VALUES
+                    (:empresa_id, :pedido_id, :entrega_id, :canal, :evento, :status, 0, now(), now())
+                ON CONFLICT (empresa_id, pedido_id, evento, canal) DO NOTHING
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "pedido_id": int(pedido_id),
+                "entrega_id": int(entrega_id) if entrega_id is not None else None,
+                "canal": CANAL_WHATSAPP,
+                "evento": EVENTO_ORDER_ACCEPTED,
+                "status": STATUS_PENDING,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "No fue posible encolar notificacion de pedido aceptado. empresa_id=%s pedido_id=%s",
+            empresa_id, pedido_id,
         )
 
 
@@ -367,6 +424,124 @@ def procesar_webhook_meta(db: Session, payload: dict[str, Any]) -> dict[str, int
     }
 
 
+def _nombre_empresa(empresa: Empresa) -> str:
+    return str(empresa.nombreComercial or empresa.nombreEmpresa or "").strip() or "PetalOps"
+
+
+def _logo_empresa_url(db: Session, empresa_id: int) -> str | None:
+    try:
+        row = db.execute(
+            text("SELECT logo_url FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+            {"empresa_id": int(empresa_id)},
+        ).first()
+        logo_url = str(row[0] or "").strip() if row and row[0] else ""
+        return logo_url if logo_url.startswith("https://") else None
+    except Exception:
+        logger.warning("No fue posible consultar logo_url para WhatsApp. empresa_id=%s", empresa_id, exc_info=True)
+        return None
+
+
+def _estado_pedido_nombre(db: Session, estado_pedido_id: int | None) -> str:
+    if estado_pedido_id is None:
+        return ""
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT UPPER(TRIM(nombre_estado))
+                FROM petalops.estado_pedido
+                WHERE id_estado_pedido = :estado_pedido_id
+                LIMIT 1
+                """
+            ),
+            {"estado_pedido_id": int(estado_pedido_id)},
+        ).first()
+        return str(row[0] or "").strip().upper() if row else ""
+    except Exception:
+        logger.warning("No fue posible consultar estado del pedido para WhatsApp. estado_pedido_id=%s", estado_pedido_id, exc_info=True)
+        return ""
+
+
+def _cantidad_texto(value: Any) -> str:
+    cantidad = Decimal(str(value or 0))
+    if cantidad == cantidad.to_integral_value():
+        return str(int(cantidad))
+    return f"{cantidad.normalize():f}"
+
+
+def _valor_texto(value: Any) -> str:
+    valor = Decimal(str(value or 0)).quantize(Decimal("1"))
+    return str(int(valor))
+
+
+def _fecha_texto(value: datetime | None) -> str:
+    if not value:
+        return "No especificada"
+    if hasattr(value, "date"):
+        return value.date().isoformat()
+    return str(value)
+
+
+def _entrega_para_pedido(db: Session, pedido: Pedido, entrega_id: int | None = None) -> Entrega | None:
+    query = db.query(Entrega).filter(
+        Entrega.pedidoID == int(pedido.idPedido),
+        Entrega.empresaID == int(pedido.empresaID),
+    )
+    if entrega_id is not None:
+        query = query.filter(Entrega.idEntrega == int(entrega_id))
+    return query.order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc()).first()
+
+
+def _producto_resumen_pedido(db: Session, pedido: Pedido) -> str:
+    rows = (
+        db.query(PedidoDetalle, Producto)
+        .outerjoin(
+            Producto,
+            (Producto.idProducto == PedidoDetalle.productoID)
+            & (Producto.empresaID == PedidoDetalle.empresaID),
+        )
+        .filter(
+            PedidoDetalle.pedidoID == int(pedido.idPedido),
+            PedidoDetalle.empresaID == int(pedido.empresaID),
+        )
+        .order_by(PedidoDetalle.idPedidoDetalle.asc())
+        .all()
+    )
+    productos = []
+    for detalle, producto in rows:
+        nombre = str(getattr(producto, "nombreProducto", "") or "").strip()
+        if not nombre:
+            nombre = str(getattr(detalle, "observacionesPersonalizados", "") or "").strip()
+        if not nombre:
+            nombre = "Producto personalizado"
+        productos.append(f"{_cantidad_texto(detalle.cantidad)} x {nombre}")
+    return ", ".join(productos) if productos else "Pedido personalizado"
+
+
+def _parametros_pedido_aceptado(db: Session, *, pedido: Pedido, cliente: Cliente, empresa: Empresa) -> tuple[list[str], str | None]:
+    entrega = _entrega_para_pedido(db, pedido)
+    fecha_entrega = (
+        getattr(entrega, "reprogramadaPara", None)
+        or getattr(entrega, "fechaEntregaProgramada", None)
+        or getattr(entrega, "fechaEntrega", None)
+        or getattr(pedido, "fechaPedido", None)
+    )
+    direccion = str(getattr(entrega, "direccion", "") or "").strip() if entrega else ""
+    if not direccion:
+        direccion = "Recoger en tienda"
+    numero_pedido = str(getattr(pedido, "numeroPedido", "") or getattr(pedido, "idPedido", ""))
+    parametros = [
+        str(getattr(cliente, "nombreCompleto", "") or "Cliente").strip() or "Cliente",
+        numero_pedido,
+        _producto_resumen_pedido(db, pedido),
+        _fecha_texto(fecha_entrega),
+        _valor_texto(getattr(pedido, "totalNeto", None) or getattr(pedido, "totalBruto", None)),
+        direccion,
+        _nombre_empresa(empresa),
+    ]
+    return parametros, _logo_empresa_url(db, int(pedido.empresaID))
+
+
 def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
     ahora = datetime.utcnow()
 
@@ -438,22 +613,52 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         )
         return
 
-    # Defensa en profundidad: aunque hoy la unica forma de crear una fila aqui es el gancho
-    # dentro de _marcar_entregado_impl (ya validado), se re-verifica contra el estado real
-    # de la entrega antes de enviar -- nunca enviar por un pedido que no esta ENTREGADO.
-    entrega = (
-        db.query(Entrega)
-        .filter(Entrega.idEntrega == notificacion.entregaID, Entrega.empresaID == notificacion.empresaID)
-        .first()
-    )
-    if entrega is None or domicilio_service.estado_norm(entrega.estadoEntregaID) != ESTADO_ENTREGADO:
+    evento = str(notificacion.evento or EVENTO_ORDER_DELIVERED).strip().upper()
+    template_name = TEMPLATE_PEDIDO_ENTREGADO
+    parametros: list[str] = []
+    header_image_url = None
+
+    if evento == EVENTO_ORDER_ACCEPTED:
+        estado_pedido = _estado_pedido_nombre(db, getattr(pedido, "estadoPedidoID", None))
+        if estado_pedido not in {"APROBADO", "PAGADO"}:
+            logger.warning(
+                "Pedido ya no esta aprobado, no se envia aceptacion. notificacion_id=%s pedido_id=%s estado=%s",
+                notificacion.idNotificacion, notificacion.pedidoID, estado_pedido,
+            )
+            _marcar(
+                db, notificacion, status=STATUS_SKIPPED, errorCode="PEDIDO_NOT_APPROVED",
+                errorMessage="El pedido ya no esta en estado APROBADO/PAGADO", failedAt=ahora,
+            )
+            return
+        template_name = TEMPLATE_PEDIDO_ACEPTADO
+        parametros, header_image_url = _parametros_pedido_aceptado(
+            db,
+            pedido=pedido,
+            cliente=cliente,
+            empresa=empresa,
+        )
+    elif evento == EVENTO_ORDER_DELIVERED:
+        # Defensa en profundidad: se re-verifica contra el estado real de la entrega
+        # antes de enviar -- nunca enviar por un pedido que no esta ENTREGADO.
+        entrega = _entrega_para_pedido(db, pedido, int(notificacion.entregaID) if notificacion.entregaID else None)
+        if entrega is None or domicilio_service.estado_norm(entrega.estadoEntregaID) != ESTADO_ENTREGADO:
+            logger.warning(
+                "La entrega asociada no esta en estado ENTREGADO, no se envia. notificacion_id=%s entrega_id=%s",
+                notificacion.idNotificacion, notificacion.entregaID,
+            )
+            _marcar(
+                db, notificacion, status=STATUS_SKIPPED, errorCode="ENTREGA_NOT_DELIVERED",
+                errorMessage="La entrega asociada no esta en estado ENTREGADO", failedAt=ahora,
+            )
+            return
+    else:
         logger.warning(
-            "La entrega asociada no esta en estado ENTREGADO, no se envia. notificacion_id=%s entrega_id=%s",
-            notificacion.idNotificacion, notificacion.entregaID,
+            "Evento WhatsApp no soportado. notificacion_id=%s evento=%s",
+            notificacion.idNotificacion, evento,
         )
         _marcar(
-            db, notificacion, status=STATUS_SKIPPED, errorCode="ENTREGA_NOT_DELIVERED",
-            errorMessage="La entrega asociada no esta en estado ENTREGADO", failedAt=ahora,
+            db, notificacion, status=STATUS_SKIPPED, errorCode="UNSUPPORTED_EVENT",
+            errorMessage="Evento de WhatsApp no soportado", failedAt=ahora,
         )
         return
 
@@ -469,22 +674,19 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         )
         return
 
-    nombre_empresa = str(empresa.nombreComercial or empresa.nombreEmpresa or "").strip() or "PetalOps"
-    nombre_cliente = str(cliente.nombreCompleto or "").strip() or "Cliente"
-    numero_pedido = str(getattr(pedido, "numeroPedido", "") or pedido.idPedido)
-
     notificacion.clienteID = cliente.idCliente
     notificacion.telefonoDestino = telefono
-    notificacion.templateName = TEMPLATE_PEDIDO_ENTREGADO
+    notificacion.templateName = template_name
     notificacion.attempts = int(notificacion.attempts or 0) + 1
     db.commit()
 
     try:
         meta_message_id = whatsapp_client.enviar_plantilla(
             telefono_destino=telefono,
-            template_name=TEMPLATE_PEDIDO_ENTREGADO,
+            template_name=template_name,
             idioma=TEMPLATE_IDIOMA,
-            parametros=[nombre_empresa, nombre_cliente, numero_pedido],
+            parametros=parametros,
+            header_image_url=header_image_url,
         )
     except whatsapp_client.WhatsAppTransientError as exc:
         logger.warning(
@@ -522,9 +724,9 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         return
 
     logger.info(
-        "event=ORDER_DELIVERED tenant_id=%s pedido_id=%s cliente_id=%s notification_id=%s "
+        "event=%s tenant_id=%s pedido_id=%s cliente_id=%s notification_id=%s "
         "meta_message_id=%s status=SENT telefono=%s",
-        notificacion.empresaID, notificacion.pedidoID, cliente.idCliente, notificacion.idNotificacion,
+        evento, notificacion.empresaID, notificacion.pedidoID, cliente.idCliente, notificacion.idNotificacion,
         meta_message_id, _enmascarar_telefono(telefono),
     )
     _marcar(

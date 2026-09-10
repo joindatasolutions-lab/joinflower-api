@@ -13,6 +13,8 @@ from app.models.cliente import Cliente
 from app.models.empresa import Empresa
 from app.models.entrega import Entrega
 from app.models.pedido import Pedido
+from app.models.pedidodetalle import PedidoDetalle
+from app.models.producto import Producto
 from app.models.whatsapp_notificacion import WhatsappNotificacion
 from app.schemas.domicilios import ESTADO_ENTREGADO
 from app.services import whatsapp_client, whatsapp_service
@@ -26,19 +28,35 @@ class FakeQuery:
     def filter(self, *args, **kwargs):
         return self
 
+    def outerjoin(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
     def first(self):
         return self._results[0] if self._results else None
 
+    def all(self):
+        return self._results
+
 
 class FakeSession:
-    def __init__(self, por_modelo, whatsapp_notifications_enabled=True):
+    def __init__(self, por_modelo, whatsapp_notifications_enabled=True, execute_handler=None):
         self._por_modelo = por_modelo
         self.commits = 0
         self.rollbacks = 0
         self.whatsapp_notifications_enabled = whatsapp_notifications_enabled
+        self._execute_handler = execute_handler
 
-    def query(self, modelo):
-        return FakeQuery(self._por_modelo.get(modelo, []))
+    def query(self, *modelo):
+        key = modelo[0] if len(modelo) == 1 else modelo
+        return FakeQuery(self._por_modelo.get(key, []))
+
+    def execute(self, statement, params=None):
+        if self._execute_handler:
+            return self._execute_handler(statement, params or {})
+        raise AssertionError(f"execute no esperado: {statement}")
 
     def commit(self):
         self.commits += 1
@@ -601,9 +619,9 @@ def test_caso8b_entrega_no_encontrada_no_envia(monkeypatch):
     assert llamadas == []
 
 
-# --- Mensaje: variables solo de la base de datos, sin hardcode por tenant ---------------
+# --- Mensaje: plantilla sin variables --------------------------------------------------
 
-def test_mensaje_usa_nombre_real_de_la_empresa_sin_hardcode(monkeypatch):
+def test_mensaje_pedido_entregado_no_envia_variables(monkeypatch):
     empresa = _empresa(4, "La Fiore Casa de Flores")
     cliente = _cliente(20, empresa_id=4, nombre="Carlos")
     pedido = _pedido(200, empresa_id=4, cliente_id=20, numero_pedido=829)
@@ -621,4 +639,164 @@ def test_mensaje_usa_nombre_real_de_la_empresa_sin_hardcode(monkeypatch):
 
     whatsapp_service._procesar_una(db, notificacion)
 
-    assert capturado["parametros"] == ["La Fiore Casa de Flores", "Carlos", "829"]
+    assert capturado["template_name"] == whatsapp_service.TEMPLATE_PEDIDO_ENTREGADO
+    assert capturado["parametros"] == []
+
+
+def test_mensaje_pedido_aceptado_envia_variables_y_logo(monkeypatch):
+    empresa = _empresa(3, "FLORA")
+    cliente = _cliente(84, empresa_id=3, nombre="Andrea")
+    pedido = _pedido(987, empresa_id=3, cliente_id=84, numero_pedido=9988877)
+    pedido.estadoPedidoID = 2
+    pedido.totalNeto = 200000
+    entrega = _entrega(5000, empresa_id=3, estado=1)
+    entrega.pedidoID = 987
+    entrega.fechaEntregaProgramada = datetime(2026, 9, 10, 0, 0)
+    entrega.direccion = "CALLE 118 # 43 -46 TORRE 8 503"
+    detalle = PedidoDetalle(idPedidoDetalle=1, empresaID=3, pedidoID=987, cantidad=1)
+    producto = Producto(idProducto=10, empresaID=3, nombreProducto="Bouquet 12 Rosas Rojas")
+    notificacion = _notificacion(empresa_id=3, pedido_id=987, entrega_id=5000)
+    notificacion.evento = whatsapp_service.EVENTO_ORDER_ACCEPTED
+
+    def _execute(statement, params):
+        sql = str(statement)
+
+        class Result:
+            def __init__(self, value):
+                self.value = value
+
+            def first(self):
+                return (self.value,) if self.value is not None else None
+
+        if "FROM petalops.estado_pedido" in sql:
+            return Result("APROBADO")
+        if "SELECT logo_url" in sql:
+            return Result("https://ddy2osi8uorg4.cloudfront.net/tenants/flora/logos/logo.png")
+        raise AssertionError(f"execute no esperado: {sql}")
+
+    db = FakeSession(
+        {
+            Empresa: [empresa],
+            Cliente: [cliente],
+            Pedido: [pedido],
+            Entrega: [entrega],
+            (PedidoDetalle, Producto): [(detalle, producto)],
+        },
+        execute_handler=_execute,
+    )
+    capturado = {}
+
+    def _capturar(**kwargs):
+        capturado.update(kwargs)
+        return "wamid.ACCEPTED"
+
+    monkeypatch.setattr(whatsapp_client, "enviar_plantilla", _capturar)
+
+    whatsapp_service._procesar_una(db, notificacion)
+
+    assert notificacion.status == whatsapp_service.STATUS_SENT
+    assert capturado["template_name"] == whatsapp_service.TEMPLATE_PEDIDO_ACEPTADO
+    assert capturado["header_image_url"] == "https://ddy2osi8uorg4.cloudfront.net/tenants/flora/logos/logo.png"
+    assert capturado["parametros"] == [
+        "Andrea",
+        "9988877",
+        "1 x Bouquet 12 Rosas Rojas",
+        "2026-09-10",
+        "200000",
+        "CALLE 118 # 43 -46 TORRE 8 503",
+        "FLORA",
+    ]
+
+
+def test_mensaje_pedido_aceptado_no_envia_si_dejo_de_estar_aprobado(monkeypatch):
+    empresa = _empresa(3, "FLORA")
+    cliente = _cliente(84, empresa_id=3, nombre="Andrea")
+    pedido = _pedido(987, empresa_id=3, cliente_id=84, numero_pedido=9988877)
+    pedido.estadoPedidoID = 6
+    entrega = _entrega(5000, empresa_id=3, estado=1)
+    notificacion = _notificacion(empresa_id=3, pedido_id=987, entrega_id=5000)
+    notificacion.evento = whatsapp_service.EVENTO_ORDER_ACCEPTED
+
+    def _execute(statement, params):
+        class Result:
+            def first(self):
+                return ("CANCELADO",)
+
+        return Result()
+
+    db = _session_para(empresa, cliente, pedido, entrega)
+    db._execute_handler = _execute
+    llamadas = []
+    monkeypatch.setattr(whatsapp_client, "enviar_plantilla", lambda **kwargs: llamadas.append(kwargs))
+
+    whatsapp_service._procesar_una(db, notificacion)
+
+    assert notificacion.status == whatsapp_service.STATUS_SKIPPED
+    assert notificacion.errorCode == "PEDIDO_NOT_APPROVED"
+    assert llamadas == []
+
+
+def test_cliente_meta_omite_components_en_plantilla_sin_variables(monkeypatch):
+    monkeypatch.setattr(whatsapp_client, "META_ACCESS_TOKEN", "token-test")
+    monkeypatch.setattr(whatsapp_client, "META_PHONE_NUMBER_ID", "phone-id-test")
+    capturado = {}
+
+    class ResponseOk:
+        status_code = 200
+
+        def json(self):
+            return {"messages": [{"id": "wamid.OK"}]}
+
+    def _post(url, json, headers, timeout):
+        capturado.update({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return ResponseOk()
+
+    monkeypatch.setattr(whatsapp_client.httpx, "post", _post)
+
+    meta_id = whatsapp_client.enviar_plantilla(
+        telefono_destino="573001234567",
+        template_name="pedidoentregado",
+        idioma="es_CO",
+        parametros=[],
+    )
+
+    assert meta_id == "wamid.OK"
+    assert capturado["json"]["template"]["name"] == "pedidoentregado"
+    assert "components" not in capturado["json"]["template"]
+
+
+def test_cliente_meta_incluye_header_image_y_body_params(monkeypatch):
+    monkeypatch.setattr(whatsapp_client, "META_ACCESS_TOKEN", "token-test")
+    monkeypatch.setattr(whatsapp_client, "META_PHONE_NUMBER_ID", "phone-id-test")
+    capturado = {}
+
+    class ResponseOk:
+        status_code = 200
+
+        def json(self):
+            return {"messages": [{"id": "wamid.OK"}]}
+
+    def _post(url, json, headers, timeout):
+        capturado.update({"json": json})
+        return ResponseOk()
+
+    monkeypatch.setattr(whatsapp_client.httpx, "post", _post)
+
+    whatsapp_client.enviar_plantilla(
+        telefono_destino="573001234567",
+        template_name="pedidos_aceptado",
+        idioma="es_CO",
+        parametros=["Andrea", "9988877"],
+        header_image_url="https://cdn.test/logo.png",
+    )
+
+    components = capturado["json"]["template"]["components"]
+    assert components[0] == {
+        "type": "header",
+        "parameters": [{"type": "image", "image": {"link": "https://cdn.test/logo.png"}}],
+    }
+    assert components[1]["type"] == "body"
+    assert components[1]["parameters"] == [
+        {"type": "text", "text": "Andrea"},
+        {"type": "text", "text": "9988877"},
+    ]

@@ -33,7 +33,14 @@ def _safe_error_body(response: httpx.Response) -> str:
         return response.text[:500]
 
 
-def enviar_plantilla(*, telefono_destino: str, template_name: str, idioma: str, parametros: list[str]) -> str:
+def enviar_plantilla(
+    *,
+    telefono_destino: str,
+    template_name: str,
+    idioma: str,
+    parametros: list[str],
+    header_image_url: str | None = None,
+) -> str:
     """Envia un mensaje de plantilla (UTILITY) via Meta Cloud API.
 
     Retorna el meta_message_id (wamid) devuelto por Meta.
@@ -46,20 +53,33 @@ def enviar_plantilla(*, telefono_destino: str, template_name: str, idioma: str, 
         )
 
     url = f"{META_GRAPH_BASE_URL}/{META_API_VERSION}/{META_PHONE_NUMBER_ID}/messages"
+    template_payload = {
+        "name": template_name,
+        "language": {"code": idioma},
+    }
+    components = []
+    if header_image_url:
+        components.append(
+            {
+                "type": "header",
+                "parameters": [{"type": "image", "image": {"link": header_image_url}}],
+            }
+        )
+    if parametros:
+        components.append(
+            {
+                "type": "body",
+                "parameters": [{"type": "text", "text": parametro} for parametro in parametros],
+            }
+        )
+    if components:
+        template_payload["components"] = components
+
     payload = {
         "messaging_product": "whatsapp",
         "to": telefono_destino,
         "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": idioma},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [{"type": "text", "text": parametro} for parametro in parametros],
-                }
-            ],
-        },
+        "template": template_payload,
     }
     headers = {
         "Authorization": f"Bearer {META_ACCESS_TOKEN}",
