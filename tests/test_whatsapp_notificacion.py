@@ -659,6 +659,7 @@ def test_mensaje_pedido_entregado_envia_nombre_del_tenant(monkeypatch):
     whatsapp_service._procesar_una(db, notificacion)
 
     assert capturado["template_name"] == whatsapp_service.TEMPLATE_PEDIDO_ENTREGADO
+    assert capturado["idioma"] == "es"
     assert capturado["parametros"] == ["La Fiore Casa de Flores"]
 
 
@@ -715,6 +716,7 @@ def test_mensaje_pedido_aceptado_envia_variables_y_logo(monkeypatch):
 
     assert notificacion.status == whatsapp_service.STATUS_SENT
     assert capturado["template_name"] == whatsapp_service.TEMPLATE_PEDIDO_ACEPTADO
+    assert capturado["idioma"] == whatsapp_service.TEMPLATE_PEDIDO_ACEPTADO_IDIOMA
     assert capturado["header_image_url"] == "https://ddy2osi8uorg4.cloudfront.net/tenants/flora/logos/logo.png"
     assert capturado["parametros"] == [
         "Andrea",

@@ -34,6 +34,8 @@ STATUS_SKIPPED = "SKIPPED"
 TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedido_entregado2")
 TEMPLATE_PEDIDO_ACEPTADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO", "pedidos_aceptado")
 TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
+TEMPLATE_PEDIDO_ENTREGADO_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO_IDIOMA", "es")
+TEMPLATE_PEDIDO_ACEPTADO_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO_IDIOMA", TEMPLATE_IDIOMA)
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
@@ -615,6 +617,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
 
     evento = str(notificacion.evento or EVENTO_ORDER_DELIVERED).strip().upper()
     template_name = TEMPLATE_PEDIDO_ENTREGADO
+    template_idioma = TEMPLATE_PEDIDO_ENTREGADO_IDIOMA
     parametros: list[str] = []
     header_image_url = None
 
@@ -631,6 +634,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             )
             return
         template_name = TEMPLATE_PEDIDO_ACEPTADO
+        template_idioma = TEMPLATE_PEDIDO_ACEPTADO_IDIOMA
         parametros, header_image_url = _parametros_pedido_aceptado(
             db,
             pedido=pedido,
@@ -685,7 +689,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         meta_message_id = whatsapp_client.enviar_plantilla(
             telefono_destino=telefono,
             template_name=template_name,
-            idioma=TEMPLATE_IDIOMA,
+            idioma=template_idioma,
             parametros=parametros,
             header_image_url=header_image_url,
         )

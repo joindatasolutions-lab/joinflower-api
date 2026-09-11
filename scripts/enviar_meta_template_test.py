@@ -37,7 +37,10 @@ def main() -> int:
         "WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO",
         "pedido_entregado2",
     )
-    language = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
+    language = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO_IDIOMA") or os.getenv(
+        "WHATSAPP_TEMPLATE_IDIOMA",
+        "es",
+    )
     to = _normalize_phone(os.getenv("WHATSAPP_TEST_TO", DEFAULT_TO))
     parameters = _template_parameters(os.getenv("WHATSAPP_TEMPLATE_PARAMS"))
 
