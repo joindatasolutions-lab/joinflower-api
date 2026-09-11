@@ -640,7 +640,7 @@ def test_caso8b_entrega_no_encontrada_no_envia(monkeypatch):
 
 # --- Mensaje: plantilla sin variables --------------------------------------------------
 
-def test_mensaje_pedido_entregado_no_envia_variables(monkeypatch):
+def test_mensaje_pedido_entregado_envia_nombre_del_tenant(monkeypatch):
     empresa = _empresa(4, "La Fiore Casa de Flores")
     cliente = _cliente(20, empresa_id=4, nombre="Carlos")
     pedido = _pedido(200, empresa_id=4, cliente_id=20, numero_pedido=829)
@@ -659,7 +659,7 @@ def test_mensaje_pedido_entregado_no_envia_variables(monkeypatch):
     whatsapp_service._procesar_una(db, notificacion)
 
     assert capturado["template_name"] == whatsapp_service.TEMPLATE_PEDIDO_ENTREGADO
-    assert capturado["parametros"] == []
+    assert capturado["parametros"] == ["La Fiore Casa de Flores"]
 
 
 def test_mensaje_pedido_aceptado_envia_variables_y_logo(monkeypatch):
@@ -755,7 +755,7 @@ def test_mensaje_pedido_aceptado_no_envia_si_dejo_de_estar_aprobado(monkeypatch)
     assert llamadas == []
 
 
-def test_cliente_meta_omite_components_en_plantilla_sin_variables(monkeypatch):
+def test_cliente_meta_incluye_nombre_tenant_en_plantilla_entregado(monkeypatch):
     monkeypatch.setattr(whatsapp_client, "META_ACCESS_TOKEN", "token-test")
     monkeypatch.setattr(whatsapp_client, "META_PHONE_NUMBER_ID", "phone-id-test")
     capturado = {}
@@ -774,14 +774,19 @@ def test_cliente_meta_omite_components_en_plantilla_sin_variables(monkeypatch):
 
     meta_id = whatsapp_client.enviar_plantilla(
         telefono_destino="573001234567",
-        template_name="pedidoentregado",
+        template_name="pedido_entregado2",
         idioma="es_CO",
-        parametros=[],
+        parametros=["FLORA"],
     )
 
     assert meta_id == "wamid.OK"
-    assert capturado["json"]["template"]["name"] == "pedidoentregado"
-    assert "components" not in capturado["json"]["template"]
+    assert capturado["json"]["template"]["name"] == "pedido_entregado2"
+    assert capturado["json"]["template"]["components"] == [
+        {
+            "type": "body",
+            "parameters": [{"type": "text", "text": "FLORA"}],
+        }
+    ]
 
 
 def test_cliente_meta_incluye_header_image_y_body_params(monkeypatch):

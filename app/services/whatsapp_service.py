@@ -31,7 +31,7 @@ STATUS_READ = "READ"
 STATUS_FAILED = "FAILED"
 STATUS_SKIPPED = "SKIPPED"
 
-TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedidoentregado")
+TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedido_entregado2")
 TEMPLATE_PEDIDO_ACEPTADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO", "pedidos_aceptado")
 TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
 
@@ -651,6 +651,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
                 errorMessage="La entrega asociada no esta en estado ENTREGADO", failedAt=ahora,
             )
             return
+        parametros = [_nombre_empresa(empresa)]
     else:
         logger.warning(
             "Evento WhatsApp no soportado. notificacion_id=%s evento=%s",

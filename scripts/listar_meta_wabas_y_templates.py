@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_GRAPH_VERSION = "v25.0"
-DEFAULT_TEMPLATE_NAME = "pedidoentregado"
+DEFAULT_TEMPLATE_NAME = "pedido_entregado2"
 
 
 def _get(url: str, token: str) -> tuple[int, dict]:
