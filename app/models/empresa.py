@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String
+from sqlalchemy import Boolean, Column, BigInteger, String
 
 from app.database import Base
 
@@ -15,3 +15,4 @@ class Empresa(Base):
     nombreComercial = Column("nombre_comercial", String(180), nullable=True)
     slug = Column("slug", String(50), nullable=True)
     celular = Column("celular", String(40), nullable=True)
+    datosTransferenciaCatalogoActivo = Column("datos_transferencia_catalogo_activo", Boolean, nullable=False, default=False)

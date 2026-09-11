@@ -1,5 +1,7 @@
+from types import SimpleNamespace
+
 from app.routers import configuracion as configuracion_router
-from app.schemas.configuracion import CatalogoUpdateRequest
+from app.schemas.configuracion import CatalogoUpdateRequest, ConfiguracionCatalogoTransferenciaUpdateRequest
 
 
 class FakeResult:
@@ -63,8 +65,19 @@ class FakeDb:
             return FakeResult(rows=[])
         if "ORDER BY orden ASC, nombre ASC" in sql:
             return FakeResult(rows=self.rows["list"])
+        if "SELECT COALESCE(datos_transferencia_catalogo_activo" in sql:
+            return FakeResult(rows=[{"activo": False}])
         if "AND id_metodo_pago = :item_id" in sql and "SELECT" in sql:
             return FakeResult(rows=[self.rows["existing"]])
+        if "UPDATE petalops.empresa" in sql and "datos_transferencia_catalogo_activo" in sql:
+            return FakeResult(
+                rows=[
+                    {
+                        "id_empresa": params["empresa_id"],
+                        "datos_transferencia_catalogo_activo": params["activo"],
+                    }
+                ]
+            )
         if "INSERT INTO petalops.metodo_pago_catalogo" in sql:
             return FakeResult(
                 rows=[
@@ -99,6 +112,7 @@ def test_listar_metodos_pago_incluye_datos_transferencia():
     assert item.cuenta == "Nequi"
     assert item.numeroCuenta == "3001720582"
     assert item.activasCuentasCatalogo is True
+    assert resultado.datosTransferenciaCatalogoActivo is False
 
 
 def test_crear_metodo_pago_deja_cuenta_inactiva_por_defecto():
@@ -143,3 +157,30 @@ def test_actualizar_metodo_pago_permite_activar_datos_transferencia():
     assert resultado.cuenta == "Nequi"
     assert resultado.numeroCuenta == "3001720582"
     assert resultado.activasCuentasCatalogo is True
+
+
+def test_obtener_configuracion_catalogo_transferencia_default_inactivo():
+    db = FakeDb()
+
+    resultado = configuracion_router._obtener_datos_transferencia_catalogo_activo(db, empresa_id=3)
+
+    assert resultado is False
+
+
+def test_actualizar_configuracion_catalogo_transferencia_padre():
+    db = FakeDb()
+    payload = ConfiguracionCatalogoTransferenciaUpdateRequest(datosTransferenciaCatalogoActivo=True)
+
+    resultado = configuracion_router.actualizar_configuracion_catalogo_transferencia(
+        3,
+        payload,
+        db,
+        auth=SimpleNamespace(empresaID=3, rol="Admin", roles=[], esGlobalJoin=False),
+    )
+
+    update_call = next(call for call in db.calls if "UPDATE petalops.empresa" in call[0])
+    assert update_call[1]["empresa_id"] == 3
+    assert update_call[1]["activo"] is True
+    assert resultado.empresaID == 3
+    assert resultado.datosTransferenciaCatalogoActivo is True
+    assert db.commits == 1

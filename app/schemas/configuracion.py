@@ -16,6 +16,7 @@ class CatalogoItem(BaseModel):
 
 class CatalogoListResponse(BaseModel):
     items: list[CatalogoItem]
+    datosTransferenciaCatalogoActivo: bool | None = None
 
 
 class CatalogoCreateRequest(BaseModel):
@@ -65,3 +66,12 @@ class ConfiguracionAsignacionUpdateRequest(BaseModel):
     asignacionProduccionActiva: bool | None = None
     asignacionDomicilioActiva: bool | None = None
     autoAsignacionProduccionActiva: bool | None = None
+
+
+class ConfiguracionCatalogoTransferenciaResponse(BaseModel):
+    empresaID: int
+    datosTransferenciaCatalogoActivo: bool
+
+
+class ConfiguracionCatalogoTransferenciaUpdateRequest(BaseModel):
+    datosTransferenciaCatalogoActivo: bool

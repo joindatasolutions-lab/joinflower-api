@@ -13,6 +13,8 @@ from app.schemas.configuracion import (
     CatalogoItem,
     CatalogoListResponse,
     CatalogoUpdateRequest,
+    ConfiguracionCatalogoTransferenciaResponse,
+    ConfiguracionCatalogoTransferenciaUpdateRequest,
     ConfiguracionAsignacionResponse,
     ConfiguracionAsignacionUpdateRequest,
     MenuCampoItem,
@@ -73,6 +75,20 @@ def _catalogo_item_from_row(row, *, campo: str) -> CatalogoItem:
     return CatalogoItem(**base)
 
 
+def _obtener_datos_transferencia_catalogo_activo(db: Session, *, empresa_id: int) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT COALESCE(datos_transferencia_catalogo_activo, FALSE) AS activo
+            FROM petalops.empresa
+            WHERE id_empresa = :empresa_id
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).mappings().first()
+    return bool(row["activo"]) if row else False
+
+
 def _listar_catalogo(db: Session, *, empresa_id: int, campo: str) -> CatalogoListResponse:
     meta = _CAMPOS[campo]
     rows = db.execute(
@@ -84,9 +100,12 @@ def _listar_catalogo(db: Session, *, empresa_id: int, campo: str) -> CatalogoLis
         ),
         {"empresa_id": empresa_id},
     ).mappings().all()
-    return CatalogoListResponse(
-        items=[_catalogo_item_from_row(row, campo=campo) for row in rows]
-    )
+    response = {"items": [_catalogo_item_from_row(row, campo=campo) for row in rows]}
+    if campo == "pedido_metodos_pago":
+        response["datosTransferenciaCatalogoActivo"] = _obtener_datos_transferencia_catalogo_activo(
+            db, empresa_id=empresa_id
+        )
+    return CatalogoListResponse(**response)
 
 
 def _crear_catalogo_item(
@@ -287,6 +306,56 @@ def actualizar_metodo_pago(
     assert_same_empresa(auth, empresa_id)
     return _actualizar_catalogo_item(
         db, empresa_id=empresa_id, campo="pedido_metodos_pago", item_id=item_id, payload=payload
+    )
+
+
+@router.get(
+    "/empresas/{empresa_id}/catalogo-transferencia",
+    response_model=ConfiguracionCatalogoTransferenciaResponse,
+)
+def obtener_configuracion_catalogo_transferencia(
+    empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)
+):
+    assert_same_empresa(auth, empresa_id)
+    return ConfiguracionCatalogoTransferenciaResponse(
+        empresaID=empresa_id,
+        datosTransferenciaCatalogoActivo=_obtener_datos_transferencia_catalogo_activo(
+            db, empresa_id=empresa_id
+        ),
+    )
+
+
+@router.put(
+    "/empresas/{empresa_id}/catalogo-transferencia",
+    response_model=ConfiguracionCatalogoTransferenciaResponse,
+)
+def actualizar_configuracion_catalogo_transferencia(
+    empresa_id: int,
+    payload: ConfiguracionCatalogoTransferenciaUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(require_admin_role),
+):
+    assert_same_empresa(auth, empresa_id)
+    updated = db.execute(
+        text(
+            """
+            UPDATE petalops.empresa
+            SET datos_transferencia_catalogo_activo = :activo
+            WHERE id_empresa = :empresa_id
+            RETURNING id_empresa, datos_transferencia_catalogo_activo
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "activo": bool(payload.datosTransferenciaCatalogoActivo),
+        },
+    ).mappings().first()
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Empresa no encontrada")
+    db.commit()
+    return ConfiguracionCatalogoTransferenciaResponse(
+        empresaID=int(updated["id_empresa"]),
+        datosTransferenciaCatalogoActivo=bool(updated["datos_transferencia_catalogo_activo"]),
     )
 
 
