@@ -36,34 +36,69 @@ def _next_orden(db: Session, *, tabla: str, empresa_id: int) -> int:
     return int(row[0] or 1) if row else 1
 
 
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _catalogo_select_sql(meta: dict, campo: str) -> str:
+    extra = ""
+    if campo == "pedido_metodos_pago":
+        extra = ", cuenta, numero_cuenta, activas_cuentas_catalogo"
+    return f"""
+            SELECT {meta["id_columna"]} AS id, codigo, nombre, orden, activo{extra}
+            FROM petalops.{meta["tabla"]}
+            WHERE empresa_id = :empresa_id
+            """
+
+
+def _catalogo_item_from_row(row, *, campo: str) -> CatalogoItem:
+    base = {
+        "id": int(row["id"]),
+        "codigo": str(row["codigo"]),
+        "nombre": str(row["nombre"]),
+        "orden": int(row["orden"] or 0),
+        "activo": bool(row["activo"]),
+    }
+    if campo == "pedido_metodos_pago":
+        base.update(
+            {
+                "cuenta": (str(row["cuenta"]).strip() if row.get("cuenta") else None),
+                "numeroCuenta": (str(row["numero_cuenta"]).strip() if row.get("numero_cuenta") else None),
+                "activasCuentasCatalogo": bool(row["activas_cuentas_catalogo"]),
+            }
+        )
+    return CatalogoItem(**base)
+
+
 def _listar_catalogo(db: Session, *, empresa_id: int, campo: str) -> CatalogoListResponse:
     meta = _CAMPOS[campo]
     rows = db.execute(
         text(
             f"""
-            SELECT {meta["id_columna"]} AS id, codigo, nombre, orden, activo
-            FROM petalops.{meta["tabla"]}
-            WHERE empresa_id = :empresa_id
+            {_catalogo_select_sql(meta, campo)}
             ORDER BY orden ASC, nombre ASC
             """
         ),
         {"empresa_id": empresa_id},
     ).mappings().all()
     return CatalogoListResponse(
-        items=[
-            CatalogoItem(
-                id=int(row["id"]),
-                codigo=str(row["codigo"]),
-                nombre=str(row["nombre"]),
-                orden=int(row["orden"] or 0),
-                activo=bool(row["activo"]),
-            )
-            for row in rows
-        ]
+        items=[_catalogo_item_from_row(row, campo=campo) for row in rows]
     )
 
 
-def _crear_catalogo_item(db: Session, *, empresa_id: int, campo: str, nombre: str) -> CatalogoItem:
+def _crear_catalogo_item(
+    db: Session,
+    *,
+    empresa_id: int,
+    campo: str,
+    nombre: str,
+    cuenta: str | None = None,
+    numero_cuenta: str | None = None,
+    activas_cuentas_catalogo: bool | None = None,
+) -> CatalogoItem:
     meta = _CAMPOS[campo]
     nombre = nombre.strip()
     if not nombre:
@@ -83,24 +118,38 @@ def _crear_catalogo_item(db: Session, *, empresa_id: int, campo: str, nombre: st
 
     orden = _next_orden(db, tabla=meta["tabla"], empresa_id=empresa_id)
     codigo = _catalog_code_from_name(nombre)
+    params = {"empresa_id": empresa_id, "codigo": codigo, "nombre": nombre, "orden": orden}
+    extra_columns = ""
+    extra_values = ""
+    if campo == "pedido_metodos_pago":
+        extra_columns = ", cuenta, numero_cuenta, activas_cuentas_catalogo"
+        extra_values = ", :cuenta, :numero_cuenta, :activas_cuentas_catalogo"
+        params.update(
+            {
+                "cuenta": _clean_optional_text(cuenta),
+                "numero_cuenta": _clean_optional_text(numero_cuenta),
+                "activas_cuentas_catalogo": bool(activas_cuentas_catalogo),
+            }
+        )
     inserted = db.execute(
         text(
             f"""
             INSERT INTO petalops.{meta["tabla"]} (
-                empresa_id, codigo, nombre, orden, activo, created_at, updated_at
+                empresa_id, codigo, nombre, orden, activo{extra_columns}, created_at, updated_at
             ) VALUES (
-                :empresa_id, :codigo, :nombre, :orden, TRUE, NOW(), NOW()
+                :empresa_id, :codigo, :nombre, :orden, TRUE{extra_values}, NOW(), NOW()
             )
-            RETURNING {meta["id_columna"]}
+            RETURNING {meta["id_columna"]} AS id, codigo, nombre, orden, activo
+                      {', cuenta, numero_cuenta, activas_cuentas_catalogo' if campo == 'pedido_metodos_pago' else ''}
             """
         ),
-        {"empresa_id": empresa_id, "codigo": codigo, "nombre": nombre, "orden": orden},
-    ).first()
+        params,
+    ).mappings().first()
 
     _sync_empresa_menu_opciones(db, empresa_id=empresa_id, campo=campo)
     db.commit()
 
-    return CatalogoItem(id=int(inserted[0]), codigo=codigo, nombre=nombre, orden=orden, activo=True)
+    return _catalogo_item_from_row(inserted, campo=campo)
 
 
 def _actualizar_catalogo_item(
@@ -110,9 +159,8 @@ def _actualizar_catalogo_item(
     row = db.execute(
         text(
             f"""
-            SELECT {meta["id_columna"]} AS id, codigo, nombre, orden, activo
-            FROM petalops.{meta["tabla"]}
-            WHERE empresa_id = :empresa_id AND {meta["id_columna"]} = :item_id
+            {_catalogo_select_sql(meta, campo)}
+              AND {meta["id_columna"]} = :item_id
             """
         ),
         {"empresa_id": empresa_id, "item_id": item_id},
@@ -125,6 +173,18 @@ def _actualizar_catalogo_item(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="El nombre es obligatorio")
     nuevo_orden = row["orden"] if payload.orden is None else payload.orden
     nuevo_activo = row["activo"] if payload.activo is None else payload.activo
+    cuenta = row.get("cuenta") if campo == "pedido_metodos_pago" else None
+    numero_cuenta = row.get("numero_cuenta") if campo == "pedido_metodos_pago" else None
+    activas_cuentas_catalogo = (
+        row.get("activas_cuentas_catalogo") if campo == "pedido_metodos_pago" else None
+    )
+    if campo == "pedido_metodos_pago":
+        if payload.cuenta is not None:
+            cuenta = _clean_optional_text(payload.cuenta)
+        if payload.numeroCuenta is not None:
+            numero_cuenta = _clean_optional_text(payload.numeroCuenta)
+        if payload.activasCuentasCatalogo is not None:
+            activas_cuentas_catalogo = bool(payload.activasCuentasCatalogo)
 
     if payload.nombre is not None and nuevo_nombre.lower() != str(row["nombre"]).lower():
         duplicado = db.execute(
@@ -140,29 +200,58 @@ def _actualizar_catalogo_item(
         if duplicado:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un elemento con ese nombre")
 
+    extra_set = ""
+    params = {
+        "nombre": nuevo_nombre,
+        "orden": nuevo_orden,
+        "activo": bool(nuevo_activo),
+        "empresa_id": empresa_id,
+        "item_id": item_id,
+    }
+    if campo == "pedido_metodos_pago":
+        extra_set = """
+                , cuenta = :cuenta,
+                  numero_cuenta = :numero_cuenta,
+                  activas_cuentas_catalogo = :activas_cuentas_catalogo
+        """
+        params.update(
+            {
+                "cuenta": cuenta,
+                "numero_cuenta": numero_cuenta,
+                "activas_cuentas_catalogo": bool(activas_cuentas_catalogo),
+            }
+        )
+
     db.execute(
         text(
             f"""
             UPDATE petalops.{meta["tabla"]}
-            SET nombre = :nombre, orden = :orden, activo = :activo, updated_at = NOW()
+            SET nombre = :nombre, orden = :orden, activo = :activo{extra_set}, updated_at = NOW()
             WHERE empresa_id = :empresa_id AND {meta["id_columna"]} = :item_id
             """
         ),
-        {
-            "nombre": nuevo_nombre,
-            "orden": nuevo_orden,
-            "activo": bool(nuevo_activo),
-            "empresa_id": empresa_id,
-            "item_id": item_id,
-        },
+        params,
     )
 
     _sync_empresa_menu_opciones(db, empresa_id=empresa_id, campo=campo)
     db.commit()
 
-    return CatalogoItem(
-        id=item_id, codigo=str(row["codigo"]), nombre=nuevo_nombre, orden=int(nuevo_orden), activo=bool(nuevo_activo)
-    )
+    response = {
+        "id": item_id,
+        "codigo": str(row["codigo"]),
+        "nombre": nuevo_nombre,
+        "orden": int(nuevo_orden),
+        "activo": bool(nuevo_activo),
+    }
+    if campo == "pedido_metodos_pago":
+        response.update(
+            {
+                "cuenta": cuenta,
+                "numeroCuenta": numero_cuenta,
+                "activasCuentasCatalogo": bool(activas_cuentas_catalogo),
+            }
+        )
+    return CatalogoItem(**response)
 
 
 @router.get("/empresas/{empresa_id}/metodos-pago", response_model=CatalogoListResponse)
@@ -176,7 +265,15 @@ def crear_metodo_pago(
     empresa_id: int, payload: CatalogoCreateRequest, db: Session = Depends(get_db), auth=Depends(require_admin_role)
 ):
     assert_same_empresa(auth, empresa_id)
-    return _crear_catalogo_item(db, empresa_id=empresa_id, campo="pedido_metodos_pago", nombre=payload.nombre)
+    return _crear_catalogo_item(
+        db,
+        empresa_id=empresa_id,
+        campo="pedido_metodos_pago",
+        nombre=payload.nombre,
+        cuenta=payload.cuenta,
+        numero_cuenta=payload.numeroCuenta,
+        activas_cuentas_catalogo=payload.activasCuentasCatalogo,
+    )
 
 
 @router.patch("/empresas/{empresa_id}/metodos-pago/{item_id}", response_model=CatalogoItem)

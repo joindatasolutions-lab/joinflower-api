@@ -9,6 +9,9 @@ class CatalogoItem(BaseModel):
     nombre: str
     orden: int
     activo: bool
+    cuenta: str | None = None
+    numeroCuenta: str | None = None
+    activasCuentasCatalogo: bool | None = None
 
 
 class CatalogoListResponse(BaseModel):
@@ -17,12 +20,18 @@ class CatalogoListResponse(BaseModel):
 
 class CatalogoCreateRequest(BaseModel):
     nombre: str = Field(min_length=1, max_length=120)
+    cuenta: str | None = Field(default=None, max_length=120)
+    numeroCuenta: str | None = Field(default=None, max_length=80)
+    activasCuentasCatalogo: bool | None = None
 
 
 class CatalogoUpdateRequest(BaseModel):
     nombre: str | None = Field(default=None, min_length=1, max_length=120)
     orden: int | None = None
     activo: bool | None = None
+    cuenta: str | None = Field(default=None, max_length=120)
+    numeroCuenta: str | None = Field(default=None, max_length=80)
+    activasCuentasCatalogo: bool | None = None
 
 
 class MenuCampoItem(BaseModel):

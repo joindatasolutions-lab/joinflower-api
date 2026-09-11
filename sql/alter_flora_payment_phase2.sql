@@ -7,9 +7,17 @@ CREATE TABLE IF NOT EXISTS petalops.metodo_pago_catalogo (
     nombre VARCHAR(120) NOT NULL,
     orden INTEGER NOT NULL DEFAULT 0,
     activo BOOLEAN NOT NULL DEFAULT TRUE,
+    cuenta VARCHAR(120),
+    numero_cuenta VARCHAR(80),
+    activas_cuentas_catalogo BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NULL
 );
+
+ALTER TABLE petalops.metodo_pago_catalogo
+    ADD COLUMN IF NOT EXISTS cuenta VARCHAR(120),
+    ADD COLUMN IF NOT EXISTS numero_cuenta VARCHAR(80),
+    ADD COLUMN IF NOT EXISTS activas_cuentas_catalogo BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_metodo_pago_catalogo_empresa_codigo
     ON petalops.metodo_pago_catalogo (empresa_id, codigo);
