@@ -2458,7 +2458,7 @@ def _crear_empresa_core(
                 user_id=admin_user_id,
                 empresa_id=next_empresa_id,
                 plain_password=str(payload.adminPassword),
-                actor_user_id=int(_auth.userID),
+                actor_user_id=int(auth.userID),
             )
 
         assets_result = ensure_tenant_asset_structure(slug, required=True)
