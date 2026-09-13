@@ -2466,6 +2466,14 @@ def asignar_domiciliario(
         estado_nuevo=estado_nuevo,
         extra={"domiciliarioID": int(entrega.domiciliarioID) if entrega.domiciliarioID is not None else None},
     )
+    if entrega.domiciliarioID is not None:
+        whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+            db,
+            empresa_id=int(entrega.empresaID),
+            pedido_id=int(entrega.pedidoID),
+            entrega_id=int(entrega.idEntrega),
+            domiciliario_id=int(entrega.domiciliarioID),
+        )
     db.commit()
 
     return DomicilioActionResponse(
@@ -2569,6 +2577,13 @@ def tomar_entrega(
             estado_nuevo=ESTADO_ASIGNADO,
             extra={"domiciliarioID": int(domiciliario_id)},
         )
+        whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+            db,
+            empresa_id=int(entrega.empresaID),
+            pedido_id=int(entrega.pedidoID),
+            entrega_id=int(entrega.idEntrega),
+            domiciliario_id=int(domiciliario_id),
+        )
         db.commit()
         return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_ASIGNADO)
 
@@ -2594,6 +2609,13 @@ def tomar_entrega(
         estado_anterior=actual,
         estado_nuevo=ESTADO_ASIGNADO,
         extra={"entregaAnteriorID": int(entrega.idEntrega), "domiciliarioID": int(domiciliario_id)},
+    )
+    whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+        db,
+        empresa_id=int(next_entrega.empresaID),
+        pedido_id=int(next_entrega.pedidoID),
+        entrega_id=int(next_entrega.idEntrega),
+        domiciliario_id=int(domiciliario_id),
     )
     db.commit()
     return DomicilioActionResponse(status="ok", idEntrega=int(next_entrega.idEntrega), estado=ESTADO_ASIGNADO)
@@ -3299,6 +3321,13 @@ def autoasignar_pedido(
         estado_anterior=estado_anterior,
         estado_nuevo=ESTADO_ASIGNADO,
         extra={"pedidoID": int(pedido_id), "usuarioTomadorID": int(auth.userID)},
+    )
+    whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+        db,
+        empresa_id=int(entrega.empresaID),
+        pedido_id=int(pedido.idPedido),
+        entrega_id=int(entrega.idEntrega),
+        domiciliario_id=int(domiciliario_id),
     )
     db.commit()
 

@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -8,12 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.models.cliente import Cliente
+from app.models.domiciliario import Domiciliario
 from app.models.empresa import Empresa
+from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.models.entrega import Entrega
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.whatsapp_notificacion import WhatsappNotificacion
+from app.models.usuario import Usuario
 from app.schemas.domicilios import ESTADO_ENTREGADO
 from app.services import domicilio_service, whatsapp_client
 
@@ -22,6 +26,7 @@ logger = get_logger("whatsapp")
 CANAL_WHATSAPP = "WHATSAPP"
 EVENTO_ORDER_DELIVERED = "ORDER_DELIVERED"
 EVENTO_ORDER_ACCEPTED = "ORDER_ACCEPTED"
+EVENTO_COURIER_ASSIGNED_PREFIX = "COURIER_ASSIGNED"
 MODULE_NOTIFICACIONES_WHATSAPP = "notificaciones_whatsapp"
 
 STATUS_PENDING = "PENDING"
@@ -33,9 +38,15 @@ STATUS_SKIPPED = "SKIPPED"
 
 TEMPLATE_PEDIDO_ENTREGADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO", "pedido_entregado2")
 TEMPLATE_PEDIDO_ACEPTADO = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO", "pedidos_aceptado")
+TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO = os.getenv(
+    "WHATSAPP_TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO", "nuevo_pedido_domiciliario"
+)
 TEMPLATE_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_IDIOMA", "es_CO")
 TEMPLATE_PEDIDO_ENTREGADO_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ENTREGADO_IDIOMA", "es")
 TEMPLATE_PEDIDO_ACEPTADO_IDIOMA = os.getenv("WHATSAPP_TEMPLATE_PEDIDO_ACEPTADO_IDIOMA", TEMPLATE_IDIOMA)
+TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO_IDIOMA = os.getenv(
+    "WHATSAPP_TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO_IDIOMA", "es_CO"
+)
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
@@ -99,6 +110,63 @@ def empresa_tiene_notificaciones_whatsapp_activas(db: Session, empresa_id: int) 
     return bool(row and row[0])
 
 
+def _tipo_evento(evento: str | None) -> str:
+    normalizado = str(evento or "").strip().upper()
+    if normalizado.startswith(f"{EVENTO_COURIER_ASSIGNED_PREFIX}:"):
+        return EVENTO_COURIER_ASSIGNED_PREFIX
+    return normalizado
+
+
+@contextmanager
+def _savepoint_si_disponible(db: Session):
+    begin_nested = getattr(db, "begin_nested", None)
+    if not callable(begin_nested):
+        yield
+        return
+    with begin_nested():
+        yield
+
+
+def _evento_notificacion_activo(db: Session, empresa_id: int, evento: str) -> bool:
+    defaults = {
+        EVENTO_ORDER_ACCEPTED: True,
+        EVENTO_ORDER_DELIVERED: True,
+        EVENTO_COURIER_ASSIGNED_PREFIX: False,
+    }
+    tipo_evento = _tipo_evento(evento)
+    override = getattr(db, "whatsapp_notification_actions", None)
+    if isinstance(override, dict) and tipo_evento in override:
+        return bool(override[tipo_evento])
+    if not hasattr(db, "query"):
+        return defaults.get(tipo_evento, False)
+
+    try:
+        with _savepoint_si_disponible(db):
+            config = (
+                db.query(EmpresaConfiguracionAsignacion)
+                .filter(EmpresaConfiguracionAsignacion.empresaID == int(empresa_id))
+                .first()
+            )
+    except Exception:
+        logger.warning(
+            "No fue posible consultar la accion WhatsApp; se usa el valor seguro predeterminado. "
+            "empresa_id=%s evento=%s",
+            empresa_id,
+            tipo_evento,
+            exc_info=True,
+        )
+        return defaults.get(tipo_evento, False)
+    if config is None:
+        return defaults.get(tipo_evento, False)
+    campos = {
+        EVENTO_ORDER_ACCEPTED: "notificacionPedidoAceptadoActiva",
+        EVENTO_ORDER_DELIVERED: "notificacionPedidoEntregadoActiva",
+        EVENTO_COURIER_ASSIGNED_PREFIX: "notificacionNuevoPedidoDomiciliarioActiva",
+    }
+    campo = campos.get(tipo_evento)
+    return bool(getattr(config, campo, defaults.get(tipo_evento, False))) if campo else False
+
+
 def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: int, entrega_id: int) -> None:
     """Crea la notificacion PENDING para este pedido si no existe ya una (idempotente por
     la restriccion UNIQUE de la tabla, no por esta verificacion en Python).
@@ -108,7 +176,10 @@ def encolar_notificacion_entregado(db: Session, *, empresa_id: int, pedido_id: i
     Nunca lanza: un fallo aqui no debe romper la confirmacion de entrega.
     """
     try:
-        if not empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id)):
+        if not (
+            empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id))
+            and _evento_notificacion_activo(db, int(empresa_id), EVENTO_ORDER_DELIVERED)
+        ):
             logger.info(
                 "Notificacion WhatsApp no encolada: modulo inactivo. empresa_id=%s pedido_id=%s entrega_id=%s",
                 empresa_id, pedido_id, entrega_id,
@@ -147,7 +218,10 @@ def encolar_notificacion_pedido_aceptado(db: Session, *, empresa_id: int, pedido
     mensajes si el pedido se intenta aprobar dos veces.
     """
     try:
-        if not empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id)):
+        if not (
+            empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id))
+            and _evento_notificacion_activo(db, int(empresa_id), EVENTO_ORDER_ACCEPTED)
+        ):
             logger.info(
                 "Notificacion WhatsApp de pedido aceptado no encolada: modulo inactivo. empresa_id=%s pedido_id=%s",
                 empresa_id, pedido_id,
@@ -192,6 +266,71 @@ def encolar_notificacion_pedido_aceptado(db: Session, *, empresa_id: int, pedido
         )
 
 
+def encolar_notificacion_nuevo_pedido_domiciliario(
+    db: Session,
+    *,
+    empresa_id: int,
+    pedido_id: int,
+    entrega_id: int,
+    domiciliario_id: int,
+) -> None:
+    """Encola una notificacion por pedido y usuario destinatario.
+
+    El usuario forma parte del evento para permitir una notificacion nueva al reasignar
+    el pedido a otra persona, manteniendo idempotencia para el mismo domiciliario.
+    """
+    try:
+        if not (
+            empresa_tiene_notificaciones_whatsapp_activas(db, int(empresa_id))
+            and _evento_notificacion_activo(db, int(empresa_id), EVENTO_COURIER_ASSIGNED_PREFIX)
+        ):
+            return
+        domiciliario = (
+            db.query(Domiciliario)
+            .filter(
+                Domiciliario.idDomiciliario == int(domiciliario_id),
+                Domiciliario.empresaID == int(empresa_id),
+            )
+            .first()
+        )
+        usuario_id = int(domiciliario.usuarioID) if domiciliario and domiciliario.usuarioID is not None else None
+        if usuario_id is None:
+            logger.info(
+                "Notificacion a domiciliario no encolada: empleado sin usuario. empresa_id=%s domiciliario_id=%s",
+                empresa_id, domiciliario_id,
+            )
+            return
+        evento = f"{EVENTO_COURIER_ASSIGNED_PREFIX}:{usuario_id}"
+        with _savepoint_si_disponible(db):
+            db.execute(
+                text(
+                    """
+                    INSERT INTO petalops.whatsapp_notificacion
+                        (empresa_id, pedido_id, entrega_id, usuario_destino_id, canal, evento,
+                         status, attempts, next_attempt_at, created_at)
+                    VALUES
+                        (:empresa_id, :pedido_id, :entrega_id, :usuario_id, :canal, :evento,
+                         :status, 0, now(), now())
+                    ON CONFLICT (empresa_id, pedido_id, evento, canal) DO NOTHING
+                    """
+                ),
+                {
+                    "empresa_id": int(empresa_id),
+                    "pedido_id": int(pedido_id),
+                    "entrega_id": int(entrega_id),
+                    "usuario_id": usuario_id,
+                    "canal": CANAL_WHATSAPP,
+                    "evento": evento,
+                    "status": STATUS_PENDING,
+                },
+            )
+    except Exception:
+        logger.exception(
+            "No fue posible encolar notificacion a domiciliario. empresa_id=%s pedido_id=%s entrega_id=%s",
+            empresa_id, pedido_id, entrega_id,
+        )
+
+
 def reconciliar_entregas_entregadas_sin_notificacion(
     db: Session,
     *,
@@ -231,7 +370,10 @@ def reconciliar_entregas_entregadas_sin_notificacion(
                       ON em.empresa_id = e.empresa_id
                      AND em.modulo = :modulo
                      AND coalesce(em.activo, 0) = 1
+                    LEFT JOIN petalops.empresa_configuracion_asignacion eca
+                      ON eca.empresa_id = e.empresa_id
                     WHERE e.pedido_id IS NOT NULL
+                      AND coalesce(eca.notificacion_pedido_entregado_activa, TRUE) = TRUE
                       AND lower(coalesce(ee.codigo, ee.nombre, '')) = :estado_entregado
                       AND greatest(
                             coalesce(e.updatedat, timestamp '1970-01-01'),
@@ -295,7 +437,11 @@ def _normalizar_telefono_whatsapp(cliente: Cliente) -> str | None:
         telefono = str(getattr(cliente, "telefono", "") or "").strip()
         crudo = f"{indicativo}{telefono}"
 
-    solo_digitos = "".join(ch for ch in crudo if ch.isdigit())
+    return _normalizar_telefono_valor(crudo)
+
+
+def _normalizar_telefono_valor(crudo: str | None) -> str | None:
+    solo_digitos = "".join(ch for ch in str(crudo or "") if ch.isdigit())
     if not solo_digitos:
         return None
 
@@ -546,7 +692,6 @@ def _parametros_pedido_aceptado(db: Session, *, pedido: Pedido, cliente: Cliente
 
 def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
     ahora = datetime.utcnow()
-
     pedido = (
         db.query(Pedido)
         .filter(Pedido.idPedido == notificacion.pedidoID, Pedido.empresaID == notificacion.empresaID)
@@ -562,24 +707,6 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             errorMessage="Pedido no encontrado en la empresa esperada", failedAt=ahora,
         )
         return
-
-    cliente = (
-        db.query(Cliente)
-        .filter(Cliente.idCliente == pedido.clienteID, Cliente.empresaID == notificacion.empresaID)
-        .first()
-    )
-    if cliente is None:
-        logger.error(
-            "SECURITY_TENANT_MISMATCH: cliente del pedido no pertenece a la empresa esperada. "
-            "notificacion_id=%s empresa_id=%s pedido_id=%s cliente_id=%s",
-            notificacion.idNotificacion, notificacion.empresaID, notificacion.pedidoID, pedido.clienteID,
-        )
-        _marcar(
-            db, notificacion, status=STATUS_FAILED, errorCode="SECURITY_TENANT_MISMATCH",
-            errorMessage="Cliente no pertenece a la empresa del pedido", failedAt=ahora,
-        )
-        return
-
     empresa = db.query(Empresa).filter(Empresa.idEmpresa == notificacion.empresaID).first()
     if empresa is None:
         _marcar(
@@ -587,7 +714,6 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             errorMessage="Empresa no encontrada", failedAt=ahora,
         )
         return
-
     if not empresa_tiene_notificaciones_whatsapp_activas(db, int(notificacion.empresaID)):
         logger.info(
             "Notificacion WhatsApp omitida: modulo inactivo. notificacion_id=%s empresa_id=%s pedido_id=%s",
@@ -598,30 +724,128 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             errorMessage="Modulo notificaciones_whatsapp inactivo para la empresa", failedAt=ahora,
         )
         return
-
-    # Verificacion final explicita (no assert): defensa en profundidad. Ver
-    # pendientes/Mejoras/whatsapp-notificacion-entregado-decisiones.md -- ni pedido, ni
-    # entrega, ni cliente tienen FK real en la base de datos, esta verificacion en codigo
-    # es la unica proteccion real contra un cruce de datos entre empresas.
-    if not (int(pedido.empresaID) == int(cliente.empresaID) == int(empresa.idEmpresa) == int(notificacion.empresaID)):
-        logger.error(
-            "SECURITY_TENANT_MISMATCH detectado en verificacion final. notificacion_id=%s "
-            "pedido.empresa_id=%s cliente.empresa_id=%s empresa.id=%s",
-            notificacion.idNotificacion, pedido.empresaID, cliente.empresaID, empresa.idEmpresa,
-        )
+    evento = str(notificacion.evento or EVENTO_ORDER_DELIVERED).strip().upper()
+    tipo_evento = _tipo_evento(evento)
+    if not _evento_notificacion_activo(db, int(notificacion.empresaID), tipo_evento):
         _marcar(
-            db, notificacion, status=STATUS_FAILED, errorCode="SECURITY_TENANT_MISMATCH",
-            errorMessage="Verificacion final de aislamiento entre empresas fallida", failedAt=ahora,
+            db, notificacion, status=STATUS_SKIPPED, errorCode="WHATSAPP_ACTION_DISABLED",
+            errorMessage="Accion de notificacion inactiva para la empresa", failedAt=ahora,
         )
         return
 
-    evento = str(notificacion.evento or EVENTO_ORDER_DELIVERED).strip().upper()
     template_name = TEMPLATE_PEDIDO_ENTREGADO
     template_idioma = TEMPLATE_PEDIDO_ENTREGADO_IDIOMA
     parametros: list[str] = []
     header_image_url = None
+    telefono: str | None = None
+    destinatario_tipo = "cliente"
+    destinatario_id: int | None = None
 
-    if evento == EVENTO_ORDER_ACCEPTED:
+    if tipo_evento == EVENTO_COURIER_ASSIGNED_PREFIX:
+        usuario_id = getattr(notificacion, "usuarioDestinoID", None)
+        if usuario_id is None:
+            try:
+                usuario_id = int(evento.split(":", 1)[1])
+            except (IndexError, TypeError, ValueError):
+                usuario_id = None
+        usuario = (
+            db.query(Usuario)
+            .filter(
+                Usuario.idusuario == usuario_id,
+                Usuario.empresaID == notificacion.empresaID,
+            )
+            .first()
+            if usuario_id is not None
+            else None
+        )
+        entrega = _entrega_para_pedido(
+            db, pedido, int(notificacion.entregaID) if notificacion.entregaID else None
+        )
+        domiciliario = None
+        if entrega is not None and entrega.domiciliarioID is not None and usuario_id is not None:
+            domiciliario = (
+                db.query(Domiciliario)
+                .filter(
+                    Domiciliario.idDomiciliario == int(entrega.domiciliarioID),
+                    Domiciliario.empresaID == int(notificacion.empresaID),
+                    Domiciliario.usuarioID == int(usuario_id),
+                )
+                .first()
+            )
+        if usuario is None or str(usuario.estado or "").strip().lower() != "activo":
+            _marcar(
+                db, notificacion, status=STATUS_SKIPPED, errorCode="COURIER_USER_UNAVAILABLE",
+                errorMessage="Usuario domiciliario inexistente o inactivo", failedAt=ahora,
+            )
+            return
+        if entrega is None or domiciliario is None:
+            _marcar(
+                db, notificacion, status=STATUS_SKIPPED, errorCode="COURIER_REASSIGNED",
+                errorMessage="La entrega ya no esta asignada a este domiciliario", failedAt=ahora,
+            )
+            return
+        if not (
+            int(pedido.empresaID)
+            == int(usuario.empresaID)
+            == int(domiciliario.empresaID)
+            == int(empresa.idEmpresa)
+            == int(notificacion.empresaID)
+        ):
+            _marcar(
+                db, notificacion, status=STATUS_FAILED, errorCode="SECURITY_TENANT_MISMATCH",
+                errorMessage="Cruce de empresa en destinatario domiciliario", failedAt=ahora,
+            )
+            return
+        telefono = _normalizar_telefono_valor(usuario.celular)
+        if not telefono:
+            _marcar(
+                db, notificacion, status=STATUS_SKIPPED, errorCode="SKIPPED_INVALID_PHONE",
+                errorMessage="Celular del usuario domiciliario invalido o ausente", failedAt=ahora,
+            )
+            return
+        template_name = TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO
+        template_idioma = TEMPLATE_NUEVO_PEDIDO_DOMICILIARIO_IDIOMA
+        numero_pedido = str(getattr(pedido, "numeroPedido", "") or getattr(pedido, "idPedido", ""))
+        direccion = str(getattr(entrega, "direccion", "") or "").strip() or "Consultar en PetalOps"
+        parametros = [
+            str(usuario.nombre or "Domiciliario").strip() or "Domiciliario",
+            _nombre_empresa(empresa),
+            numero_pedido,
+            direccion,
+        ]
+        notificacion.usuarioDestinoID = int(usuario.idusuario)
+        destinatario_tipo = "usuario"
+        destinatario_id = int(usuario.idusuario)
+    else:
+        cliente = (
+            db.query(Cliente)
+            .filter(Cliente.idCliente == pedido.clienteID, Cliente.empresaID == notificacion.empresaID)
+            .first()
+        )
+        if cliente is None:
+            logger.error(
+                "SECURITY_TENANT_MISMATCH: cliente del pedido no pertenece a la empresa esperada. "
+                "notificacion_id=%s empresa_id=%s pedido_id=%s cliente_id=%s",
+                notificacion.idNotificacion, notificacion.empresaID, notificacion.pedidoID, pedido.clienteID,
+            )
+            _marcar(
+                db, notificacion, status=STATUS_FAILED, errorCode="SECURITY_TENANT_MISMATCH",
+                errorMessage="Cliente no pertenece a la empresa del pedido", failedAt=ahora,
+            )
+            return
+        if not (
+            int(pedido.empresaID) == int(cliente.empresaID) == int(empresa.idEmpresa) == int(notificacion.empresaID)
+        ):
+            _marcar(
+                db, notificacion, status=STATUS_FAILED, errorCode="SECURITY_TENANT_MISMATCH",
+                errorMessage="Verificacion final de aislamiento entre empresas fallida", failedAt=ahora,
+            )
+            return
+        destinatario_id = int(cliente.idCliente)
+        notificacion.clienteID = destinatario_id
+        telefono = _normalizar_telefono_whatsapp(cliente)
+
+    if tipo_evento == EVENTO_ORDER_ACCEPTED:
         estado_pedido = _estado_pedido_nombre(db, getattr(pedido, "estadoPedidoID", None))
         if estado_pedido not in {"APROBADO", "PAGADO"}:
             logger.warning(
@@ -641,7 +865,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             cliente=cliente,
             empresa=empresa,
         )
-    elif evento == EVENTO_ORDER_DELIVERED:
+    elif tipo_evento == EVENTO_ORDER_DELIVERED:
         # Defensa en profundidad: se re-verifica contra el estado real de la entrega
         # antes de enviar -- nunca enviar por un pedido que no esta ENTREGADO.
         entrega = _entrega_para_pedido(db, pedido, int(notificacion.entregaID) if notificacion.entregaID else None)
@@ -656,7 +880,7 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             )
             return
         parametros = [_nombre_empresa(empresa)]
-    else:
+    elif tipo_evento != EVENTO_COURIER_ASSIGNED_PREFIX:
         logger.warning(
             "Evento WhatsApp no soportado. notificacion_id=%s evento=%s",
             notificacion.idNotificacion, evento,
@@ -666,20 +890,17 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
             errorMessage="Evento de WhatsApp no soportado", failedAt=ahora,
         )
         return
-
-    telefono = _normalizar_telefono_whatsapp(cliente)
     if not telefono:
         logger.info(
             "SKIPPED_INVALID_PHONE. notificacion_id=%s empresa_id=%s pedido_id=%s cliente_id=%s",
-            notificacion.idNotificacion, notificacion.empresaID, notificacion.pedidoID, cliente.idCliente,
+            notificacion.idNotificacion, notificacion.empresaID, notificacion.pedidoID, destinatario_id,
         )
         _marcar(
             db, notificacion, status=STATUS_SKIPPED, errorCode="SKIPPED_INVALID_PHONE",
-            errorMessage="Telefono del cliente invalido o ausente", failedAt=ahora, clienteID=cliente.idCliente,
+            errorMessage="Telefono del destinatario invalido o ausente", failedAt=ahora,
         )
         return
 
-    notificacion.clienteID = cliente.idCliente
     notificacion.telefonoDestino = telefono
     notificacion.templateName = template_name
     notificacion.attempts = int(notificacion.attempts or 0) + 1
@@ -729,9 +950,10 @@ def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
         return
 
     logger.info(
-        "event=%s tenant_id=%s pedido_id=%s cliente_id=%s notification_id=%s "
+        "event=%s tenant_id=%s pedido_id=%s destinatario_tipo=%s destinatario_id=%s notification_id=%s "
         "meta_message_id=%s status=SENT telefono=%s",
-        evento, notificacion.empresaID, notificacion.pedidoID, cliente.idCliente, notificacion.idNotificacion,
+        evento, notificacion.empresaID, notificacion.pedidoID, destinatario_tipo, destinatario_id,
+        notificacion.idNotificacion,
         meta_message_id, _enmascarar_telefono(telefono),
     )
     _marcar(

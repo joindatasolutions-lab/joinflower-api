@@ -61,6 +61,9 @@ def test_obtener_configuracion_sin_fila_retorna_ambos_flags_activos_por_defecto(
     assert resultado.empresaID == 999
     assert resultado.asignacionProduccionActiva is True
     assert resultado.asignacionDomicilioActiva is True
+    assert resultado.notificacionPedidoAceptadoActiva is True
+    assert resultado.notificacionPedidoEntregadoActiva is True
+    assert resultado.notificacionNuevoPedidoDomiciliarioActiva is False
 
 
 def test_obtener_configuracion_con_fila_desactivada_respeta_el_apagado():
@@ -148,3 +151,24 @@ def test_actualizar_configuracion_solo_cambia_campo_enviado():
 
     assert config.asignacionProduccionActiva is False
     assert config.asignacionDomicilioActiva is True  # no enviado, se conserva
+
+
+def test_actualizar_configuracion_activa_notificacion_domiciliario_sin_tocar_clientes():
+    config = EmpresaConfiguracionAsignacion(
+        empresaID=999,
+        asignacionProduccionActiva=True,
+        asignacionDomicilioActiva=True,
+        notificacionPedidoAceptadoActiva=True,
+        notificacionPedidoEntregadoActiva=True,
+        notificacionNuevoPedidoDomiciliarioActiva=False,
+    )
+    db = FakeSession(config=config)
+    payload = ConfiguracionAsignacionUpdateRequest(notificacionNuevoPedidoDomiciliarioActiva=True)
+
+    resultado = configuracion_router.actualizar_configuracion_asignacion(
+        empresa_id=999, payload=payload, db=db, auth=FAKE_AUTH_TENANT
+    )
+
+    assert resultado.notificacionNuevoPedidoDomiciliarioActiva is True
+    assert resultado.notificacionPedidoAceptadoActiva is True
+    assert resultado.notificacionPedidoEntregadoActiva is True

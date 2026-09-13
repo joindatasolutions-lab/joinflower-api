@@ -13,5 +13,10 @@ class EmpresaConfiguracionAsignacion(Base):
     asignacionProduccionActiva = Column("asignacion_produccion_activa", Boolean, nullable=False, default=False)
     asignacionDomicilioActiva = Column("asignacion_domicilio_activa", Boolean, nullable=False, default=False)
     autoAsignacionProduccionActiva = Column("auto_asignacion_produccion_activa", Boolean, nullable=False, default=True)
+    notificacionPedidoAceptadoActiva = Column("notificacion_pedido_aceptado_activa", Boolean, nullable=False, default=True)
+    notificacionPedidoEntregadoActiva = Column("notificacion_pedido_entregado_activa", Boolean, nullable=False, default=True)
+    notificacionNuevoPedidoDomiciliarioActiva = Column(
+        "notificacion_nuevo_pedido_domiciliario_activa", Boolean, nullable=False, default=False
+    )
     createdAt = Column("created_at", DateTime, nullable=False)
     updatedAt = Column("updated_at", DateTime, nullable=False)

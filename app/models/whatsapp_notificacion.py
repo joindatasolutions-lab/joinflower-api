@@ -11,6 +11,7 @@ class WhatsappNotificacion(Base):
     empresaID = Column("empresa_id", BigInteger, nullable=False, index=True)
     pedidoID = Column("pedido_id", BigInteger, nullable=False, index=True)
     clienteID = Column("cliente_id", BigInteger, nullable=True)
+    usuarioDestinoID = Column("usuario_destino_id", BigInteger, nullable=True, index=True)
     entregaID = Column("entrega_id", BigInteger, nullable=True)
     canal = Column("canal", String(20), nullable=False)
     evento = Column("evento", String(40), nullable=False)

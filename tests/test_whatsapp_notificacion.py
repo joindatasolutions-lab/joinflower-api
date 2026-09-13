@@ -11,11 +11,13 @@ import pytest
 
 from app.models.cliente import Cliente
 from app.models.empresa import Empresa
+from app.models.domiciliario import Domiciliario
 from app.models.entrega import Entrega
 from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.producto import Producto
 from app.models.whatsapp_notificacion import WhatsappNotificacion
+from app.models.usuario import Usuario
 from app.schemas.domicilios import ESTADO_ENTREGADO
 from app.services import whatsapp_client, whatsapp_service
 from app.jobs import whatsapp_dispatch_job
@@ -81,6 +83,21 @@ def _entrega(id_entrega, empresa_id, estado=4):
     return Entrega(idEntrega=id_entrega, empresaID=empresa_id, estadoEntregaID=estado)
 
 
+def _notificacion_domiciliario(empresa_id, pedido_id, entrega_id, usuario_id):
+    return WhatsappNotificacion(
+        idNotificacion=2,
+        empresaID=empresa_id,
+        pedidoID=pedido_id,
+        entregaID=entrega_id,
+        usuarioDestinoID=usuario_id,
+        canal=whatsapp_service.CANAL_WHATSAPP,
+        evento=f"{whatsapp_service.EVENTO_COURIER_ASSIGNED_PREFIX}:{usuario_id}",
+        status=whatsapp_service.STATUS_PENDING,
+        attempts=0,
+        createdAt=datetime.utcnow(),
+    )
+
+
 def _notificacion(empresa_id, pedido_id, entrega_id):
     return WhatsappNotificacion(
         idNotificacion=1,
@@ -139,6 +156,77 @@ def test_caso2_lafiore_pedido_y_cliente_lafiore_envia(monkeypatch):
 
     assert notificacion.status == whatsapp_service.STATUS_SENT
     assert notificacion.metaMessageId == "wamid.LAFIORE456"
+
+
+def test_notificacion_nuevo_pedido_se_envia_al_celular_del_usuario_domiciliario(monkeypatch):
+    empresa = _empresa(3, "PetalOps")
+    pedido = _pedido(100, empresa_id=3, cliente_id=10, numero_pedido=98313)
+    entrega = _entrega(1000, empresa_id=3, estado=2)
+    entrega.pedidoID = 100
+    entrega.domiciliarioID = 50
+    entrega.direccion = "Calle 10 # 20-30"
+    usuario = Usuario(
+        idusuario=70,
+        empresaID=3,
+        nombre="Domiciliario Prueba",
+        celular="3007252222",
+        estado="Activo",
+    )
+    domiciliario = Domiciliario(
+        idDomiciliario=50,
+        empresaID=3,
+        usuarioID=70,
+        nombre="Domiciliario Prueba",
+        cargo="Domiciliario",
+    )
+    notificacion = _notificacion_domiciliario(3, 100, 1000, 70)
+    db = FakeSession(
+        {
+            Empresa: [empresa],
+            Pedido: [pedido],
+            Entrega: [entrega],
+            Usuario: [usuario],
+            Domiciliario: [domiciliario],
+        },
+        whatsapp_notifications_enabled=True,
+    )
+    db.whatsapp_notification_actions = {
+        whatsapp_service.EVENTO_COURIER_ASSIGNED_PREFIX: True,
+    }
+    capturado = {}
+    monkeypatch.setattr(
+        whatsapp_client,
+        "enviar_plantilla",
+        lambda **kwargs: capturado.update(kwargs) or "wamid.COURIER123",
+    )
+
+    whatsapp_service._procesar_una(db, notificacion)
+
+    assert notificacion.status == whatsapp_service.STATUS_SENT
+    assert capturado["telefono_destino"] == "573007252222"
+    assert capturado["template_name"] == "nuevo_pedido_domiciliario"
+    assert capturado["idioma"] == "es_CO"
+    assert capturado["parametros"] == [
+        "Domiciliario Prueba",
+        "PetalOps",
+        "98313",
+        "Calle 10 # 20-30",
+    ]
+
+
+def test_notificacion_domiciliario_inactiva_no_se_encola():
+    class DummyDb:
+        whatsapp_notifications_enabled = True
+        whatsapp_notification_actions = {
+            whatsapp_service.EVENTO_COURIER_ASSIGNED_PREFIX: False,
+        }
+
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("No debe insertar")
+
+    whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+        DummyDb(), empresa_id=3, pedido_id=100, entrega_id=1000, domiciliario_id=50
+    )
 
 
 # --- Caso 3: Pedido FLORA + cliente Lafiore: NO envia, SECURITY_TENANT_MISMATCH ----------

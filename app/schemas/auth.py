@@ -129,6 +129,7 @@ class UserCreateRequest(BaseModel):
     login: str = Field(min_length=3)
     password: str = Field(min_length=6)
     email: str | None = None
+    celular: str | None = Field(default=None, max_length=40)
     rolID: int
     sucursalID: int
     estado: str | None = "Activo"
@@ -143,6 +144,7 @@ class UserCreateResponse(BaseModel):
     sucursalID: int
     login: str
     email: str
+    celular: str | None = None
     rolID: int
     rolesIDs: list[int] = Field(default_factory=list)
     roles: list[RoleAssignmentItem] = Field(default_factory=list)
@@ -157,6 +159,7 @@ class UserListItem(BaseModel):
     nombre: str
     login: str
     email: str
+    celular: str | None = None
     rolID: int
     rol: str
     rolesIDs: list[int] = Field(default_factory=list)
@@ -181,6 +184,7 @@ class UserDetailResponse(BaseModel):
     nombre: str
     login: str
     email: str
+    celular: str | None = None
     rolID: int
     rol: str
     rolesIDs: list[int] = Field(default_factory=list)
@@ -200,6 +204,7 @@ class UserUpdateRequest(BaseModel):
     nombre: str = Field(min_length=3)
     login: str = Field(min_length=3)
     email: str | None = None
+    celular: str | None = Field(default=None, max_length=40)
     password: str | None = Field(default=None, min_length=6)
     rolID: int
     sucursalID: int
