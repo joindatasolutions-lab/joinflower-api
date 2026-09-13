@@ -8,6 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.extension import _rate_limit_exceeded_handler
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.core.cors import LOCAL_ORIGIN_REGEX, get_allowed_origins
 from app.core.exceptions import register_exception_handlers
 from app.core.logger import configure_logging
 from app.core.middleware import RequestContextMiddleware
@@ -32,26 +33,7 @@ from app.routers import webhooks
 
 configure_logging()
 
-ALLOWED_ORIGINS = [
-    "http://127.0.0.1:5500",
-    "http://localhost:5500",
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
-    "http://127.0.0.1:5175",
-    "http://127.0.0.1:3000",
-    "http://localhost:3000",
-    "https://petalops.joindata.com.co",
-    "https://adminpetalops.joindata.com.co",
-    "https://domiapp.joindata.com.co",
-]
-
-extra_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
-    if origin.strip()
-]
-if extra_origins:
-    ALLOWED_ORIGINS.extend(extra_origins)
+ALLOWED_ORIGINS = get_allowed_origins()
 
 _produccion_autoassign_job = ProduccionAutoassignJob()
 _whatsapp_dispatch_job = WhatsAppDispatchJob()
@@ -90,7 +72,7 @@ app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=LOCAL_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

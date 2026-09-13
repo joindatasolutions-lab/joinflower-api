@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.cors import add_cors_headers_for_origin
 from app.core.logger import get_logger
 
 
@@ -53,6 +54,12 @@ def _error_payload(code: str, message: str, module: str, request_id: str) -> dic
     }
 
 
+def _json_error_response(request: Request, status_code: int, content: dict) -> JSONResponse:
+    response = JSONResponse(status_code=status_code, content=content)
+    add_cors_headers_for_origin(response.headers, request.headers.get("origin"))
+    return response
+
+
 def _validation_message(errors: list[dict]) -> str:
     if not errors:
         return "Datos de entrada invalidos"
@@ -72,7 +79,8 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_api_error(request: Request, exc: APIError):
         logger = get_logger(exc.module)
         logger.warning("APIError [%s]: %s", exc.code, exc.message)
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=exc.status_code,
             content=_error_payload(exc.code, exc.message, exc.module, _request_id(request)),
         )
@@ -94,7 +102,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         else:
             logger.warning("HTTPException [%s]: %s", code, message)
 
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=exc.status_code,
             content=_error_payload(code, message, module, _request_id(request)),
         )
@@ -104,7 +113,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         module = _module_from_path(request.url.path)
         logger = get_logger(module)
         logger.warning("Request validation error: %s", exc.errors())
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=422,
             content=_error_payload(
                 "VALIDATION_ERROR",
@@ -119,7 +129,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         module = _module_from_path(request.url.path)
         logger = get_logger(module)
         logger.warning("Validation error: %s", exc.errors())
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=422,
             content=_error_payload(
                 "VALIDATION_ERROR",
@@ -134,7 +145,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         module = _module_from_path(request.url.path)
         logger = get_logger(module)
         logger.error("Database error", exc_info=True)
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=500,
             content=_error_payload(
                 "DATABASE_ERROR",
@@ -149,7 +161,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         module = _module_from_path(request.url.path)
         logger = get_logger(module)
         logger.error("Unhandled error", exc_info=True)
-        return JSONResponse(
+        return _json_error_response(
+            request,
             status_code=500,
             content=_error_payload(
                 "INTERNAL_SERVER_ERROR",
