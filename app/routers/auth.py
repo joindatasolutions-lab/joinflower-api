@@ -915,11 +915,11 @@ def _sync_employee_profile_for_operational_user(
                     """
                     INSERT INTO petalops.empleado (
                         empresa_id, sucursal_id, nombre_empleado, cargo, activo,
-                        created_at, updated_at, usuario, email, usuario_id, is_superuser
+                        created_at, updated_at, usuario, email, telefono, usuario_id, is_superuser
                     )
                     VALUES (
                         :empresa_id, :sucursal_id, :nombre_empleado, :cargo, :activo,
-                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :usuario_id, 0
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :usuario_login, :email, :telefono, :usuario_id, 0
                     )
                     RETURNING id_empleado
                     """
@@ -932,6 +932,7 @@ def _sync_employee_profile_for_operational_user(
                     "activo": activo_flag,
                     "usuario_login": str(usuario.login or "").strip(),
                     "email": employee_email,
+                    "telefono": str(usuario.celular or "").strip() or None,
                     "usuario_id": int(usuario.idusuario),
                 },
             ).scalar()
@@ -948,7 +949,8 @@ def _sync_employee_profile_for_operational_user(
                     activo = :activo,
                     updated_at = CURRENT_TIMESTAMP,
                     usuario = :usuario_login,
-                    email = :email
+                    email = :email,
+                    telefono = :telefono
                 WHERE id_empleado = :empleado_id
                 """
             ),
@@ -961,6 +963,7 @@ def _sync_employee_profile_for_operational_user(
                 "activo": activo_flag,
                 "usuario_login": str(usuario.login or "").strip(),
                 "email": employee_email,
+                "telefono": str(usuario.celular or "").strip() or None,
             },
         )
         db.execute(
@@ -1422,6 +1425,7 @@ def crear_usuario(
             nombre=payload.nombre.strip(),
             login=login,
             email=email,
+            celular=str(payload.celular or "").strip() or None,
             passwordHash=pwd_context.hash(payload.password),
             rolID=int(payload.rolID),
             estado=estado,
@@ -1483,6 +1487,7 @@ def crear_usuario(
             sucursalID=int(usuario.sucursalID),
             login=str(usuario.login),
             email=str(usuario.email),
+            celular=str(usuario.celular or "") or None,
             rolID=int(usuario.rolID),
             rolesIDs=assigned_role_ids,
             roles=[
@@ -1533,6 +1538,7 @@ def listar_usuarios(
             Usuario.nombre.ilike(term)
             | Usuario.login.ilike(term)
             | Usuario.email.ilike(term)
+            | Usuario.celular.ilike(term)
         )
 
     rows = query.order_by(Usuario.empresaID.asc(), Usuario.sucursalID.asc(), Usuario.idusuario.desc()).all()
@@ -1546,6 +1552,7 @@ def listar_usuarios(
             nombre=str(usuario.nombre or ""),
             login=str(usuario.login or ""),
             email=str(usuario.email or ""),
+            celular=str(usuario.celular or "") or None,
             rolID=int(usuario.rolID),
             rol=str(rol.nombreRol or ""),
             rolesIDs=[int(item.rolID) for item in assigned_roles],
@@ -1574,6 +1581,7 @@ def obtener_usuario(
         nombre=str(usuario.nombre or ""),
         login=str(usuario.login or ""),
         email=str(usuario.email or ""),
+        celular=str(usuario.celular or "") or None,
         rolID=int(usuario.rolID),
         rol=rol_nombre,
         rolesIDs=[int(item.rolID) for item in assigned_roles],
@@ -1714,6 +1722,7 @@ def actualizar_usuario(
         usuario.nombre = payload.nombre.strip()
         usuario.login = login
         usuario.email = email
+        usuario.celular = str(payload.celular or "").strip() or None
         usuario.rolID = int(payload.rolID)
         usuario.sucursalID = int(payload.sucursalID)
         usuario.estado = estado
@@ -1778,6 +1787,7 @@ def actualizar_usuario(
             sucursalID=int(usuario.sucursalID),
             login=str(usuario.login),
             email=str(usuario.email),
+            celular=str(usuario.celular or "") or None,
             rolID=int(usuario.rolID),
             rolesIDs=assigned_role_ids,
             roles=[
@@ -1845,6 +1855,7 @@ def actualizar_estado_usuario(
         sucursalID=int(usuario.sucursalID),
         login=str(usuario.login),
         email=str(usuario.email),
+        celular=str(usuario.celular or "") or None,
         rolID=int(usuario.rolID),
         rolesIDs=[int(item.rolID) for item in assigned_roles],
         roles=assigned_roles,

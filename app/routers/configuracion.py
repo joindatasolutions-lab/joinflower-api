@@ -528,6 +528,11 @@ def obtener_configuracion_asignacion(
         asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else True,
         asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else True,
         autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva) if config else True,
+        notificacionPedidoAceptadoActiva=bool(config.notificacionPedidoAceptadoActiva) if config else True,
+        notificacionPedidoEntregadoActiva=bool(config.notificacionPedidoEntregadoActiva) if config else True,
+        notificacionNuevoPedidoDomiciliarioActiva=(
+            bool(config.notificacionNuevoPedidoDomiciliarioActiva) if config else False
+        ),
     )
 
 
@@ -552,6 +557,9 @@ def actualizar_configuracion_asignacion(
             asignacionProduccionActiva=True,
             asignacionDomicilioActiva=True,
             autoAsignacionProduccionActiva=True,
+            notificacionPedidoAceptadoActiva=True,
+            notificacionPedidoEntregadoActiva=True,
+            notificacionNuevoPedidoDomiciliarioActiva=False,
             createdAt=datetime.now(timezone.utc),
             updatedAt=datetime.now(timezone.utc),
         )
@@ -563,6 +571,12 @@ def actualizar_configuracion_asignacion(
         config.asignacionDomicilioActiva = payload.asignacionDomicilioActiva
     if payload.autoAsignacionProduccionActiva is not None:
         config.autoAsignacionProduccionActiva = payload.autoAsignacionProduccionActiva
+    if payload.notificacionPedidoAceptadoActiva is not None:
+        config.notificacionPedidoAceptadoActiva = payload.notificacionPedidoAceptadoActiva
+    if payload.notificacionPedidoEntregadoActiva is not None:
+        config.notificacionPedidoEntregadoActiva = payload.notificacionPedidoEntregadoActiva
+    if payload.notificacionNuevoPedidoDomiciliarioActiva is not None:
+        config.notificacionNuevoPedidoDomiciliarioActiva = payload.notificacionNuevoPedidoDomiciliarioActiva
     config.updatedAt = datetime.now(timezone.utc)
 
     db.commit()
@@ -573,4 +587,7 @@ def actualizar_configuracion_asignacion(
         asignacionProduccionActiva=bool(config.asignacionProduccionActiva),
         asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva),
         autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva),
+        notificacionPedidoAceptadoActiva=bool(config.notificacionPedidoAceptadoActiva),
+        notificacionPedidoEntregadoActiva=bool(config.notificacionPedidoEntregadoActiva),
+        notificacionNuevoPedidoDomiciliarioActiva=bool(config.notificacionNuevoPedidoDomiciliarioActiva),
     )

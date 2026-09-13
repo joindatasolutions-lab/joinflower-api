@@ -14,6 +14,7 @@ class Usuario(Base):
     nombre = Column("nombre", String(150), nullable=False)
     login = Column("login", String(80), nullable=False, unique=True, index=True)
     email = Column("email", String(180), nullable=False)
+    celular = Column("celular", String(40), nullable=True)
     passwordHash = Column("passwordhash", String(255), nullable=False)
     rolID = Column("rolid", BigInteger, ForeignKey("petalops.rol.id_rol"), nullable=True, index=True)
     estado = Column("estado", String(20), nullable=False, default="activo")

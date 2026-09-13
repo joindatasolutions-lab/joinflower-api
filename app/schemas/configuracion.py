@@ -60,12 +60,18 @@ class ConfiguracionAsignacionResponse(BaseModel):
     asignacionProduccionActiva: bool
     asignacionDomicilioActiva: bool
     autoAsignacionProduccionActiva: bool
+    notificacionPedidoAceptadoActiva: bool
+    notificacionPedidoEntregadoActiva: bool
+    notificacionNuevoPedidoDomiciliarioActiva: bool
 
 
 class ConfiguracionAsignacionUpdateRequest(BaseModel):
     asignacionProduccionActiva: bool | None = None
     asignacionDomicilioActiva: bool | None = None
     autoAsignacionProduccionActiva: bool | None = None
+    notificacionPedidoAceptadoActiva: bool | None = None
+    notificacionPedidoEntregadoActiva: bool | None = None
+    notificacionNuevoPedidoDomiciliarioActiva: bool | None = None
 
 
 class ConfiguracionCatalogoTransferenciaResponse(BaseModel):
