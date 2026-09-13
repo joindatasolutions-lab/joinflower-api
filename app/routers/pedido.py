@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from fastapi.responses import Response
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm import Session, aliased, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import and_, or_, cast, String, func, text
 from datetime import date, datetime, timedelta, timezone
@@ -130,6 +130,37 @@ def _fecha_hora_humano(value: datetime | None) -> str:
 
 def _fecha_filtro_pedido(value: datetime | None) -> datetime | None:
     return as_colombia_naive_datetime(value)
+
+
+def _filtrar_pedidos_por_entrega_hoy(base, db: Session, fecha_hoy: date | None = None):
+    entrega_actual = aliased(Entrega)
+    entrega_actual_id = (
+        db.query(entrega_actual.idEntrega)
+        .filter(
+            entrega_actual.empresaID == Pedido.empresaID,
+            entrega_actual.pedidoID == Pedido.idPedido,
+        )
+        .order_by(
+            entrega_actual.intentoNumero.desc().nullslast(),
+            entrega_actual.idEntrega.desc(),
+        )
+        .limit(1)
+        .correlate(Pedido)
+        .scalar_subquery()
+    )
+    fecha_entrega_actual = func.coalesce(
+        Entrega.reprogramadaPara,
+        Entrega.fechaEntregaProgramada,
+        Entrega.fechaEntrega,
+    )
+    fecha_objetivo = fecha_hoy or colombia_now_naive().date()
+    inicio_hoy = datetime.combine(fecha_objetivo, datetime.min.time())
+    inicio_manana = inicio_hoy + timedelta(days=1)
+    return base.filter(
+        Entrega.idEntrega == entrega_actual_id,
+        fecha_entrega_actual >= inicio_hoy,
+        fecha_entrega_actual < inicio_manana,
+    )
 
 
 def _fecha_respuesta_pedido(value: datetime | None) -> datetime | None:
@@ -2381,6 +2412,7 @@ def listar_pedidos(
     fecha_hasta: datetime | None = Query(None, alias="fechaHasta"),
     sin_imprimir: bool = Query(False, alias="sinImprimir"),
     solo_tienda: bool = Query(False, alias="soloTienda"),
+    solo_entregas_hoy: bool = Query(False, alias="soloEntregasHoy"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
@@ -2480,6 +2512,9 @@ def listar_pedidos(
                 func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
             )
         )
+
+    if solo_entregas_hoy:
+        base = _filtrar_pedidos_por_entrega_hoy(base, db)
 
     if has_search:
         term = f"%{q.strip()}%"
