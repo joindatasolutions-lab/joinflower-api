@@ -11,6 +11,7 @@ from app.routers.pedido import (
     _fecha_pedido_str,
     _fecha_respuesta_pedido,
     _filtrar_pedidos_por_entrega_hoy,
+    _filtrar_pedidos_por_rango_entrega,
     _hora_pedido_str,
 )
 
@@ -62,3 +63,54 @@ def test_filtro_entregas_hoy_usa_fecha_programada_del_ultimo_intento_y_empresa()
     assert "entrega_1.empresa_id = petalops.pedido.empresa_id" in sql
     assert "2026-09-13 00:00:00" in sql
     assert "2026-09-14 00:00:00" in sql
+
+
+def test_filtro_rango_entrega_acepta_solo_fecha_desde_o_solo_fecha_hasta():
+    db = Session()
+    base = (
+        db.query(Pedido.idPedido)
+        .outerjoin(
+            Entrega,
+            and_(
+                Entrega.pedidoID == Pedido.idPedido,
+                Entrega.empresaID == Pedido.empresaID,
+            ),
+        )
+        .filter(Pedido.empresaID == 9)
+    )
+
+    solo_desde = _filtrar_pedidos_por_rango_entrega(base, db, fecha_desde=date(2026, 9, 17))
+    sql_desde = str(
+        solo_desde.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "2026-09-17 00:00:00" in sql_desde
+    assert sql_desde.count(">=") >= 1
+
+    solo_hasta = _filtrar_pedidos_por_rango_entrega(base, db, fecha_hasta=date(2026, 9, 20))
+    sql_hasta = str(
+        solo_hasta.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "2026-09-21 00:00:00" in sql_hasta
+
+
+def test_filtro_rango_entrega_de_varios_dias_incluye_todo_el_rango():
+    db = Session()
+    base = (
+        db.query(Pedido.idPedido)
+        .outerjoin(
+            Entrega,
+            and_(
+                Entrega.pedidoID == Pedido.idPedido,
+                Entrega.empresaID == Pedido.empresaID,
+            ),
+        )
+        .filter(Pedido.empresaID == 9)
+    )
+
+    filtered = _filtrar_pedidos_por_rango_entrega(base, db, fecha_desde=date(2026, 9, 17), fecha_hasta=date(2026, 9, 23))
+    sql = str(
+        filtered.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+
+    assert "2026-09-17 00:00:00" in sql
+    assert "2026-09-24 00:00:00" in sql

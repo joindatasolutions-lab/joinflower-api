@@ -132,7 +132,9 @@ def _fecha_filtro_pedido(value: datetime | None) -> datetime | None:
     return as_colombia_naive_datetime(value)
 
 
-def _filtrar_pedidos_por_entrega_hoy(base, db: Session, fecha_hoy: date | None = None):
+def _filtrar_pedidos_por_rango_entrega(
+    base, db: Session, *, fecha_desde: date | None = None, fecha_hasta: date | None = None
+):
     entrega_actual = aliased(Entrega)
     entrega_actual_id = (
         db.query(entrega_actual.idEntrega)
@@ -153,14 +155,19 @@ def _filtrar_pedidos_por_entrega_hoy(base, db: Session, fecha_hoy: date | None =
         Entrega.fechaEntregaProgramada,
         Entrega.fechaEntrega,
     )
+    base = base.filter(Entrega.idEntrega == entrega_actual_id)
+    if fecha_desde is not None:
+        base = base.filter(fecha_entrega_actual >= datetime.combine(fecha_desde, datetime.min.time()))
+    if fecha_hasta is not None:
+        base = base.filter(
+            fecha_entrega_actual < datetime.combine(fecha_hasta, datetime.min.time()) + timedelta(days=1)
+        )
+    return base
+
+
+def _filtrar_pedidos_por_entrega_hoy(base, db: Session, fecha_hoy: date | None = None):
     fecha_objetivo = fecha_hoy or colombia_now_naive().date()
-    inicio_hoy = datetime.combine(fecha_objetivo, datetime.min.time())
-    inicio_manana = inicio_hoy + timedelta(days=1)
-    return base.filter(
-        Entrega.idEntrega == entrega_actual_id,
-        fecha_entrega_actual >= inicio_hoy,
-        fecha_entrega_actual < inicio_manana,
-    )
+    return _filtrar_pedidos_por_rango_entrega(base, db, fecha_desde=fecha_objetivo, fecha_hasta=fecha_objetivo)
 
 
 def _fecha_respuesta_pedido(value: datetime | None) -> datetime | None:
@@ -2413,6 +2420,7 @@ def listar_pedidos(
     q: str | None = Query(None),
     fecha_desde: datetime | None = Query(None, alias="fechaDesde"),
     fecha_hasta: datetime | None = Query(None, alias="fechaHasta"),
+    filtrar_por_entrega: bool = Query(False, alias="filtrarPorEntrega"),
     sin_imprimir: bool = Query(False, alias="sinImprimir"),
     solo_tienda: bool = Query(False, alias="soloTienda"),
     solo_entregas_hoy: bool = Query(False, alias="soloEntregasHoy"),
@@ -2487,11 +2495,19 @@ def listar_pedidos(
     fecha_desde_filter = _fecha_filtro_pedido(fecha_desde)
     fecha_hasta_filter = _fecha_filtro_pedido(fecha_hasta)
 
-    if fecha_desde_filter and not has_search:
-        base = base.filter(Pedido.fechaPedido >= fecha_desde_filter)
+    if filtrar_por_entrega and not has_search:
+        base = _filtrar_pedidos_por_rango_entrega(
+            base,
+            db,
+            fecha_desde=fecha_desde_filter.date() if fecha_desde_filter else None,
+            fecha_hasta=fecha_hasta_filter.date() if fecha_hasta_filter else None,
+        )
+    else:
+        if fecha_desde_filter and not has_search:
+            base = base.filter(Pedido.fechaPedido >= fecha_desde_filter)
 
-    if fecha_hasta_filter and not has_search:
-        base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
+        if fecha_hasta_filter and not has_search:
+            base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
         tipo_entrega_norm = func.lower(
