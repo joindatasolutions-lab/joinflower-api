@@ -416,7 +416,12 @@ def _sync_user_roles(db: Session, usuario: Usuario, role_ids: list[int]) -> None
         )
 
 
-def _plan_user_limit(plan_id: int | None) -> int:
+def _plan_user_limit(plan_id: int | None, empresa_override: int | None = None) -> int:
+    # Override puntual por empresa (petalops.empresa.limite_usuarios): permite subirle el
+    # cupo a una sola floristeria sin afectar a las demas que comparten el mismo plan_id.
+    if empresa_override is not None:
+        return max(int(empresa_override), 1)
+
     raw = os.getenv("PLAN_USER_LIMITS_JSON", "")
     if raw:
         try:
@@ -1409,9 +1414,16 @@ def crear_usuario(
             .filter(Usuario.empresaID == target_empresa_id, Usuario.estado == "Activo")
             .scalar()
         )
-        max_users = _plan_user_limit(empresa_meta.get("planID"))
+        empresa_limite_row = db.execute(
+            text("SELECT limite_usuarios FROM petalops.empresa WHERE id_empresa = :empresa_id"),
+            {"empresa_id": target_empresa_id},
+        ).first()
+        empresa_limite_override = (
+            int(empresa_limite_row[0]) if empresa_limite_row and empresa_limite_row[0] is not None else None
+        )
+        max_users = _plan_user_limit(empresa_meta.get("planID"), empresa_limite_override)
         if int(active_users or 0) >= max_users:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"LÃ­mite de usuarios alcanzado para el plan ({max_users})")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Límite de usuarios alcanzado para el plan ({max_users})")
 
         sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
         if not sucursal:
