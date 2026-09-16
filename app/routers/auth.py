@@ -2438,9 +2438,9 @@ def _crear_empresa_core(
                 """
                 INSERT INTO petalops.canal_venta (
                     empresa_id, codigo, nombre, orden, activo, created_at, updated_at
-                ) VALUES (
-                    :empresa_id, 'presencial', 'Presencial', 1, TRUE, NOW(), NOW()
-                )
+                ) VALUES
+                    (:empresa_id, 'presencial', 'Presencial', 1, TRUE, NOW(), NOW()),
+                    (:empresa_id, 'virtual', 'Virtual', 2, TRUE, NOW(), NOW())
                 ON CONFLICT DO NOTHING
                 """
             ),
