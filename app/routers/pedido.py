@@ -4990,46 +4990,19 @@ def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depend
     return result
 
 
-def _combinar_lineas_producto_duplicadas(productos_normalizados: list[dict], *, resolver_precio_fallback) -> list[dict]:
-    """Combina lineas repetidas del mismo productoID en una sola, sumando cantidad y
-    preservando el monto total exacto (precio_unitario resultante = promedio ponderado),
-    y concatenando las observaciones para no perder informacion. Necesario porque
-    petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): dos filas para el mismo
-    producto en el mismo pedido violan esa restriccion."""
-    productos_por_id: dict[int, list[dict]] = {}
+def _nombres_productos_duplicados(productos_normalizados: list[dict], productos_map: dict[int, "Producto"]) -> list[str]:
+    """Devuelve los nombres de los productos que aparecen en mas de una linea dentro del
+    mismo pedido manual. petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): dos
+    filas para el mismo producto en el mismo pedido violan esa restriccion, asi que hay que
+    rechazar el pedido con un mensaje claro en vez de dejar que reviente en el INSERT."""
+    conteo: dict[int, int] = {}
     for item in productos_normalizados:
-        productos_por_id.setdefault(item["productoID"], []).append(item)
-
-    if not any(len(lineas) > 1 for lineas in productos_por_id.values()):
-        return productos_normalizados
-
-    combinados = []
-    for producto_id, lineas in productos_por_id.items():
-        if len(lineas) == 1:
-            combinados.append(lineas[0])
-            continue
-        cantidad_total = sum((linea["cantidad"] for linea in lineas), Decimal("0"))
-        monto_total = Decimal("0.00")
-        for linea in lineas:
-            precio_linea = linea["precio"] if linea["precio"] is not None else resolver_precio_fallback(producto_id)
-            monto_total += (precio_linea * linea["cantidad"]).quantize(Decimal("0.01"))
-        precio_promedio = (monto_total / cantidad_total).quantize(Decimal("0.01"))
-        observaciones_combinadas = "; ".join(
-            dict.fromkeys(
-                str(linea["observaciones"]).strip()
-                for linea in lineas
-                if str(linea["observaciones"] or "").strip()
-            )
-        ) or None
-        combinados.append(
-            {
-                "productoID": producto_id,
-                "cantidad": cantidad_total,
-                "precio": precio_promedio,
-                "observaciones": observaciones_combinadas,
-            }
-        )
-    return combinados
+        conteo[item["productoID"]] = conteo.get(item["productoID"], 0) + 1
+    duplicados_ids = [producto_id for producto_id, veces in conteo.items() if veces > 1]
+    return [
+        (productos_map[producto_id].nombreProducto if producto_id in productos_map else f"#{producto_id}")
+        for producto_id in duplicados_ids
+    ]
 
 
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
@@ -5063,17 +5036,6 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             }
         )
 
-    # petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): el formulario de
-    # pedido manual permite agregar el mismo producto en varias lineas (p.ej. con precios
-    # distintos por personalizacion), pero solo puede existir una fila por producto en el
-    # pedido. Se combinan esas lineas en una sola antes de insertar.
-    productos_normalizados = _combinar_lineas_producto_duplicadas(
-        productos_normalizados,
-        resolver_precio_fallback=lambda producto_id: _find_branch_product_price(
-            db, empresa_id=empresa_id, sucursal_id=sucursal_id, producto_id=producto_id,
-        ),
-    )
-
     producto_ids = list({item["productoID"] for item in productos_normalizados})
 
     try:
@@ -5093,6 +5055,24 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
         productos_map = {int(producto.idProducto): producto for producto in productos_db}
         if len(productos_map) != len(producto_ids):
             raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_PRODUCT_NOT_FOUND", "message": "Uno o más productos no existen o están inactivos"})
+
+        # petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): un mismo producto no
+        # puede quedar en dos lineas del mismo pedido. Se rechaza con un mensaje claro para
+        # que quien registra el pedido lo corrija (sumar la cantidad en una sola linea), en
+        # vez de dejar que el INSERT reviente con un error de base de datos.
+        nombres_duplicados = _nombres_productos_duplicados(productos_normalizados, productos_map)
+        if nombres_duplicados:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PEDIDO_MANUAL_PRODUCT_DUPLICATED",
+                    "message": (
+                        "No puedes agregar el mismo producto en dos líneas del pedido: "
+                        + ", ".join(nombres_duplicados)
+                        + ". Si necesitas más unidades, aumenta la cantidad en esa misma línea."
+                    ),
+                },
+            )
 
         validar_cupos_recetas_para_productos(
             db,

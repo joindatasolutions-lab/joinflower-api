@@ -1,87 +1,54 @@
-"""Verifica _combinar_lineas_producto_duplicadas: el formulario de pedido manual permite
-agregar el mismo producto en varias lineas (p.ej. con precios distintos por
-personalizacion), pero petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id) --
-insertar dos filas para el mismo producto en el mismo pedido revienta con un
-UniqueViolation. Estas lineas deben combinarse en una sola antes de insertar.
+"""Verifica _nombres_productos_duplicados: el formulario de pedido manual permite agregar
+el mismo producto en varias lineas separadas, pero petalops.pedido_detalle tiene
+UNIQUE(pedido_id, producto_id) -- insertar dos filas para el mismo producto en el mismo
+pedido revienta con un UniqueViolation. crear_pedido_manual debe rechazar el pedido con un
+mensaje claro (en vez de un error crudo de base de datos) para que quien lo registra lo
+corrija sumando la cantidad en una sola linea.
 """
-from decimal import Decimal
+from types import SimpleNamespace
 
-from app.routers.pedido import _combinar_lineas_producto_duplicadas
-
-
-def _fallback_no_deberia_llamarse(producto_id):
-    raise AssertionError("no deberia necesitar fallback si todas las lineas traen precio")
+from app.routers.pedido import _nombres_productos_duplicados
 
 
-def test_sin_duplicados_no_cambia_nada():
+def _producto(nombre):
+    return SimpleNamespace(nombreProducto=nombre)
+
+
+def test_sin_duplicados_no_reporta_nada():
     productos = [
-        {"productoID": 1, "cantidad": Decimal("2"), "precio": Decimal("5000.00"), "observaciones": None},
-        {"productoID": 2, "cantidad": Decimal("1"), "precio": Decimal("3000.00"), "observaciones": "sin tarjeta"},
+        {"productoID": 1, "cantidad": 2, "precio": None, "observaciones": None},
+        {"productoID": 2, "cantidad": 1, "precio": None, "observaciones": None},
     ]
-    resultado = _combinar_lineas_producto_duplicadas(productos, resolver_precio_fallback=_fallback_no_deberia_llamarse)
-    assert resultado == productos
+    productos_map = {1: _producto("Rosa roja"), 2: _producto("Girasol")}
+    assert _nombres_productos_duplicados(productos, productos_map) == []
 
 
-def test_combina_caso_real_del_error_en_produccion():
-    # Mismo caso reportado por Maria C Floristeria: producto 541 en 3 lineas con
-    # precios distintos (20000, 10000, 10000), cantidad 1 cada una.
+def test_detecta_producto_duplicado_caso_real_del_error_en_produccion():
+    # Mismo caso reportado por Maria C Floristeria: producto 541 en 3 lineas separadas.
     productos = [
-        {"productoID": 541, "cantidad": Decimal("1"), "precio": Decimal("20000.00"), "observaciones": None},
-        {"productoID": 541, "cantidad": Decimal("1"), "precio": Decimal("10000.00"), "observaciones": None},
-        {"productoID": 541, "cantidad": Decimal("1"), "precio": Decimal("10000.00"), "observaciones": None},
+        {"productoID": 541, "cantidad": 1, "precio": 20000, "observaciones": None},
+        {"productoID": 541, "cantidad": 1, "precio": 10000, "observaciones": None},
+        {"productoID": 541, "cantidad": 1, "precio": 10000, "observaciones": None},
     ]
-    resultado = _combinar_lineas_producto_duplicadas(productos, resolver_precio_fallback=_fallback_no_deberia_llamarse)
-
-    assert len(resultado) == 1
-    linea = resultado[0]
-    assert linea["productoID"] == 541
-    assert linea["cantidad"] == Decimal("3")
-    # precio_unitario = promedio ponderado (40000.00 / 3 = 13333.33 redondeado). Al
-    # multiplicar de vuelta por cantidad queda a 1 centavo del monto original exacto --
-    # inevitable al representar 3 unidades a precios distintos como una sola tarifa unitaria.
-    assert linea["precio"] == Decimal("13333.33")
-    assert abs((linea["precio"] * linea["cantidad"]).quantize(Decimal("0.01")) - Decimal("40000.00")) <= Decimal("0.01")
+    productos_map = {541: _producto("Ramo Primavera")}
+    assert _nombres_productos_duplicados(productos, productos_map) == ["Ramo Primavera"]
 
 
-def test_combina_y_concatena_observaciones_sin_duplicar():
+def test_detecta_varios_productos_duplicados_a_la_vez():
     productos = [
-        {"productoID": 7, "cantidad": Decimal("1"), "precio": Decimal("15000.00"), "observaciones": "sin tarjeta"},
-        {"productoID": 7, "cantidad": Decimal("2"), "precio": Decimal("15000.00"), "observaciones": "entregar en la manana"},
-        {"productoID": 7, "cantidad": Decimal("1"), "precio": Decimal("15000.00"), "observaciones": "sin tarjeta"},
+        {"productoID": 1, "cantidad": 1, "precio": None, "observaciones": None},
+        {"productoID": 1, "cantidad": 1, "precio": None, "observaciones": None},
+        {"productoID": 2, "cantidad": 1, "precio": None, "observaciones": None},
+        {"productoID": 3, "cantidad": 1, "precio": None, "observaciones": None},
+        {"productoID": 3, "cantidad": 1, "precio": None, "observaciones": None},
     ]
-    resultado = _combinar_lineas_producto_duplicadas(productos, resolver_precio_fallback=_fallback_no_deberia_llamarse)
-
-    assert len(resultado) == 1
-    linea = resultado[0]
-    assert linea["cantidad"] == Decimal("4")
-    assert linea["observaciones"] == "sin tarjeta; entregar en la manana"
+    productos_map = {1: _producto("Rosa roja"), 2: _producto("Girasol"), 3: _producto("Tulipan")}
+    assert _nombres_productos_duplicados(productos, productos_map) == ["Rosa roja", "Tulipan"]
 
 
-def test_usa_fallback_cuando_una_linea_no_trae_precio():
+def test_usa_placeholder_si_el_producto_no_esta_en_el_mapa():
     productos = [
-        {"productoID": 9, "cantidad": Decimal("1"), "precio": Decimal("12000.00"), "observaciones": None},
-        {"productoID": 9, "cantidad": Decimal("1"), "precio": None, "observaciones": None},
+        {"productoID": 99, "cantidad": 1, "precio": None, "observaciones": None},
+        {"productoID": 99, "cantidad": 1, "precio": None, "observaciones": None},
     ]
-    resultado = _combinar_lineas_producto_duplicadas(
-        productos, resolver_precio_fallback=lambda producto_id: Decimal("8000.00")
-    )
-
-    assert len(resultado) == 1
-    linea = resultado[0]
-    assert linea["cantidad"] == Decimal("2")
-    # (12000 + 8000) / 2 = 10000.00
-    assert linea["precio"] == Decimal("10000.00")
-
-
-def test_no_mezcla_productos_distintos():
-    productos = [
-        {"productoID": 1, "cantidad": Decimal("1"), "precio": Decimal("5000.00"), "observaciones": None},
-        {"productoID": 2, "cantidad": Decimal("1"), "precio": Decimal("6000.00"), "observaciones": None},
-        {"productoID": 1, "cantidad": Decimal("1"), "precio": Decimal("5000.00"), "observaciones": None},
-    ]
-    resultado = _combinar_lineas_producto_duplicadas(productos, resolver_precio_fallback=_fallback_no_deberia_llamarse)
-
-    por_producto = {linea["productoID"]: linea for linea in resultado}
-    assert len(resultado) == 2
-    assert por_producto[1]["cantidad"] == Decimal("2")
-    assert por_producto[2]["cantidad"] == Decimal("1")
+    assert _nombres_productos_duplicados(productos, {}) == ["#99"]
