@@ -27,6 +27,21 @@ def test_store_pickup_detection_accepts_tipo_entrega_or_barrio_label():
     assert _is_store_pickup_delivery(barrio_nombre="Recoger en tienda")
 
 
+def test_store_pickup_detection_accepts_direccion_como_respaldo():
+    # Caso real en produccion: tipo_entrega quedo guardado como 'domicilio' por una
+    # inconsistencia historica frontend/backend, pero la direccion SI dice 'Recoger En
+    # Tienda' (el texto que el frontend escribe cuando detecta la recogida). Sin este
+    # respaldo, "Finalizar" queda bloqueado para siempre en pedidos asi (visto en Flora:
+    # 509 pedidos sin finalizar con este patron).
+    assert _is_store_pickup_delivery(tipo_entrega="domicilio", barrio_nombre=None, direccion="Recoger En Tienda")
+
+
+def test_store_pickup_detection_no_falsos_positivos_por_direccion_real():
+    assert not _is_store_pickup_delivery(
+        tipo_entrega="domicilio", barrio_nombre="Chapinero", direccion="Calle 84 # 52 - 18"
+    )
+
+
 def test_resolve_costo_domicilio_returns_zero_for_store_pickup_without_db_lookup():
     resolved = _resolve_costo_domicilio(
         SimpleNamespace(),

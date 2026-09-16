@@ -1074,10 +1074,23 @@ def _normalize_store_pickup_value(value: str | None) -> str:
     return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def _is_store_pickup_delivery(*, tipo_entrega: str | None = None, barrio_nombre: str | None = None) -> bool:
+def _is_store_pickup_delivery(
+    *, tipo_entrega: str | None = None, barrio_nombre: str | None = None, direccion: str | None = None
+) -> bool:
+    # direccion se incluye como señal ademas de tipo_entrega/barrio_nombre: por una
+    # inconsistencia historica entre frontend y backend en que texto de barrio se
+    # reconocia como recogida, hay pedidos con tipo_entrega='domicilio' pero direccion
+    # literalmente 'Recoger En Tienda' (el texto que el frontend escribe cuando SI detecta
+    # la recogida correctamente). Sin este fallback esos pedidos quedan con "Finalizar"
+    # bloqueado para siempre.
     tipo = _normalize_store_pickup_value(tipo_entrega)
     barrio = _normalize_store_pickup_value(barrio_nombre)
-    return tipo in STORE_PICKUP_DELIVERY_VALUES or barrio in STORE_PICKUP_DELIVERY_VALUES
+    direccion_norm = _normalize_store_pickup_value(direccion)
+    return (
+        tipo in STORE_PICKUP_DELIVERY_VALUES
+        or barrio in STORE_PICKUP_DELIVERY_VALUES
+        or direccion_norm in STORE_PICKUP_DELIVERY_VALUES
+    )
 
 
 def _apply_store_pickup_domicilio_amounts(pedido: Pedido) -> None:
@@ -4893,6 +4906,7 @@ def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_d
     if not _is_store_pickup_delivery(
         tipo_entrega=getattr(entrega, "tipoEntrega", None),
         barrio_nombre=getattr(entrega, "barrioNombre", None),
+        direccion=getattr(entrega, "direccion", None),
     ):
         raise HTTPException(status_code=400, detail="La opcion Finalizar solo aplica para pedidos de recogida en tienda.")
 
