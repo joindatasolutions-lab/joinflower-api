@@ -576,23 +576,6 @@ def _parse_iso_date(value: str) -> datetime:
     return parsed
 
 
-def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
-    value = str(identificacion or "").strip()
-    if value:
-        return value
-    phone = str(telefono or "").strip()
-    if phone:
-        # Prefijado (nunca un numero de telefono "pelado"): _upsert_cliente_pedido_manual
-        # hace match de clientes tambien por identificacion, y un fallback sin prefijo
-        # puede coincidir por accidente con la identificacion real (o el fallback de
-        # otro cliente) que alguien mas escriba en un pedido futuro -- eso fusiono sin
-        # querer a dos clientes distintos (Daniela Colon quedo sobreescrita por Rodrigo
-        # Colon el 2026-09-16 porque el fallback de ella, su telefono sin prefijo,
-        # coincidio con la identificacion enviada en el pedido de el).
-        return f"TEL-{phone}"
-    return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
-
-
 def _normalizar_telefono_completo_pedido(indicativo: str | None, telefono: str | None) -> str | None:
     prefijo = str(indicativo or "").strip().replace(" ", "")
     numero = str(telefono or "").strip().replace(" ", "")
@@ -634,7 +617,7 @@ def _upsert_cliente_pedido_manual(
         cliente = Cliente(
             empresaID=int(empresa_id),
             tipoIdent=tipo_ident or "CC",
-            identificacion=_cliente_identificacion_fallback(identificacion_text, telefono_text),
+            identificacion=identificacion_text or None,
             indicativo=indicativo,
             telefonoCompleto=_normalizar_telefono_completo_pedido(indicativo, telefono_text) or telefono_text or None,
             nombreCompleto=nombre_completo,
@@ -648,7 +631,7 @@ def _upsert_cliente_pedido_manual(
         return cliente
 
     cliente.tipoIdent = tipo_ident or cliente.tipoIdent or "CC"
-    cliente.identificacion = identificacion_text or cliente.identificacion or _cliente_identificacion_fallback(None, telefono_text or cliente.telefono)
+    cliente.identificacion = identificacion_text or cliente.identificacion
     cliente.indicativo = indicativo or cliente.indicativo
     cliente.nombreCompleto = nombre_completo or cliente.nombreCompleto
     cliente.telefono = telefono_text or cliente.telefono
@@ -5343,7 +5326,7 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
         cliente = Cliente(
             empresaID=data.empresaId,
             tipoIdent="CC",
-            identificacion=_cliente_identificacion_fallback(None, data.cliente.telefono),
+            identificacion=None,
             telefonoCompleto=data.cliente.telefono,
             nombreCompleto=data.cliente.nombres,
             telefono=data.cliente.telefono,

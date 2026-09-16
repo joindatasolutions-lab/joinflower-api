@@ -54,16 +54,6 @@ def _buscar_estado_inicial_pedido(db: Session) -> EstadoPedido | None:
     )
 
 
-def _cliente_identificacion_fallback(identificacion: str | None, telefono: str | None) -> str:
-    value = str(identificacion or "").strip()
-    if value:
-        return value
-    phone = str(telefono or "").strip()
-    if phone:
-        return phone
-    return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
-
-
 def _prefijo_desde_sucursal(sucursal: Sucursal) -> str:
     # Compatibilidad: usa un prefijo configurable si existe; si no, deriva del nombre.
     for field in ("prefijoPedido", "codigoSucursal", "abreviatura", "codigo"):
@@ -384,10 +374,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             cliente = Cliente(
                 empresaID=payload.empresaID,
                 tipoIdent=(payload.cliente.tipoIdent or "CC"),
-                identificacion=_cliente_identificacion_fallback(
-                    payload.cliente.identificacion,
-                    payload.cliente.telefono,
-                ),
+                identificacion=payload.cliente.identificacion or None,
                 indicativo=payload.cliente.indicativo,
                 telefonoCompleto=_normalizar_telefono_completo(
                     payload.cliente.indicativo,
@@ -403,11 +390,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             db.flush()
         else:
             cliente.tipoIdent = payload.cliente.tipoIdent or cliente.tipoIdent or "CC"
-            cliente.identificacion = (
-                payload.cliente.identificacion
-                or cliente.identificacion
-                or _cliente_identificacion_fallback(None, payload.cliente.telefono or cliente.telefono)
-            )
+            cliente.identificacion = payload.cliente.identificacion or cliente.identificacion
             cliente.indicativo = payload.cliente.indicativo or cliente.indicativo
             cliente.nombreCompleto = payload.cliente.nombreCompleto or cliente.nombreCompleto
             cliente.telefono = payload.cliente.telefono or cliente.telefono

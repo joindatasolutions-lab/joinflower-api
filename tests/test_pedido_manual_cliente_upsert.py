@@ -1,30 +1,17 @@
-"""Verifica _cliente_identificacion_fallback y _upsert_cliente_pedido_manual: el pedido
-manual busca/crea el cliente por telefono o identificacion. Cuando no hay identificacion
-real, se usaba el telefono "pelado" como respaldo -- y como el match tambien busca por
-identificacion, un pedido futuro cuya identificacion enviada coincidiera por accidente con
-ese respaldo (p.ej. un campo del formulario que no se limpio entre pedidos, o un typo)
-fusionaba silenciosamente a dos clientes distintos. Caso real en produccion: el registro de
-"Daniela Colon" quedo sobreescrito con el nombre y telefono de "Rodrigo Colon" el
-2026-09-16 porque la identificacion enviada en el pedido de Rodrigo coincidia exactamente
-con el telefono-respaldo (sin prefijo) que se le habia asignado a Daniela.
+"""Verifica _upsert_cliente_pedido_manual: el pedido manual busca/crea el cliente por
+telefono o identificacion. Antes, cuando no habia identificacion real, se rellenaba con
+un valor derivado del telefono (pelado o con prefijo "TEL-") como respaldo -- y como el
+match tambien busca por identificacion, un pedido futuro cuya identificacion enviada
+coincidiera por accidente con ese respaldo fusionaba silenciosamente a dos clientes
+distintos. Caso real en produccion: el registro de "Daniela Colon" quedo sobreescrito con
+el nombre y telefono de "Rodrigo Colon" el 2026-09-16 porque la identificacion enviada en
+el pedido de Rodrigo coincidia exactamente con el telefono-respaldo (sin prefijo) que se
+le habia asignado a Daniela. Esa logica de respaldo se elimino: si no hay identificacion,
+el campo queda vacio (None) en vez de inventar un valor.
 """
 from datetime import datetime, timezone
 
-from app.routers.pedido import _cliente_identificacion_fallback, _upsert_cliente_pedido_manual
-
-
-def test_fallback_usa_identificacion_real_si_se_envia():
-    assert _cliente_identificacion_fallback("123456789", "3001234567") == "123456789"
-
-
-def test_fallback_de_telefono_queda_prefijado_no_pelado():
-    resultado = _cliente_identificacion_fallback(None, "3204675782")
-    assert resultado == "TEL-3204675782"
-    assert resultado != "3204675782"
-
-
-def test_fallback_generico_si_no_hay_nada():
-    assert _cliente_identificacion_fallback(None, None).startswith("TMP-")
+from app.routers.pedido import _upsert_cliente_pedido_manual
 
 
 def _evalua_clausula(cliente, clausula):
@@ -80,9 +67,8 @@ class _FakeSession:
                 cliente.idCliente = 9999
 
 
-def test_pedido_de_otro_cliente_no_se_fusiona_con_fallback_de_telefono_ajeno():
-    # Daniela ya existe en el sistema con su telefono como respaldo de identificacion
-    # (ya prefijado gracias al fix).
+def test_pedido_de_otro_cliente_no_se_fusiona_con_identificacion_ajena():
+    # Daniela ya existe en el sistema sin identificacion real (nunca se le inventa una).
     daniela = _FakeCliente(
         idCliente=5150,
         empresaID=5,
@@ -90,7 +76,7 @@ def test_pedido_de_otro_cliente_no_se_fusiona_con_fallback_de_telefono_ajeno():
         telefono="3204675782",
         telefonoCompleto="3204675782",
         telefono_completo="3204675782",
-        identificacion="TEL-3204675782",
+        identificacion=None,
         nombreCompleto="Daniela colon",
         tipoIdent="CC",
         indicativo=None,
@@ -99,10 +85,9 @@ def test_pedido_de_otro_cliente_no_se_fusiona_con_fallback_de_telefono_ajeno():
     )
     db = _FakeSession([daniela])
 
-    # Rodrigo llega con OTRO telefono y, por el bug del formulario, con una identificacion
-    # que por accidente coincidia con el telefono pelado de Daniela ("3204675782"). Con el
-    # fallback ya prefijado, esto ya no puede matchear contra daniela.identificacion
-    # ("TEL-3204675782" != "3204675782"), asi que ya no la sobreescribe.
+    # Rodrigo llega con otro telefono y, por coincidencia, con una identificacion igual
+    # al telefono de Daniela. Como daniela.identificacion es None (nunca se le asigno un
+    # respaldo derivado del telefono), esto no puede matchear contra ella.
     resultado = _upsert_cliente_pedido_manual(
         db,
         empresa_id=5,
@@ -127,7 +112,7 @@ def test_mismo_cliente_repite_pedido_y_si_se_reconoce_por_su_propio_telefono():
         telefono="3204675782",
         telefonoCompleto="3204675782",
         telefono_completo="3204675782",
-        identificacion="TEL-3204675782",
+        identificacion=None,
         nombreCompleto="Daniela colon",
         tipoIdent="CC",
         indicativo=None,
@@ -148,3 +133,20 @@ def test_mismo_cliente_repite_pedido_y_si_se_reconoce_por_su_propio_telefono():
     )
 
     assert resultado is daniela
+
+
+def test_cliente_nuevo_sin_identificacion_queda_con_identificacion_vacia():
+    db = _FakeSession([])
+
+    resultado = _upsert_cliente_pedido_manual(
+        db,
+        empresa_id=5,
+        tipo_ident="CC",
+        identificacion=None,
+        indicativo=None,
+        nombre_completo="Cliente Nuevo",
+        telefono="3001112233",
+        email=None,
+    )
+
+    assert resultado.identificacion is None
