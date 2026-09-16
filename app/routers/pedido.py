@@ -1071,6 +1071,29 @@ def _normalize_store_pickup_value(value: str | None) -> str:
     return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
+def _store_pickup_norm_expr(column):
+    return func.lower(
+        func.replace(
+            func.replace(func.coalesce(column, ""), "-", "_"),
+            " ",
+            "_",
+        )
+    )
+
+
+def _store_pickup_filter_condition():
+    tipo_entrega_norm = _store_pickup_norm_expr(Entrega.tipoEntrega)
+    barrio_nombre_norm = _store_pickup_norm_expr(Entrega.barrioNombre)
+    direccion_norm = _store_pickup_norm_expr(Entrega.direccion)
+    return or_(
+        tipo_entrega_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
+        barrio_nombre_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
+        direccion_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
+        func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
+        func.lower(func.coalesce(Entrega.direccion, "")).ilike("%tienda%"),
+    )
+
+
 def _is_store_pickup_delivery(
     *, tipo_entrega: str | None = None, barrio_nombre: str | None = None, direccion: str | None = None
 ) -> bool:
@@ -2510,27 +2533,7 @@ def listar_pedidos(
             base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
-        tipo_entrega_norm = func.lower(
-            func.replace(
-                func.replace(func.coalesce(Entrega.tipoEntrega, ""), "-", "_"),
-                " ",
-                "_",
-            )
-        )
-        barrio_nombre_norm = func.lower(
-            func.replace(
-                func.replace(func.coalesce(Entrega.barrioNombre, ""), "-", "_"),
-                " ",
-                "_",
-            )
-        )
-        base = base.filter(
-            or_(
-                tipo_entrega_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
-                barrio_nombre_norm.in_(STORE_PICKUP_DELIVERY_VALUES),
-                func.lower(func.coalesce(Entrega.barrioNombre, "")).ilike("%tienda%"),
-            )
-        )
+        base = base.filter(_store_pickup_filter_condition())
 
     if solo_entregas_hoy:
         base = _filtrar_pedidos_por_entrega_hoy(base, db)

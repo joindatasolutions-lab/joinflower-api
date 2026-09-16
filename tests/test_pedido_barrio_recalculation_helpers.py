@@ -6,6 +6,7 @@ from app.routers.pedido import (
     _normalize_delivery_type_from_barrio_name,
     _normalize_store_pickup_value,
     _resolve_costo_domicilio,
+    _store_pickup_filter_condition,
 )
 from decimal import Decimal
 from types import SimpleNamespace
@@ -34,6 +35,14 @@ def test_store_pickup_detection_accepts_direccion_como_respaldo():
     # respaldo, "Finalizar" queda bloqueado para siempre en pedidos asi (visto en Flora:
     # 509 pedidos sin finalizar con este patron).
     assert _is_store_pickup_delivery(tipo_entrega="domicilio", barrio_nombre=None, direccion="Recoger En Tienda")
+
+
+def test_store_pickup_sql_filter_uses_direccion_como_respaldo():
+    compiled = str(_store_pickup_filter_condition().compile(compile_kwargs={"literal_binds": True})).lower()
+
+    assert "tipoentrega" in compiled
+    assert "barrionombre" in compiled
+    assert "direccion" in compiled
 
 
 def test_store_pickup_detection_no_falsos_positivos_por_direccion_real():
