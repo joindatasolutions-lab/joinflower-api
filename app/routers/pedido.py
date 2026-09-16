@@ -4990,6 +4990,48 @@ def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depend
     return result
 
 
+def _combinar_lineas_producto_duplicadas(productos_normalizados: list[dict], *, resolver_precio_fallback) -> list[dict]:
+    """Combina lineas repetidas del mismo productoID en una sola, sumando cantidad y
+    preservando el monto total exacto (precio_unitario resultante = promedio ponderado),
+    y concatenando las observaciones para no perder informacion. Necesario porque
+    petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): dos filas para el mismo
+    producto en el mismo pedido violan esa restriccion."""
+    productos_por_id: dict[int, list[dict]] = {}
+    for item in productos_normalizados:
+        productos_por_id.setdefault(item["productoID"], []).append(item)
+
+    if not any(len(lineas) > 1 for lineas in productos_por_id.values()):
+        return productos_normalizados
+
+    combinados = []
+    for producto_id, lineas in productos_por_id.items():
+        if len(lineas) == 1:
+            combinados.append(lineas[0])
+            continue
+        cantidad_total = sum((linea["cantidad"] for linea in lineas), Decimal("0"))
+        monto_total = Decimal("0.00")
+        for linea in lineas:
+            precio_linea = linea["precio"] if linea["precio"] is not None else resolver_precio_fallback(producto_id)
+            monto_total += (precio_linea * linea["cantidad"]).quantize(Decimal("0.01"))
+        precio_promedio = (monto_total / cantidad_total).quantize(Decimal("0.01"))
+        observaciones_combinadas = "; ".join(
+            dict.fromkeys(
+                str(linea["observaciones"]).strip()
+                for linea in lineas
+                if str(linea["observaciones"] or "").strip()
+            )
+        ) or None
+        combinados.append(
+            {
+                "productoID": producto_id,
+                "cantidad": cantidad_total,
+                "precio": precio_promedio,
+                "observaciones": observaciones_combinadas,
+            }
+        )
+    return combinados
+
+
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
 @limiter.limit(rate_limit("pedido_manual", "60/minute"))
 def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
@@ -5020,6 +5062,17 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
                 "observaciones": item.productoObservaciones if item.productoObservaciones is not None else item.observaciones,
             }
         )
+
+    # petalops.pedido_detalle tiene UNIQUE(pedido_id, producto_id): el formulario de
+    # pedido manual permite agregar el mismo producto en varias lineas (p.ej. con precios
+    # distintos por personalizacion), pero solo puede existir una fila por producto en el
+    # pedido. Se combinan esas lineas en una sola antes de insertar.
+    productos_normalizados = _combinar_lineas_producto_duplicadas(
+        productos_normalizados,
+        resolver_precio_fallback=lambda producto_id: _find_branch_product_price(
+            db, empresa_id=empresa_id, sucursal_id=sucursal_id, producto_id=producto_id,
+        ),
+    )
 
     producto_ids = list({item["productoID"] for item in productos_normalizados})
 
