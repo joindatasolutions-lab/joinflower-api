@@ -582,7 +582,14 @@ def _cliente_identificacion_fallback(identificacion: str | None, telefono: str |
         return value
     phone = str(telefono or "").strip()
     if phone:
-        return phone
+        # Prefijado (nunca un numero de telefono "pelado"): _upsert_cliente_pedido_manual
+        # hace match de clientes tambien por identificacion, y un fallback sin prefijo
+        # puede coincidir por accidente con la identificacion real (o el fallback de
+        # otro cliente) que alguien mas escriba en un pedido futuro -- eso fusiono sin
+        # querer a dos clientes distintos (Daniela Colon quedo sobreescrita por Rodrigo
+        # Colon el 2026-09-16 porque el fallback de ella, su telefono sin prefijo,
+        # coincidio con la identificacion enviada en el pedido de el).
+        return f"TEL-{phone}"
     return f"TMP-{int(datetime.now(timezone.utc).timestamp())}"
 
 
