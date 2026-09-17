@@ -3016,6 +3016,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 
 class ActualizarDetallePedidoRequest(BaseModel):
+    pedidoID: int | None = None
+    pedidoId: int | None = None
     detalleID: int | None = None
     productoID: int | None = None
     productoPrecio: float | None = None
@@ -3085,6 +3087,15 @@ def actualizar_detalle_pedido(
     auth=Depends(get_current_auth_context),
 ):
     try:
+        payload_pedido_id = payload.pedidoID if payload.pedidoID is not None else payload.pedidoId
+        if payload_pedido_id is not None and int(payload_pedido_id) != int(pedido_id):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PEDIDO_ID_MISMATCH",
+                    "message": "El pedido enviado no coincide con el pedido seleccionado. Vuelve a abrir el pedido antes de guardar.",
+                },
+            )
         empresa_id = int(auth.empresaID)
         has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
         pedido = (
