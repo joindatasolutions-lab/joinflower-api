@@ -324,6 +324,25 @@ def test_normalize_detalle_pago_total_scales_pre_tax_breakdown_to_nit_total():
     assert sum(item["monto"] for item in normalized) == Decimal("238000.00")
 
 
+def test_normalize_detalle_pago_total_scales_arrangement_base_when_delivery_exists():
+    detalle_pago = [
+        {"metodo": "Cuenta por cobrar", "monto": Decimal("120000.00")},
+        {"metodo": "Efectivo", "monto": Decimal("80000.00")},
+    ]
+
+    normalized = _normalize_detalle_pago_total(
+        detalle_pago,
+        total_origen=Decimal("200000.00"),
+        total_destino=Decimal("246000.00"),
+    )
+
+    assert [item["monto"] for item in normalized] == [
+        Decimal("147600.00"),
+        Decimal("98400.00"),
+    ]
+    assert sum(item["monto"] for item in normalized) == Decimal("246000.00")
+
+
 def test_flora_phase2_requires_expected_columns():
     assert _flora_phase2_ready(_FakePhase2SchemaDb()) is True
     assert _flora_phase2_ready(_FakePhase2SchemaDb(("pago_metodo", "monto"))) is False

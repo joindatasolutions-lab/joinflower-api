@@ -3737,10 +3737,13 @@ def actualizar_detalle_pedido(
                         descuento_monto=descuento_monto,
                         saldo_favor_monto=saldo_favor_monto,
                     )
-                    if (
-                        Decimal(str(pedido.totalIva or 0)) > 0
-                        and _round_money_decimal(breakdown_total) == _round_money_decimal(ajustes_sin_iva["total"])
-                    ):
+                    subtotal_sin_iva = _round_money_decimal(pedido.totalBruto or 0)
+                    breakdown_total_redondeado = _round_money_decimal(breakdown_total)
+                    total_sin_iva_redondeado = _round_money_decimal(ajustes_sin_iva["total"])
+                    if Decimal(str(pedido.totalIva or 0)) > 0 and breakdown_total_redondeado in {
+                        total_sin_iva_redondeado,
+                        subtotal_sin_iva,
+                    }:
                         detalle_pago = _normalize_detalle_pago_total(
                             detalle_pago,
                             total_origen=breakdown_total,
