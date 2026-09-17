@@ -178,6 +178,8 @@ class PedidoListItem(BaseModel):
     puedeAprobar: Optional[bool] = None
     motivoBloqueoAprobacion: Optional[str] = None
     estado: str
+    estadoEntrega: Optional[str] = None
+    estadoEntregaCodigo: Optional[str] = None
     motivoRechazo: Optional[str] = None
     telefono: Optional[str] = None
     telefonoCompleto: Optional[str] = None

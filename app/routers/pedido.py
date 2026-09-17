@@ -24,6 +24,7 @@ from app.models.pedido import Pedido
 from app.models.pedidodetalle import PedidoDetalle
 from app.models.produccion import Produccion
 from app.models.estadopedido import EstadoPedido
+from app.models.estadoentrega import EstadoEntrega
 from app.models.entrega import Entrega
 from app.models.sucursal import Sucursal
 
@@ -2687,7 +2688,7 @@ def listar_pedidos(
     tenant_rules = _tenant_order_rules(db, int(empresa_id))
 
     pedido_rows = (
-        db.query(Pedido, Cliente, Entrega, EstadoPedido)
+        db.query(Pedido, Cliente, Entrega, EstadoPedido, EstadoEntrega)
         .outerjoin(
             Cliente,
             and_(
@@ -2703,6 +2704,7 @@ def listar_pedidos(
             ),
         )
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
+        .outerjoin(EstadoEntrega, EstadoEntrega.idEstadoEntrega == Entrega.estadoEntregaID)
         .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(pedido_ids))
         .all()
     )
@@ -2742,11 +2744,14 @@ def listar_pedidos(
             _producto_listado_detalle(detalle, producto, mostrar_codigo_catalogo)
         )
 
-    rows_map = {int(pedido.idPedido): (pedido, cliente, entrega, estado_db) for pedido, cliente, entrega, estado_db in pedido_rows}
+    rows_map = {
+        int(pedido.idPedido): (pedido, cliente, entrega, estado_db, estado_entrega_db)
+        for pedido, cliente, entrega, estado_db, estado_entrega_db in pedido_rows
+    }
 
     items: list[PedidoListItem] = []
     for pedido_id in pedido_ids:
-        pedido, cliente, entrega, estado_db = rows_map[pedido_id]
+        pedido, cliente, entrega, estado_db, estado_entrega_db = rows_map[pedido_id]
         estado_nombre = str((estado_db.nombreEstado if estado_db else "SIN_ESTADO") or "SIN_ESTADO")
         approval_gate = _approval_gate_summary(
             db,
@@ -2785,6 +2790,16 @@ def listar_pedidos(
                 puedeAprobar=approval_gate["puedeAprobar"],
                 motivoBloqueoAprobacion=approval_gate["motivo"],
                 estado=estado_nombre,
+                estadoEntrega=(
+                    str(estado_entrega_db.nombre).strip()
+                    if estado_entrega_db and estado_entrega_db.nombre
+                    else None
+                ),
+                estadoEntregaCodigo=(
+                    str(estado_entrega_db.codigo).strip()
+                    if estado_entrega_db and estado_entrega_db.codigo
+                    else None
+                ),
                 motivoRechazo=pedido.motivoRechazo,
                 telefono=str((cliente.telefono if cliente else None) or ""),
                 telefonoCompleto=str(cliente.telefonoCompleto or "") if hasattr(cliente, "telefonoCompleto") else None,
