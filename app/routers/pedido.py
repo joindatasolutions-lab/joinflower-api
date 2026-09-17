@@ -2992,6 +2992,8 @@ def listar_alertas_pedidos_nuevos_creados(
               ON ep.id_estado_pedido = p.estado_pedido_id
             WHERE p.empresa_id = :empresa_id
               AND p.id_pedido > :since_pedido_id
+              AND p.created_at >= CURRENT_DATE
+              AND p.created_at < CURRENT_DATE + INTERVAL '1 day'
               {sucursal_filter}
               AND UPPER(COALESCE(ep.nombre_estado, '')) IN ('CREADO', 'PENDIENTE')
               AND COALESCE(lc.accion, 'CREAR_PEDIDO_EXTERNO_SIN_AUDITORIA') NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA')
