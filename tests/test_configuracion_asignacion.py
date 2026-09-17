@@ -64,6 +64,7 @@ def test_obtener_configuracion_sin_fila_retorna_ambos_flags_activos_por_defecto(
     assert resultado.notificacionPedidoAceptadoActiva is True
     assert resultado.notificacionPedidoEntregadoActiva is True
     assert resultado.notificacionNuevoPedidoDomiciliarioActiva is False
+    assert resultado.vozPedidosActiva is False
 
 
 def test_obtener_configuracion_con_fila_desactivada_respeta_el_apagado():
@@ -117,6 +118,7 @@ def test_actualizar_configuracion_crea_fila_si_no_existe():
     assert db.added[0].asignacionProduccionActiva is False
     # El campo no enviado arranca activo por defecto (misma convencion que el GET).
     assert db.added[0].asignacionDomicilioActiva is True
+    assert db.added[0].vozPedidosActiva is False
     assert resultado.asignacionProduccionActiva is False
     assert db.commits == 1
 
@@ -172,3 +174,22 @@ def test_actualizar_configuracion_activa_notificacion_domiciliario_sin_tocar_cli
     assert resultado.notificacionNuevoPedidoDomiciliarioActiva is True
     assert resultado.notificacionPedidoAceptadoActiva is True
     assert resultado.notificacionPedidoEntregadoActiva is True
+
+
+def test_actualizar_configuracion_activa_voz_pedidos_sin_tocar_asignaciones():
+    config = EmpresaConfiguracionAsignacion(
+        empresaID=999,
+        asignacionProduccionActiva=True,
+        asignacionDomicilioActiva=True,
+        vozPedidosActiva=False,
+    )
+    db = FakeSession(config=config)
+    payload = ConfiguracionAsignacionUpdateRequest(vozPedidosActiva=True)
+
+    resultado = configuracion_router.actualizar_configuracion_asignacion(
+        empresa_id=999, payload=payload, db=db, auth=FAKE_AUTH_TENANT
+    )
+
+    assert resultado.vozPedidosActiva is True
+    assert resultado.asignacionProduccionActiva is True
+    assert resultado.asignacionDomicilioActiva is True

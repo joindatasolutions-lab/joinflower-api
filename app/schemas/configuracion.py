@@ -63,6 +63,7 @@ class ConfiguracionAsignacionResponse(BaseModel):
     notificacionPedidoAceptadoActiva: bool
     notificacionPedidoEntregadoActiva: bool
     notificacionNuevoPedidoDomiciliarioActiva: bool
+    vozPedidosActiva: bool
 
 
 class ConfiguracionAsignacionUpdateRequest(BaseModel):
@@ -72,6 +73,16 @@ class ConfiguracionAsignacionUpdateRequest(BaseModel):
     notificacionPedidoAceptadoActiva: bool | None = None
     notificacionPedidoEntregadoActiva: bool | None = None
     notificacionNuevoPedidoDomiciliarioActiva: bool | None = None
+    vozPedidosActiva: bool | None = None
+
+
+class ConfiguracionVozPedidosResponse(BaseModel):
+    empresaID: int
+    vozPedidosActiva: bool
+
+
+class ConfiguracionVozPedidosUpdateRequest(BaseModel):
+    vozPedidosActiva: bool
 
 
 class ConfiguracionCatalogoTransferenciaResponse(BaseModel):

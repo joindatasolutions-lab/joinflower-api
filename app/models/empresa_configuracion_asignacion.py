@@ -18,5 +18,6 @@ class EmpresaConfiguracionAsignacion(Base):
     notificacionNuevoPedidoDomiciliarioActiva = Column(
         "notificacion_nuevo_pedido_domiciliario_activa", Boolean, nullable=False, default=False
     )
+    vozPedidosActiva = Column("voz_pedidos_activa", Boolean, nullable=False, default=False)
     createdAt = Column("created_at", DateTime, nullable=False)
     updatedAt = Column("updated_at", DateTime, nullable=False)

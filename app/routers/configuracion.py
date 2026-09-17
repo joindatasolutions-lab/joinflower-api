@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.security import assert_same_empresa, get_current_auth_context, require_admin_role
+from app.core.security import assert_same_empresa, get_current_auth_context, require_admin_role, require_module_access
 from app.database import get_db
 from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.schemas.configuracion import (
@@ -17,6 +17,8 @@ from app.schemas.configuracion import (
     ConfiguracionCatalogoTransferenciaUpdateRequest,
     ConfiguracionAsignacionResponse,
     ConfiguracionAsignacionUpdateRequest,
+    ConfiguracionVozPedidosResponse,
+    ConfiguracionVozPedidosUpdateRequest,
     MenuCampoItem,
     MenuCampoListResponse,
     MenuCampoUpdateRequest,
@@ -43,6 +45,47 @@ def _clean_optional_text(value: str | None) -> str | None:
         return None
     cleaned = str(value).strip()
     return cleaned or None
+
+
+def _build_configuracion_asignacion_response(empresa_id: int, config: EmpresaConfiguracionAsignacion | None) -> ConfiguracionAsignacionResponse:
+    return ConfiguracionAsignacionResponse(
+        empresaID=empresa_id,
+        asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else True,
+        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else True,
+        autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva) if config else True,
+        notificacionPedidoAceptadoActiva=bool(config.notificacionPedidoAceptadoActiva) if config else True,
+        notificacionPedidoEntregadoActiva=bool(config.notificacionPedidoEntregadoActiva) if config else True,
+        notificacionNuevoPedidoDomiciliarioActiva=(
+            bool(config.notificacionNuevoPedidoDomiciliarioActiva) if config else False
+        ),
+        vozPedidosActiva=bool(config.vozPedidosActiva) if config else False,
+    )
+
+
+def _get_or_create_configuracion_asignacion(db: Session, empresa_id: int) -> EmpresaConfiguracionAsignacion:
+    config = (
+        db.query(EmpresaConfiguracionAsignacion)
+        .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
+        .first()
+    )
+    if config is not None:
+        return config
+
+    now = datetime.now(timezone.utc)
+    config = EmpresaConfiguracionAsignacion(
+        empresaID=empresa_id,
+        asignacionProduccionActiva=True,
+        asignacionDomicilioActiva=True,
+        autoAsignacionProduccionActiva=True,
+        notificacionPedidoAceptadoActiva=True,
+        notificacionPedidoEntregadoActiva=True,
+        notificacionNuevoPedidoDomiciliarioActiva=False,
+        vozPedidosActiva=False,
+        createdAt=now,
+        updatedAt=now,
+    )
+    db.add(config)
+    return config
 
 
 def _catalogo_select_sql(meta: dict, campo: str) -> str:
@@ -523,17 +566,7 @@ def obtener_configuracion_asignacion(
     # Sin fila de configuracion = autoasignacion activa por defecto (opt-out, no opt-in):
     # asi ninguna floristeria existente pierde la autoasignacion que ya tenia antes de
     # que este flag existiera. El admin puede desactivarla explicitamente si no la quiere.
-    return ConfiguracionAsignacionResponse(
-        empresaID=empresa_id,
-        asignacionProduccionActiva=bool(config.asignacionProduccionActiva) if config else True,
-        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva) if config else True,
-        autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva) if config else True,
-        notificacionPedidoAceptadoActiva=bool(config.notificacionPedidoAceptadoActiva) if config else True,
-        notificacionPedidoEntregadoActiva=bool(config.notificacionPedidoEntregadoActiva) if config else True,
-        notificacionNuevoPedidoDomiciliarioActiva=(
-            bool(config.notificacionNuevoPedidoDomiciliarioActiva) if config else False
-        ),
-    )
+    return _build_configuracion_asignacion_response(empresa_id, config)
 
 
 @router.put("/empresas/{empresa_id}/asignacion", response_model=ConfiguracionAsignacionResponse)
@@ -544,26 +577,7 @@ def actualizar_configuracion_asignacion(
     auth=Depends(require_admin_role),
 ):
     assert_same_empresa(auth, empresa_id)
-    config = (
-        db.query(EmpresaConfiguracionAsignacion)
-        .filter(EmpresaConfiguracionAsignacion.empresaID == empresa_id)
-        .first()
-    )
-    if config is None:
-        # Misma logica de default que el GET: si esta floristeria nunca configuro nada,
-        # arranca con ambas activas (no se le quita algo que ya tenia).
-        config = EmpresaConfiguracionAsignacion(
-            empresaID=empresa_id,
-            asignacionProduccionActiva=True,
-            asignacionDomicilioActiva=True,
-            autoAsignacionProduccionActiva=True,
-            notificacionPedidoAceptadoActiva=True,
-            notificacionPedidoEntregadoActiva=True,
-            notificacionNuevoPedidoDomiciliarioActiva=False,
-            createdAt=datetime.now(timezone.utc),
-            updatedAt=datetime.now(timezone.utc),
-        )
-        db.add(config)
+    config = _get_or_create_configuracion_asignacion(db, empresa_id)
 
     if payload.asignacionProduccionActiva is not None:
         config.asignacionProduccionActiva = payload.asignacionProduccionActiva
@@ -577,17 +591,34 @@ def actualizar_configuracion_asignacion(
         config.notificacionPedidoEntregadoActiva = payload.notificacionPedidoEntregadoActiva
     if payload.notificacionNuevoPedidoDomiciliarioActiva is not None:
         config.notificacionNuevoPedidoDomiciliarioActiva = payload.notificacionNuevoPedidoDomiciliarioActiva
+    if payload.vozPedidosActiva is not None:
+        config.vozPedidosActiva = payload.vozPedidosActiva
     config.updatedAt = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(config)
 
-    return ConfiguracionAsignacionResponse(
+    return _build_configuracion_asignacion_response(empresa_id, config)
+
+
+@router.put(
+    "/empresas/{empresa_id}/voz-pedidos",
+    response_model=ConfiguracionVozPedidosResponse,
+    dependencies=[Depends(require_module_access("pedidos", "puedeVer"))],
+)
+def actualizar_configuracion_voz_pedidos(
+    empresa_id: int,
+    payload: ConfiguracionVozPedidosUpdateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    config = _get_or_create_configuracion_asignacion(db, empresa_id)
+    config.vozPedidosActiva = bool(payload.vozPedidosActiva)
+    config.updatedAt = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(config)
+    return ConfiguracionVozPedidosResponse(
         empresaID=empresa_id,
-        asignacionProduccionActiva=bool(config.asignacionProduccionActiva),
-        asignacionDomicilioActiva=bool(config.asignacionDomicilioActiva),
-        autoAsignacionProduccionActiva=bool(config.autoAsignacionProduccionActiva),
-        notificacionPedidoAceptadoActiva=bool(config.notificacionPedidoAceptadoActiva),
-        notificacionPedidoEntregadoActiva=bool(config.notificacionPedidoEntregadoActiva),
-        notificacionNuevoPedidoDomiciliarioActiva=bool(config.notificacionNuevoPedidoDomiciliarioActiva),
+        vozPedidosActiva=bool(config.vozPedidosActiva),
     )
