@@ -34,6 +34,8 @@ from app.schemas.pedido import (
     PedidoCreate,
     PedidoManualRequest,
     PedidoManualResponse,
+    PedidoVentaRapidaRequest,
+    PedidoVentaRapidaResponse,
     PedidoListResponse,
     PedidoListItem,
     PedidoListKpiSummary,
@@ -5041,6 +5043,566 @@ def _nombres_productos_duplicados(productos_normalizados: list[dict], productos_
         (productos_map[producto_id].nombreProducto if producto_id in productos_map else f"#{producto_id}")
         for producto_id in duplicados_ids
     ]
+
+
+def _metodos_pago_payload(data: PedidoVentaRapidaRequest) -> list[str]:
+    raw = data.metodosPago if data.metodosPago is not None else ([data.metodoPago] if data.metodoPago else [])
+    return [str(item or "").strip() for item in raw if str(item or "").strip()]
+
+
+def _detalle_pago_payload(data: PedidoVentaRapidaRequest, *, total: Decimal, metodos_pago: list[str]) -> list[dict] | None:
+    if isinstance(data.detallePago, list) and data.detallePago:
+        return data.detallePago
+    if len(metodos_pago) == 1:
+        return [{"metodo": metodos_pago[0], "monto": float(total)}]
+    return None
+
+
+def _get_or_create_cliente_mostrador(db: Session, *, empresa_id: int) -> Cliente:
+    cliente = (
+        db.query(Cliente)
+        .filter(
+            Cliente.empresaID == int(empresa_id),
+            Cliente.identificacion == "MOSTRADOR",
+        )
+        .order_by(Cliente.idCliente.asc())
+        .first()
+    )
+    if cliente:
+        return cliente
+
+    now = colombia_now_naive()
+    cliente = Cliente(
+        empresaID=int(empresa_id),
+        tipoIdent="CC",
+        identificacion="MOSTRADOR",
+        indicativo=None,
+        telefonoCompleto=None,
+        nombreCompleto="Cliente mostrador",
+        telefono=None,
+        email=None,
+        activo=1,
+        createdAt=now,
+        updatedAt=now,
+    )
+    db.add(cliente)
+    db.flush()
+    return cliente
+
+
+def _categoria_venta_unidad_id(db: Session, *, empresa_id: int) -> int:
+    row = db.execute(
+        text(
+            """
+            SELECT id_categoria
+            FROM petalops.categoria
+            WHERE empresa_id = :empresa_id
+              AND lower(nombre) = lower('Venta por unidad')
+            LIMIT 1
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    if row:
+        return int(row[0])
+    inserted = db.execute(
+        text(
+            """
+            INSERT INTO petalops.categoria (empresa_id, nombre, activo, created_at)
+            VALUES (:empresa_id, 'Venta por unidad', TRUE, NOW())
+            RETURNING id_categoria
+            """
+        ),
+        {"empresa_id": int(empresa_id)},
+    ).first()
+    return int(inserted[0])
+
+
+def _ensure_producto_sucursal_unidad(
+    db: Session,
+    *,
+    producto_id: int,
+    sucursal_id: int,
+    precio: Decimal,
+) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT id_producto_sucursal
+            FROM petalops.producto_sucursal
+            WHERE producto_id = :producto_id
+              AND sucursal_id = :sucursal_id
+            LIMIT 1
+            """
+        ),
+        {"producto_id": int(producto_id), "sucursal_id": int(sucursal_id)},
+    ).first()
+    if row:
+        db.execute(
+            text(
+                """
+                UPDATE petalops.producto_sucursal
+                SET activo = TRUE,
+                    updated_at = NOW()
+                WHERE id_producto_sucursal = :id_producto_sucursal
+                """
+            ),
+            {"id_producto_sucursal": int(row[0])},
+        )
+        return
+
+    db.execute(
+        text(
+            """
+            INSERT INTO petalops.producto_sucursal (
+                producto_id, sucursal_id, precio, activo, created_at, updated_at
+            ) VALUES (
+                :producto_id, :sucursal_id, :precio, TRUE, NOW(), NOW()
+            )
+            """
+        ),
+        {
+            "producto_id": int(producto_id),
+            "sucursal_id": int(sucursal_id),
+            "precio": precio,
+        },
+    )
+
+
+def _ensure_producto_venta_unidad(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    insumo_id: int,
+    nombre: str,
+    codigo: str | None,
+    precio_default: Decimal,
+    producto_venta_id: int | None,
+) -> int:
+    if producto_venta_id:
+        row = db.execute(
+            text(
+                """
+                SELECT id_producto
+                FROM petalops.producto
+                WHERE id_producto = :producto_id
+                  AND empresa_id = :empresa_id
+                  AND lower(CAST(activo AS VARCHAR)) IN ('true', 't', '1')
+                LIMIT 1
+                """
+            ),
+            {"producto_id": int(producto_venta_id), "empresa_id": int(empresa_id)},
+        ).first()
+        if row:
+            _ensure_producto_sucursal_unidad(
+                db,
+                producto_id=int(producto_venta_id),
+                sucursal_id=int(sucursal_id),
+                precio=precio_default,
+            )
+            return int(producto_venta_id)
+
+    categoria_id = _categoria_venta_unidad_id(db, empresa_id=int(empresa_id))
+    base = re.sub(r"[^A-Z0-9]+", "", str(codigo or nombre or "UNIDAD").upper())[:24] or "UNIDAD"
+    codigo_producto = f"UNI-{base}-{int(insumo_id)}"[:50]
+    nombre_producto = f"{str(nombre or 'Flor').strip()} unidad"
+    row = db.execute(
+        text(
+            """
+            INSERT INTO petalops.producto (
+                empresa_id, categoria_id, codigo_producto, codigo_catalogo,
+                nombre_producto, descripcion, porcentaje_iva, iva_incluido,
+                activo, created_at, updated_at
+            ) VALUES (
+                :empresa_id, :categoria_id, :codigo_producto, :codigo_catalogo,
+                :nombre_producto, :descripcion, 0, TRUE,
+                TRUE, NOW(), NOW()
+            )
+            RETURNING id_producto
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "categoria_id": int(categoria_id),
+            "codigo_producto": codigo_producto,
+            "codigo_catalogo": codigo_producto,
+            "nombre_producto": nombre_producto,
+            "descripcion": "Producto generado para venta rapida por unidad desde inventario.",
+        },
+    ).first()
+    producto_id = int(row[0])
+    _ensure_producto_sucursal_unidad(
+        db,
+        producto_id=producto_id,
+        sucursal_id=int(sucursal_id),
+        precio=precio_default,
+    )
+    db.execute(
+        text(
+            """
+            UPDATE petalops.insumo
+            SET producto_venta_id = :producto_id,
+                updated_at = NOW()
+            WHERE id_insumo = :insumo_id
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "producto_id": producto_id,
+            "insumo_id": int(insumo_id),
+            "empresa_id": int(empresa_id),
+        },
+    )
+    return producto_id
+
+
+def _load_venta_rapida_items(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    items: list,
+) -> list[dict]:
+    if not _column_exists(db, "insumo", "vendible_unidad") or not _column_exists(db, "insumo", "producto_venta_id"):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "VENTA_RAPIDA_SCHEMA_PENDING",
+                "message": "Falta aplicar la migracion de venta rapida en inventario.",
+            },
+        )
+
+    result = []
+    seen_inventory_ids: set[int] = set()
+    for item in items:
+        inventario_id = int(item.inventarioID)
+        if inventario_id in seen_inventory_ids:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "VENTA_RAPIDA_ITEM_DUPLICATED", "message": "No repitas la misma flor; aumenta la cantidad en una sola linea."},
+            )
+        seen_inventory_ids.add(inventario_id)
+        cantidad = Decimal(str(item.cantidad or 0))
+        if cantidad <= 0:
+            raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_QUANTITY_INVALID", "message": "La cantidad debe ser mayor que 0."})
+
+        row = db.execute(
+            text(
+                """
+                SELECT
+                    inv.id_inventario,
+                    inv.insumo_id,
+                    inv.stock_actual,
+                    inv.activo AS inventario_activo,
+                    ins.nombre_insumo,
+                    ins.codigo_barra,
+                    ins.precio_venta,
+                    ins.vendible_unidad,
+                    ins.producto_venta_id,
+                    ins.activo AS insumo_activo
+                FROM petalops.inventario inv
+                JOIN petalops.insumo ins
+                  ON ins.id_insumo = inv.insumo_id
+                 AND ins.empresa_id = inv.empresa_id
+                WHERE inv.id_inventario = :inventario_id
+                  AND inv.empresa_id = :empresa_id
+                  AND inv.sucursal_id = :sucursal_id
+                FOR UPDATE OF inv, ins
+                """
+            ),
+            {
+                "inventario_id": inventario_id,
+                "empresa_id": int(empresa_id),
+                "sucursal_id": int(sucursal_id),
+            },
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": "VENTA_RAPIDA_ITEM_NOT_FOUND", "message": "Una flor no existe en inventario para esta sucursal."})
+        if not bool(row["inventario_activo"]) or not bool(row["insumo_activo"]):
+            raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_ITEM_INACTIVE", "message": f"{row['nombre_insumo']} esta inactivo."})
+        if not bool(row["vendible_unidad"]):
+            raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_ITEM_NOT_SELLABLE", "message": f"{row['nombre_insumo']} no esta marcado como vendible por unidad."})
+        stock_actual = Decimal(row["stock_actual"] or 0)
+        if stock_actual < cantidad:
+            raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_STOCK_INSUFFICIENT", "message": f"Stock insuficiente para {row['nombre_insumo']}."})
+
+        precio = item.precioUnitario if item.precioUnitario is not None else row["precio_venta"]
+        precio_unitario = _round_money_decimal(Decimal(str(precio or 0)))
+        if precio_unitario <= 0:
+            raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_PRICE_INVALID", "message": f"El precio de {row['nombre_insumo']} debe ser mayor que 0."})
+        producto_id = _ensure_producto_venta_unidad(
+            db,
+            empresa_id=int(empresa_id),
+            sucursal_id=int(sucursal_id),
+            insumo_id=int(row["insumo_id"]),
+            nombre=str(row["nombre_insumo"] or "Flor"),
+            codigo=(str(row["codigo_barra"]) if row["codigo_barra"] else None),
+            precio_default=precio_unitario,
+            producto_venta_id=(int(row["producto_venta_id"]) if row["producto_venta_id"] is not None else None),
+        )
+        result.append(
+            {
+                "inventarioID": inventario_id,
+                "insumoID": int(row["insumo_id"]),
+                "productoID": producto_id,
+                "nombre": str(row["nombre_insumo"] or "Flor"),
+                "cantidad": cantidad,
+                "precioUnitario": precio_unitario,
+                "subtotal": (precio_unitario * cantidad).quantize(Decimal("0.01")),
+            }
+        )
+    return result
+
+
+def _registrar_salida_inventario_venta_rapida(
+    db: Session,
+    *,
+    auth,
+    empresa_id: int,
+    item: dict,
+    referencia: str,
+    observaciones: str | None,
+) -> int:
+    tipo_movimiento_id = db.execute(
+        text(
+            """
+            SELECT id_tipo_movimiento
+            FROM petalops.tipo_movimiento
+            WHERE lower(COALESCE(codigo, nombre)) = 'salida'
+               OR lower(nombre) = 'salida'
+            LIMIT 1
+            """
+        )
+    ).scalar()
+    tipo_movimiento_id = int(tipo_movimiento_id or 2)
+    stock_row = db.execute(
+        text(
+            """
+            SELECT stock_actual
+            FROM petalops.inventario
+            WHERE id_inventario = :inventario_id
+              AND empresa_id = :empresa_id
+            FOR UPDATE
+            """
+        ),
+        {"inventario_id": int(item["inventarioID"]), "empresa_id": int(empresa_id)},
+    ).first()
+    stock_anterior = Decimal(stock_row[0] or 0)
+    stock_nuevo = stock_anterior - Decimal(item["cantidad"])
+    if stock_nuevo < 0:
+        raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_STOCK_INSUFFICIENT", "message": f"Stock insuficiente para {item['nombre']}."})
+    db.execute(
+        text(
+            """
+            UPDATE petalops.inventario
+            SET stock_actual = :stock_nuevo,
+                fechaultimaactualizacion = NOW(),
+                updated_at = NOW()
+            WHERE id_inventario = :inventario_id
+              AND empresa_id = :empresa_id
+            """
+        ),
+        {
+            "stock_nuevo": stock_nuevo,
+            "inventario_id": int(item["inventarioID"]),
+            "empresa_id": int(empresa_id),
+        },
+    )
+    inserted = db.execute(
+        text(
+            """
+            INSERT INTO petalops.movimiento_inventario (
+                empresa_id, inventario_id, tipo_movimiento_id, cantidad, fecha,
+                motivo, usuario_id, created_at, estado, stock_anterior,
+                stock_nuevo, referencia, pedido_referencia, observaciones,
+                precio_unitario
+            ) VALUES (
+                :empresa_id, :inventario_id, :tipo_movimiento_id, :cantidad, NOW(),
+                'Venta rapida por unidad', :usuario_id, NOW(), 'Registrado',
+                :stock_anterior, :stock_nuevo, :referencia, :referencia,
+                :observaciones, :precio_unitario
+            )
+            RETURNING id_movimiento
+            """
+        ),
+        {
+            "empresa_id": int(empresa_id),
+            "inventario_id": int(item["inventarioID"]),
+            "tipo_movimiento_id": tipo_movimiento_id,
+            "cantidad": item["cantidad"],
+            "usuario_id": (int(getattr(auth, "userID")) if getattr(auth, "userID", None) is not None else None),
+            "stock_anterior": stock_anterior,
+            "stock_nuevo": stock_nuevo,
+            "referencia": referencia[:80],
+            "observaciones": observaciones,
+            "precio_unitario": item["precioUnitario"],
+        },
+    ).first()
+    return int(inserted[0])
+
+
+@router.post("/pedido/venta-rapida", response_model=PedidoVentaRapidaResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])
+@limiter.limit(rate_limit("pedido_venta_rapida", "60/minute"))
+def crear_pedido_venta_rapida(request: Request, data: PedidoVentaRapidaRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
+    empresa_id = int(data.empresaID if data.empresaID is not None else data.empresaId or 0)
+    sucursal_id = int(data.sucursalID if data.sucursalID is not None else data.sucursalId or 0)
+    if empresa_id <= 0 or sucursal_id <= 0:
+        raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_SCOPE_INVALID", "message": "empresaID y sucursalID son obligatorios."})
+    assert_same_empresa(auth, empresa_id)
+    if not data.items:
+        raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_ITEMS_EMPTY", "message": "Agrega al menos una flor."})
+
+    metodos_pago = _metodos_pago_payload(data)
+    if not metodos_pago:
+        raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_PAYMENT_REQUIRED", "message": "Metodo de pago es obligatorio."})
+    canal_flora = str(data.canalFlora or "").strip()
+    if not canal_flora:
+        raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_CHANNEL_REQUIRED", "message": "Canal de venta es obligatorio."})
+
+    try:
+        estado_aprobado = _buscar_estado_por_nombre(db, "APROBADO", "PAGADO")
+        if not estado_aprobado:
+            raise HTTPException(status_code=400, detail="No existe estado de aprobacion activo (APROBADO/PAGADO)")
+        estado_entregado_id = domicilio_service.resolve_estado_entrega_id(db, domicilio_service.ESTADO_ENTREGADO)
+
+        items = _load_venta_rapida_items(db, empresa_id=empresa_id, sucursal_id=sucursal_id, items=data.items)
+        total_bruto = sum((item["subtotal"] for item in items), Decimal("0.00")).quantize(Decimal("0.01"))
+
+        cliente_payload = data.cliente
+        if data.registrarCliente and cliente_payload and str(cliente_payload.nombreCompleto or cliente_payload.nombres or "").strip():
+            cliente = _upsert_cliente_pedido_manual(
+                db,
+                empresa_id=empresa_id,
+                tipo_ident=_normalize_ident_type(cliente_payload.tipoIdent) or "CC",
+                identificacion=cliente_payload.identificacion,
+                indicativo=cliente_payload.indicativo,
+                nombre_completo=str(cliente_payload.nombreCompleto or cliente_payload.nombres or "").strip(),
+                telefono=str(cliente_payload.telefono or "").strip(),
+                email=cliente_payload.email,
+            )
+        else:
+            cliente = _get_or_create_cliente_mostrador(db, empresa_id=empresa_id)
+
+        numero_pedido, codigo_pedido = generar_numeracion_pedido(db=db, empresa_id=empresa_id, sucursal_id=sucursal_id)
+        now = colombia_now_naive()
+        pedido = Pedido(
+            empresaID=empresa_id,
+            sucursalID=sucursal_id,
+            numeroPedido=numero_pedido,
+            codigoPedido=codigo_pedido,
+            clienteID=int(cliente.idCliente),
+            fechaPedido=now,
+            estadoPedidoID=int(estado_aprobado.idEstadoPedido),
+            totalBruto=total_bruto,
+            totalIva=Decimal("0.00"),
+            costoDomicilio=Decimal("0.00"),
+            domicilioObsequiado=False,
+            omitirCostoDomicilio=False,
+            domicilioOriginal=Decimal("0.00"),
+            descuentoDomicilio=Decimal("0.00"),
+            totalNeto=total_bruto,
+            createdAt=now,
+            updatedAt=now,
+        )
+        db.add(pedido)
+        db.flush()
+
+        for item in items:
+            db.add(
+                PedidoDetalle(
+                    empresaID=empresa_id,
+                    sucursalID=sucursal_id,
+                    pedidoID=int(pedido.idPedido),
+                    productoID=int(item["productoID"]),
+                    cantidad=item["cantidad"],
+                    precioUnitario=item["precioUnitario"],
+                    ivaUnitario=Decimal("0.00"),
+                    subtotal=item["subtotal"],
+                    observacionesPersonalizados="Venta rapida por unidad",
+                )
+            )
+
+        db.add(
+            Entrega(
+                empresaID=empresa_id,
+                sucursalID=sucursal_id,
+                pedidoID=int(pedido.idPedido),
+                estadoEntregaID=int(estado_entregado_id),
+                tipoEntrega="recogida_en_tienda",
+                destinatario=str(cliente.nombreCompleto or "Cliente mostrador"),
+                telefonoDestino=str(cliente.telefono or "") or None,
+                direccion="Recoger En Tienda",
+                barrioID=None,
+                barrioNombre="Recoger en tienda",
+                rangoHora=now.strftime("%H:%M"),
+                mensaje=None,
+                firma=None,
+                observacionGeneral=data.observaciones,
+                fechaEntregaProgramada=now,
+                fechaEntrega=now,
+                intentoNumero=1,
+                createdAt=now,
+                updatedAt=now,
+            )
+        )
+
+        referencia = str(codigo_pedido or f"PED-{int(pedido.idPedido)}")
+        movimientos = [
+            _registrar_salida_inventario_venta_rapida(
+                db,
+                auth=auth,
+                empresa_id=empresa_id,
+                item=item,
+                referencia=referencia,
+                observaciones=data.observaciones,
+            )
+            for item in items
+        ]
+
+        detalle_pago = _detalle_pago_payload(data, total=total_bruto, metodos_pago=metodos_pago)
+        _upsert_pago_flora(
+            db,
+            pedido_id=int(pedido.idPedido),
+            empresa_id=empresa_id,
+            monto=total_bruto,
+            metodos_pago=metodos_pago,
+            canal_flora=canal_flora,
+            detalle_pago=detalle_pago,
+        )
+        _audit_pedido_action(
+            db=db,
+            actor=auth,
+            pedido=pedido,
+            accion="CREAR_VENTA_RAPIDA",
+            estado_origen_id=None,
+            estado_destino_id=int(estado_aprobado.idEstadoPedido),
+            extra={
+                "numeroPedido": int(numero_pedido),
+                "codigoPedido": codigo_pedido,
+                "estadoEntregaDestinoID": int(estado_entregado_id),
+                "cantidadItems": len(items),
+                "movimientosInventario": movimientos,
+            },
+        )
+        db.commit()
+        return {
+            "pedidoID": int(pedido.idPedido),
+            "numeroPedido": int(numero_pedido),
+            "codigoPedido": codigo_pedido,
+            "pedidoIDs": [int(pedido.idPedido)],
+            "cantidadPedidos": 1,
+            "total": float(total_bruto),
+            "estado": str(estado_aprobado.nombreEstado or "APROBADO"),
+            "estadoEntrega": domicilio_service.ESTADO_ENTREGADO,
+            "movimientosInventario": movimientos,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error registrando venta rapida: {exc}")
 
 
 @router.post("/pedido/manual", response_model=PedidoManualResponse, dependencies=[Depends(require_module_access("pedidos", "puedeCrear"))])

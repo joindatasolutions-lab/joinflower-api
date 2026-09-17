@@ -99,6 +99,8 @@ def _to_item(
     fecha_vencimiento=None,
     marca: str | None = None,
     precio_venta: Decimal | None = None,
+    vendible_unidad: bool = False,
+    producto_venta_id: int | None = None,
     proveedor_id: int | None = None,
     proveedor_nombre: str | None = None,
     codigo_proveedor: str | None = None,
@@ -119,6 +121,8 @@ def _to_item(
         fechaVencimiento=fecha_vencimiento,
         marca=(str(marca) if marca is not None else None),
         precioVenta=(Decimal(precio_venta) if precio_venta is not None else None),
+        vendibleUnidad=bool(vendible_unidad),
+        productoVentaID=(int(producto_venta_id) if producto_venta_id is not None else None),
         proveedorID=(int(proveedor_id) if proveedor_id is not None else None),
         proveedor=proveedor_nombre,
         codigoProveedor=(str(codigo_proveedor) if codigo_proveedor is not None else None),
@@ -299,6 +303,8 @@ def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
         fecha_vencimiento=(insumo.fechaVencimiento if insumo else None),
         marca=(str(insumo.marca) if insumo and insumo.marca else None),
         precio_venta=(Decimal(insumo.precioVenta) if insumo and insumo.precioVenta is not None else None),
+        vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo else False,
+        producto_venta_id=(int(getattr(insumo, "productoVentaID")) if insumo and getattr(insumo, "productoVentaID", None) is not None else None),
         proveedor_id=(int(insumo.proveedorID) if insumo and insumo.proveedorID is not None else None),
         proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
         codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
@@ -720,8 +726,10 @@ def listar_inventario(
     subcategoria: str | None = Query(None),
     estado: str | None = Query(None),
     proveedor_id: int | None = Query(None, alias="proveedorID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
     q: str | None = Query(None),
     solo_criticos: bool = Query(False, alias="soloCriticos"),
+    solo_vendibles: bool = Query(False, alias="soloVendibles"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=500, ge=1, le=1000, alias="pageSize"),
     db: Session = Depends(get_db),
@@ -737,6 +745,7 @@ def listar_inventario(
     )
 
     has_categoria_col = _has_column(db, "insumo", "categoria")
+    has_vendible_col = _has_column(db, "insumo", "vendible_unidad")
 
     if categoria:
         if has_categoria_col:
@@ -752,6 +761,14 @@ def listar_inventario(
 
     if proveedor_id is not None:
         query = query.filter(Proveedor.idProveedor == int(proveedor_id))
+
+    if sucursal_id is not None:
+        query = query.filter(Inventario.sucursalID == int(sucursal_id))
+
+    if solo_vendibles:
+        if not has_vendible_col:
+            return InventarioListResponse(items=[], total=0, page=page, pageSize=page_size)
+        query = query.filter(Insumo.vendibleUnidad.is_(True), Inventario.activo.is_(True), Insumo.activo.is_(True))
 
     if q:
         term = f"%{q.strip()}%"
@@ -794,6 +811,8 @@ def listar_inventario(
                 fecha_vencimiento=(insumo.fechaVencimiento if insumo and has_categoria_col else None),
                 marca=(str(insumo.marca) if insumo and has_categoria_col and insumo.marca else None),
                 precio_venta=(Decimal(insumo.precioVenta) if insumo and has_categoria_col and insumo.precioVenta is not None else None),
+                vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo and has_vendible_col else False,
+                producto_venta_id=(int(getattr(insumo, "productoVentaID")) if insumo and has_vendible_col and getattr(insumo, "productoVentaID", None) is not None else None),
                 proveedor_id=(int(proveedor.idProveedor) if proveedor else None),
                 proveedor_nombre=(str(proveedor.nombreProveedor) if proveedor else None),
                 codigo_proveedor=(str(proveedor.codigoProveedor) if proveedor and proveedor.codigoProveedor is not None else None),
@@ -835,6 +854,7 @@ def crear_item_inventario(
 
     has_cat    = _has_column(db, "insumo", "categoria")
     has_marca  = has_cat and _has_column(db, "insumo", "marca")
+    has_vendible = _has_column(db, "insumo", "vendible_unidad")
     now = datetime.now(timezone.utc)
 
     try:
@@ -938,6 +958,22 @@ def crear_item_inventario(
             ).first()
 
         insumo_id = int(insumo_row[0])
+        if has_vendible:
+            db.execute(
+                text(
+                    """
+                    UPDATE petalops.insumo
+                    SET vendible_unidad = :vendible_unidad
+                    WHERE id_insumo = :insumo_id
+                      AND empresa_id = :empresa_id
+                    """
+                ),
+                {
+                    "vendible_unidad": bool(payload.vendibleUnidad),
+                    "insumo_id": insumo_id,
+                    "empresa_id": int(payload.empresaID),
+                },
+            )
 
         item_row = db.execute(
             text(
@@ -1030,6 +1066,7 @@ def actualizar_item_inventario(
 
     has_cat   = _has_column(db, "insumo", "categoria")
     has_marca = has_cat and _has_column(db, "insumo", "marca")
+    has_vendible = _has_column(db, "insumo", "vendible_unidad")
     now = datetime.now(timezone.utc)
 
     insumo.nombreInsumo = payload.nombre.strip()
@@ -1052,6 +1089,9 @@ def actualizar_item_inventario(
     if has_marca:
         insumo.marca = (payload.marca.strip() if payload.marca else None)
         insumo.precioVenta = payload.precioVenta
+
+    if has_vendible:
+        insumo.vendibleUnidad = bool(payload.vendibleUnidad)
 
     item.stockMinimo = payload.stockMinimo
     item.valorUnitario = payload.valorUnitario

@@ -20,6 +20,8 @@ class Insumo(Base):
     fechaVencimiento = Column("fecha_vencimiento", Date, nullable=True)
     marca = Column("marca", String(100), nullable=True)
     precioVenta = Column("precio_venta", Numeric(12, 2), nullable=True)
+    vendibleUnidad = Column("vendible_unidad", Boolean, nullable=False, default=False)
+    productoVentaID = Column("producto_venta_id", BigInteger, ForeignKey("petalops.producto.id_producto"), nullable=True)
     proveedorID = Column("proveedor_id", BigInteger, ForeignKey("petalops.proveedor.id_proveedor"), nullable=True, index=True)
     activo = Column("activo", Boolean, nullable=False, default=True)
     createdAt = Column("created_at", DateTime)

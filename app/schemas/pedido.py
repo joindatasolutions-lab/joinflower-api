@@ -128,6 +128,27 @@ class PedidoManualRequest(BaseModel):
     omitirCostoDomicilio: bool = False
 
 
+class PedidoVentaRapidaItem(BaseModel):
+    inventarioID: int
+    cantidad: float = 1
+    precioUnitario: Optional[float] = None
+
+
+class PedidoVentaRapidaRequest(BaseModel):
+    empresaID: Optional[int] = None
+    empresaId: Optional[int] = None
+    sucursalID: Optional[int] = None
+    sucursalId: Optional[int] = None
+    registrarCliente: bool = False
+    cliente: Optional[PedidoManualClienteInput] = None
+    items: List[PedidoVentaRapidaItem]
+    metodoPago: Optional[str] = None
+    metodosPago: Optional[List[str]] = None
+    detallePago: Optional[List[dict]] = None
+    canalFlora: Optional[str] = None
+    observaciones: Optional[str] = None
+
+
 class PedidoCheckoutResponse(BaseModel):
     pedidoID: int
     numeroPedido: Optional[int] = None
@@ -144,6 +165,11 @@ class PedidoManualResponse(PedidoCheckoutResponse):
     domicilio: Optional[float] = None
     domicilioOriginal: Optional[float] = None
     descuentoDomicilio: Optional[float] = None
+
+
+class PedidoVentaRapidaResponse(PedidoCheckoutResponse):
+    estadoEntrega: str
+    movimientosInventario: List[int] = []
 
 
 class PedidoListProducto(BaseModel):
