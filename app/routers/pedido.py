@@ -1652,6 +1652,33 @@ def _build_pedido_adjustments(
     }
 
 
+def _normalize_detalle_pago_total(detalle_pago: list[dict], *, total_origen: Decimal, total_destino: Decimal) -> list[dict]:
+    total_origen = _round_money_decimal(total_origen)
+    total_destino = _round_money_decimal(total_destino)
+    if total_origen <= 0 or total_destino < 0:
+        return detalle_pago
+
+    normalized: list[dict] = []
+    monto_restante = total_destino
+    total_items = len(detalle_pago)
+    for index, item in enumerate(detalle_pago, start=1):
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        current = dict(item)
+        monto_actual = _round_money_decimal(current.get("monto") or current.get("valor") or current.get("amount") or 0)
+        if index < total_items:
+            monto_normalizado = _round_money_decimal((total_destino * monto_actual) / total_origen)
+        else:
+            monto_normalizado = monto_restante
+        current["monto"] = monto_normalizado
+        current.pop("valor", None)
+        current.pop("amount", None)
+        monto_restante -= monto_normalizado
+        normalized.append(current)
+    return normalized
+
+
 def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
     pago_row = db.execute(
         text(
@@ -3655,14 +3682,15 @@ def actualizar_detalle_pedido(
                 if payload.omitirRecargoLink is not None
                 else pago_resumen_actual.get("omitirRecargoLink")
             )
+            domicilio_ajustes = (
+                Decimal("0.00")
+                if _pedido_omite_costo_domicilio(pedido)
+                else Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
+            )
             ajustes = _build_pedido_adjustments(
                 subtotal=Decimal(str(pedido.totalBruto or 0)),
                 iva=Decimal(str(pedido.totalIva or 0)),
-                domicilio=(
-                    Decimal("0.00")
-                    if _pedido_omite_costo_domicilio(pedido)
-                    else Decimal(str(getattr(pedido, "costoDomicilio", 0) or 0))
-                ),
+                domicilio=domicilio_ajustes,
                 metodos_pago=metodos_pago,
                 omitir_recargo_link=omitir_recargo_link,
                 descuento_monto=descuento_monto,
@@ -3700,10 +3728,29 @@ def actualizar_detalle_pedido(
                         detail={"code": "PAYMENT_BREAKDOWN_REQUIRED", "message": "Debes indicar el monto correspondiente para cada método de pago."},
                     )
                 if _round_money_decimal(breakdown_total) != _round_money_decimal(ajustes["total"]):
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"code": "PAYMENT_BREAKDOWN_TOTAL_INVALID", "message": "La suma de los montos por método de pago debe ser igual al total del pedido."},
+                    ajustes_sin_iva = _build_pedido_adjustments(
+                        subtotal=Decimal(str(pedido.totalBruto or 0)),
+                        iva=Decimal("0.00"),
+                        domicilio=domicilio_ajustes,
+                        metodos_pago=metodos_pago,
+                        omitir_recargo_link=omitir_recargo_link,
+                        descuento_monto=descuento_monto,
+                        saldo_favor_monto=saldo_favor_monto,
                     )
+                    if (
+                        Decimal(str(pedido.totalIva or 0)) > 0
+                        and _round_money_decimal(breakdown_total) == _round_money_decimal(ajustes_sin_iva["total"])
+                    ):
+                        detalle_pago = _normalize_detalle_pago_total(
+                            detalle_pago,
+                            total_origen=breakdown_total,
+                            total_destino=ajustes["total"],
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"code": "PAYMENT_BREAKDOWN_TOTAL_INVALID", "message": "La suma de los montos por método de pago debe ser igual al total del pedido."},
+                        )
 
             monto_pago = Decimal(str(pedido.totalNeto or pedido.totalBruto or 0))
             _upsert_pago_flora(

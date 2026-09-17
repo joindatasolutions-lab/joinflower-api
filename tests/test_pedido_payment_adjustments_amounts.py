@@ -10,6 +10,7 @@ from app.routers.pedido import (
     _iva_unitario_for_producto,
     _load_pago_resumen,
     _manual_domicilio_amounts,
+    _normalize_detalle_pago_total,
     _payload_cliente_tipo_ident_value,
     _payload_producto_precio_value,
     _serialize_pago_metadata,
@@ -302,6 +303,25 @@ def test_sync_existing_pago_total_applies_nit_tax_to_full_custom_arrangement(mon
         Decimal("142800.00"),
         Decimal("95200.00"),
     ]
+
+
+def test_normalize_detalle_pago_total_scales_pre_tax_breakdown_to_nit_total():
+    detalle_pago = [
+        {"metodo": "Efectivo", "monto": Decimal("120000.00")},
+        {"metodo": "Transferencia", "monto": Decimal("80000.00")},
+    ]
+
+    normalized = _normalize_detalle_pago_total(
+        detalle_pago,
+        total_origen=Decimal("200000.00"),
+        total_destino=Decimal("238000.00"),
+    )
+
+    assert [item["monto"] for item in normalized] == [
+        Decimal("142800.00"),
+        Decimal("95200.00"),
+    ]
+    assert sum(item["monto"] for item in normalized) == Decimal("238000.00")
 
 
 def test_flora_phase2_requires_expected_columns():
