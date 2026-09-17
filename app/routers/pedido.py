@@ -2989,7 +2989,7 @@ def listar_alertas_pedidos_nuevos_creados(
             WHERE lc.id_audit > :since_audit_id
               {sucursal_filter}
               AND UPPER(COALESCE(ep.nombre_estado, '')) IN ('CREADO', 'PENDIENTE')
-              AND lc.accion NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA', 'CREAR_PEDIDO_LEGACY')
+              AND lc.accion NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA')
             ORDER BY lc.id_audit ASC
             LIMIT :limit
             """
