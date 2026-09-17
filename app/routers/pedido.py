@@ -483,6 +483,24 @@ def _ensure_pedido_auditoria_table(db: Session):
     db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_auditoria_pedido ON petalops.pedido_auditoria (empresa_id, pedido_id);"))
 
 
+def _ensure_pedido_alerta_voz_table(db: Session):
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS petalops.pedido_alerta_voz (
+              id_alerta BIGSERIAL PRIMARY KEY,
+              empresa_id BIGINT NOT NULL,
+              sucursal_id BIGINT,
+              pedido_id BIGINT NOT NULL,
+              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              CONSTRAINT uq_pedido_alerta_voz_empresa_pedido UNIQUE (empresa_id, pedido_id)
+            );
+            """
+        )
+    )
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_alerta_voz_empresa_fecha ON petalops.pedido_alerta_voz (empresa_id, created_at DESC);"))
+
+
 def _audit_pedido_action(
     db: Session,
     actor,
@@ -2939,6 +2957,7 @@ def listar_alertas_pedidos_nuevos_creados(
 ):
     assert_same_empresa(auth, int(empresa_id))
     _ensure_pedido_auditoria_table(db)
+    _ensure_pedido_alerta_voz_table(db)
 
     params = {
         "empresa_id": int(empresa_id),
@@ -2964,41 +2983,79 @@ def listar_alertas_pedidos_nuevos_creados(
                   AND pa.accion LIKE 'CREAR_%'
                 ORDER BY pa.pedido_id, pa.created_at DESC, pa.id_audit DESC
             )
+            , candidates AS (
+                SELECT
+                    lc.id_audit,
+                    lc.accion,
+                    lc.audit_created_at,
+                    p.id_pedido,
+                    p.sucursal_id,
+                    p.numero_pedido,
+                    p.codigo_pedido,
+                    p.total_neto,
+                    p.created_at,
+                    c.nombre_completo AS cliente,
+                    e.destinatario,
+                    ep.nombre_estado AS estado
+                FROM petalops.pedido p
+                LEFT JOIN latest_create lc
+                  ON lc.pedido_id = p.id_pedido
+                 AND lc.empresa_id = p.empresa_id
+                LEFT JOIN petalops.pedido_alerta_voz pav
+                  ON pav.empresa_id = p.empresa_id
+                 AND pav.pedido_id = p.id_pedido
+                LEFT JOIN petalops.cliente c
+                  ON c.cliente_id = p.cliente_id
+                 AND c.empresa_id = p.empresa_id
+                LEFT JOIN petalops.entrega e
+                  ON e.pedido_id = p.id_pedido
+                 AND e.empresa_id = p.empresa_id
+                LEFT JOIN petalops.estado_pedido ep
+                  ON ep.id_estado_pedido = p.estado_pedido_id
+                WHERE p.empresa_id = :empresa_id
+                  AND p.id_pedido > :since_pedido_id
+                  AND p.created_at >= CURRENT_DATE
+                  AND p.created_at < CURRENT_DATE + INTERVAL '1 day'
+                  {sucursal_filter}
+                  AND pav.pedido_id IS NULL
+                  AND UPPER(COALESCE(ep.nombre_estado, '')) IN ('CREADO', 'PENDIENTE')
+                  AND COALESCE(lc.accion, 'CREAR_PEDIDO_EXTERNO_SIN_AUDITORIA') NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA')
+                ORDER BY p.id_pedido ASC
+                LIMIT :limit
+            ), claimed AS (
+                INSERT INTO petalops.pedido_alerta_voz (
+                    empresa_id,
+                    sucursal_id,
+                    pedido_id,
+                    created_at
+                )
+                SELECT
+                    :empresa_id,
+                    candidates.sucursal_id,
+                    candidates.id_pedido,
+                    CURRENT_TIMESTAMP
+                FROM candidates
+                ON CONFLICT (empresa_id, pedido_id) DO NOTHING
+                RETURNING pedido_id
+            )
             SELECT
-                lc.id_audit,
-                lc.accion,
-                lc.audit_created_at,
-                p.id_pedido,
-                p.numero_pedido,
-                p.codigo_pedido,
-                p.total_neto,
-                p.created_at,
-                c.nombre_completo AS cliente,
-                e.destinatario,
-                ep.nombre_estado AS estado,
-                MAX(COALESCE(lc.id_audit, 0)) OVER() AS latest_audit_id,
-                MAX(p.id_pedido) OVER() AS latest_pedido_id
-            FROM petalops.pedido p
-            LEFT JOIN latest_create lc
-              ON lc.pedido_id = p.id_pedido
-             AND lc.empresa_id = p.empresa_id
-            LEFT JOIN petalops.cliente c
-              ON c.cliente_id = p.cliente_id
-             AND c.empresa_id = p.empresa_id
-            LEFT JOIN petalops.entrega e
-              ON e.pedido_id = p.id_pedido
-             AND e.empresa_id = p.empresa_id
-            LEFT JOIN petalops.estado_pedido ep
-              ON ep.id_estado_pedido = p.estado_pedido_id
-            WHERE p.empresa_id = :empresa_id
-              AND p.id_pedido > :since_pedido_id
-              AND p.created_at >= CURRENT_DATE
-              AND p.created_at < CURRENT_DATE + INTERVAL '1 day'
-              {sucursal_filter}
-              AND UPPER(COALESCE(ep.nombre_estado, '')) IN ('CREADO', 'PENDIENTE')
-              AND COALESCE(lc.accion, 'CREAR_PEDIDO_EXTERNO_SIN_AUDITORIA') NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA')
-            ORDER BY p.id_pedido ASC
-            LIMIT :limit
+                candidates.id_audit,
+                candidates.accion,
+                candidates.audit_created_at,
+                candidates.id_pedido,
+                candidates.numero_pedido,
+                candidates.codigo_pedido,
+                candidates.total_neto,
+                candidates.created_at,
+                candidates.cliente,
+                candidates.destinatario,
+                candidates.estado,
+                MAX(COALESCE(candidates.id_audit, 0)) OVER() AS latest_audit_id,
+                MAX(candidates.id_pedido) OVER() AS latest_pedido_id
+            FROM candidates
+            JOIN claimed
+              ON claimed.pedido_id = candidates.id_pedido
+            ORDER BY candidates.id_pedido ASC
             """
         ),
         params,
