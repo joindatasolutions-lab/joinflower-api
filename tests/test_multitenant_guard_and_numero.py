@@ -1,7 +1,9 @@
 import os
 
 import pytest
+from sqlalchemy import text
 
+from app.database import SessionLocal
 from tests.conftest import FLORA_EMPRESA_ID, ensure_flora_test_users, impersonated_headers, integration_client, integration_enabled
 
 
@@ -63,3 +65,41 @@ def test_tenant_guard_and_numero_pedido_presence():
         headers=headers,
     )
     assert forbidden.status_code == 403, forbidden.text
+
+
+def test_clientes_pagination_reports_real_total():
+    # Regression guard for the Clientes module: pageSize limits items, not total.
+    if not integration_enabled():
+        pytest.skip("Integration test skipped. Set RUN_INTEGRATION_TESTS=1 to execute.")
+
+    ensure_flora_test_users()
+    client = integration_client()
+    headers, auth_me = impersonated_headers(client, empresa_id=FLORA_EMPRESA_ID)
+    empresa_id = int(auth_me["empresaID"])
+
+    session = SessionLocal()
+    try:
+        expected_total = session.execute(
+            text("SELECT COUNT(*) FROM petalops.cliente WHERE empresa_id = :empresa_id"),
+            {"empresa_id": empresa_id},
+        ).scalar_one()
+    finally:
+        session.close()
+
+    response = client.get(
+        "/clientes",
+        params={
+            "empresaID": empresa_id,
+            "page": 1,
+            "pageSize": 50,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    assert payload["total"] == expected_total
+    assert payload["total"] > 300
+    assert payload["page"] == 1
+    assert payload["pageSize"] == 50
+    assert len(payload["items"]) == 50
