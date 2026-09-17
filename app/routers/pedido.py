@@ -79,6 +79,15 @@ STORE_PICKUP_DELIVERY_VALUES = (
 )
 LINK_PAYMENT_METHODS = {"link bold", "link payu", "link wompi"}
 LINK_SURCHARGE_PCT = Decimal("5.00")
+IDENTIFICATION_TYPE_DEFAULTS = ("CC", "NIT")
+IDENTIFICATION_TYPE_LABELS = {
+    "CC": "Cedula",
+    "NIT": "NIT",
+    "PAS": "Pasaporte",
+    "CE": "Cedula extranjeria",
+    "TI": "Tarjeta identidad",
+    "PEP": "PEP",
+}
 
 
 def _activo_truthy(column):
@@ -795,6 +804,11 @@ def _normalize_ident_type(value: str | None) -> str | None:
     if raw == "NIT":
         return "NIT"
     return raw
+
+
+def _identification_type_label(code: str | None) -> str:
+    normalized = _normalize_ident_type(code) or ""
+    return IDENTIFICATION_TYPE_LABELS.get(normalized, normalized)
 
 
 def _tax_rate_for_producto(producto: Producto | None) -> Decimal:
@@ -2569,6 +2583,60 @@ def _build_pedido_list_kpis(
         pendientes=int(pendientes),
         cancelados=int(cancelados),
         sinImprimir=int(facturas_pendientes_impresion),
+    )
+
+
+class TipoIdentificacionPedidoItem(BaseModel):
+    codigo: str
+    nombre: str
+    orden: int
+
+
+class TiposIdentificacionPedidoResponse(BaseModel):
+    items: list[TipoIdentificacionPedidoItem]
+
+
+@router.get(
+    "/pedidos/tipos-identificacion",
+    response_model=TiposIdentificacionPedidoResponse,
+    dependencies=[Depends(require_module_access("pedidos", "puedeVer"))],
+)
+@limiter.limit(rate_limit("pedidos_identification_types", "60/minute"))
+def listar_tipos_identificacion_pedido(
+    request: Request,
+    empresa_id: int = Query(..., alias="empresaID"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+
+    rows = (
+        db.query(Cliente.tipoIdent)
+        .filter(func.nullif(func.trim(Cliente.tipoIdent), "").isnot(None))
+        .distinct()
+        .all()
+    )
+
+    ordered_codes: list[str] = []
+    for default_code in IDENTIFICATION_TYPE_DEFAULTS:
+        normalized = _normalize_ident_type(default_code)
+        if normalized and normalized not in ordered_codes:
+            ordered_codes.append(normalized)
+
+    for (raw_code,) in rows:
+        normalized = _normalize_ident_type(raw_code)
+        if normalized and len(normalized) <= 30 and normalized not in ordered_codes:
+            ordered_codes.append(normalized)
+
+    return TiposIdentificacionPedidoResponse(
+        items=[
+            TipoIdentificacionPedidoItem(
+                codigo=code,
+                nombre=_identification_type_label(code),
+                orden=index + 1,
+            )
+            for index, code in enumerate(ordered_codes)
+        ]
     )
 
 
