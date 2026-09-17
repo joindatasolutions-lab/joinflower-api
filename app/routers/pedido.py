@@ -629,6 +629,31 @@ def _cliente_nombre_conflictivo(cliente: Cliente | None, nombre_completo: str | 
     return bool(actual and nuevo and actual != nuevo)
 
 
+def _normalizar_identificacion_cliente(value: str | None) -> str | None:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+
+    compact_value = re.sub(r"\s+", " ", text_value)
+    if len(compact_value) <= 50:
+        return compact_value
+
+    match = re.search(
+        r"(?:\b(?:cc|c\.c\.|cedula|c[eé]dula|nit|identificaci[oó]n|documento)\b)\s*[:#-]?\s*([A-Za-z0-9.-]{5,30})",
+        compact_value,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        extracted = re.sub(r"[^A-Za-z0-9.-]", "", match.group(1)).strip(".-")
+        return extracted[:50] or None
+
+    digit_match = re.search(r"\b\d{6,15}\b", compact_value)
+    if digit_match:
+        return digit_match.group(0)[:50]
+
+    return None
+
+
 def _crear_cliente_pedido_manual(
     db: Session,
     *,
@@ -641,7 +666,7 @@ def _crear_cliente_pedido_manual(
     email: str | None,
 ) -> Cliente:
     telefono_text = str(telefono or "").strip()
-    identificacion_text = str(identificacion or "").strip()
+    identificacion_text = _normalizar_identificacion_cliente(identificacion)
     cliente = Cliente(
         empresaID=int(empresa_id),
         tipoIdent=tipo_ident or "CC",
@@ -671,7 +696,7 @@ def _upsert_cliente_pedido_manual(
     email: str | None,
 ) -> Cliente:
     telefono_text = str(telefono or "").strip()
-    identificacion_text = str(identificacion or "").strip()
+    identificacion_text = _normalizar_identificacion_cliente(identificacion) or ""
     identificacion_para_crear = identificacion_text
 
     cliente = None
@@ -3565,7 +3590,7 @@ def actualizar_detalle_pedido(
             cliente.tipoIdent = _normalize_ident_type(cliente_tipo_ident_payload)
             needs_totals_recalc = True
         if payload.clienteIdentificacion is not None:
-            cliente.identificacion = str(payload.clienteIdentificacion).strip() or None
+            cliente.identificacion = _normalizar_identificacion_cliente(payload.clienteIdentificacion)
 
         if (
             any(
@@ -5989,7 +6014,7 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             cliente_nombre_payload = str(data.cliente.nombreCompleto or data.cliente.nombres or "").strip()
             cliente_payload_conflictivo = _cliente_nombre_conflictivo(cliente, cliente_nombre_payload)
             if cliente_payload_conflictivo:
-                identificacion_payload = str(data.cliente.identificacion or "").strip()
+                identificacion_payload = _normalizar_identificacion_cliente(data.cliente.identificacion) or ""
                 identificacion_actual = str(cliente.identificacion or "").strip()
                 cliente = _crear_cliente_pedido_manual(
                     db,
@@ -6018,7 +6043,7 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             if data.cliente.tipoIdent is not None and not cliente_payload_conflictivo:
                 cliente.tipoIdent = _normalize_ident_type(data.cliente.tipoIdent) or cliente.tipoIdent
             if data.cliente.identificacion is not None and not cliente_payload_conflictivo:
-                cliente.identificacion = str(data.cliente.identificacion).strip() or cliente.identificacion
+                cliente.identificacion = _normalizar_identificacion_cliente(data.cliente.identificacion) or cliente.identificacion
             if data.cliente.indicativo is not None and not cliente_payload_conflictivo:
                 cliente.indicativo = data.cliente.indicativo
             cliente.updatedAt = colombia_now_naive()
