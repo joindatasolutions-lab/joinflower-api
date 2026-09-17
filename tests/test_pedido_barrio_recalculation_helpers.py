@@ -49,6 +49,9 @@ def test_store_pickup_detection_no_falsos_positivos_por_direccion_real():
     assert not _is_store_pickup_delivery(
         tipo_entrega="domicilio", barrio_nombre="Chapinero", direccion="Calle 84 # 52 - 18"
     )
+    assert not _is_store_pickup_delivery(
+        tipo_entrega="domicilio", barrio_nombre="Chapinero", direccion="Calle 10 tienda la esquina"
+    )
 
 
 def test_resolve_costo_domicilio_returns_zero_for_store_pickup_without_db_lookup():
