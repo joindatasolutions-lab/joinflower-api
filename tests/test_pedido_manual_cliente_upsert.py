@@ -135,6 +135,74 @@ def test_mismo_cliente_repite_pedido_y_si_se_reconoce_por_su_propio_telefono():
     assert resultado is daniela
 
 
+def test_mismo_telefono_con_nombre_distinto_crea_cliente_nuevo_sin_sobrescribir():
+    rodrigo = _FakeCliente(
+        idCliente=5150,
+        empresaID=5,
+        empresa_id=5,
+        telefono="3023216896",
+        telefonoCompleto="3023216896",
+        telefono_completo="3023216896",
+        identificacion=None,
+        nombreCompleto="Rodrigo Colon",
+        tipoIdent="CC",
+        indicativo=None,
+        email=None,
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db = _FakeSession([rodrigo])
+
+    resultado = _upsert_cliente_pedido_manual(
+        db,
+        empresa_id=5,
+        tipo_ident="CC",
+        identificacion=None,
+        indicativo=None,
+        nombre_completo="Tania Arroyo Montiel",
+        telefono="3023216896",
+        email=None,
+    )
+
+    assert resultado is not rodrigo
+    assert resultado.nombreCompleto == "Tania Arroyo Montiel"
+    assert rodrigo.nombreCompleto == "Rodrigo Colon"
+
+
+def test_misma_identificacion_con_nombre_distinto_no_sobrescribe_cliente_anterior():
+    rodrigo = _FakeCliente(
+        idCliente=5150,
+        empresaID=5,
+        empresa_id=5,
+        telefono="3023216896",
+        telefonoCompleto="3023216896",
+        telefono_completo="3023216896",
+        identificacion="3192472233",
+        nombreCompleto="Rodrigo Colon",
+        tipoIdent="CC",
+        indicativo=None,
+        email=None,
+        updatedAt=datetime.now(timezone.utc),
+    )
+    db = _FakeSession([rodrigo])
+
+    resultado = _upsert_cliente_pedido_manual(
+        db,
+        empresa_id=5,
+        tipo_ident="CC",
+        identificacion="3192472233",
+        indicativo=None,
+        nombre_completo="Adriana Arrieta",
+        telefono="3204675782",
+        email=None,
+    )
+
+    assert resultado is not rodrigo
+    assert resultado.nombreCompleto == "Adriana Arrieta"
+    assert resultado.identificacion is None
+    assert rodrigo.nombreCompleto == "Rodrigo Colon"
+    assert rodrigo.telefono == "3023216896"
+
+
 def test_cliente_nuevo_sin_identificacion_queda_con_identificacion_vacia():
     db = _FakeSession([])
 

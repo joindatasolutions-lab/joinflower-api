@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -596,6 +597,50 @@ def _normalizar_telefono_completo_pedido(indicativo: str | None, telefono: str |
     return f"{prefijo}{numero}"
 
 
+def _normalizar_nombre_cliente_match(value: str | None) -> str:
+    text_value = unicodedata.normalize("NFKD", str(value or "").strip().lower())
+    ascii_value = "".join(char for char in text_value if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", ascii_value)
+
+
+def _cliente_nombre_conflictivo(cliente: Cliente | None, nombre_completo: str | None) -> bool:
+    if not cliente:
+        return False
+    actual = _normalizar_nombre_cliente_match(getattr(cliente, "nombreCompleto", None))
+    nuevo = _normalizar_nombre_cliente_match(nombre_completo)
+    return bool(actual and nuevo and actual != nuevo)
+
+
+def _crear_cliente_pedido_manual(
+    db: Session,
+    *,
+    empresa_id: int,
+    tipo_ident: str | None,
+    identificacion: str | None,
+    indicativo: str | None,
+    nombre_completo: str,
+    telefono: str,
+    email: str | None,
+) -> Cliente:
+    telefono_text = str(telefono or "").strip()
+    identificacion_text = str(identificacion or "").strip()
+    cliente = Cliente(
+        empresaID=int(empresa_id),
+        tipoIdent=tipo_ident or "CC",
+        identificacion=identificacion_text or None,
+        indicativo=indicativo,
+        telefonoCompleto=_normalizar_telefono_completo_pedido(indicativo, telefono_text) or telefono_text or None,
+        nombreCompleto=nombre_completo,
+        telefono=telefono_text or None,
+        email=email,
+        activo=1,
+        createdAt=colombia_now_naive(),
+    )
+    db.add(cliente)
+    db.flush()
+    return cliente
+
+
 def _upsert_cliente_pedido_manual(
     db: Session,
     *,
@@ -609,36 +654,45 @@ def _upsert_cliente_pedido_manual(
 ) -> Cliente:
     telefono_text = str(telefono or "").strip()
     identificacion_text = str(identificacion or "").strip()
-    filters = []
-    if telefono_text:
-        filters.extend([Cliente.telefono == telefono_text, Cliente.telefonoCompleto == telefono_text])
-    if identificacion_text:
-        filters.append(Cliente.identificacion == identificacion_text)
+    identificacion_para_crear = identificacion_text
 
     cliente = None
-    if filters:
+    if identificacion_text:
         cliente = (
             db.query(Cliente)
-            .filter(Cliente.empresaID == int(empresa_id), or_(*filters))
+            .filter(Cliente.empresaID == int(empresa_id), Cliente.identificacion == identificacion_text)
             .order_by(Cliente.updatedAt.desc().nullslast(), Cliente.idCliente.desc())
             .first()
         )
-    if not cliente:
-        cliente = Cliente(
-            empresaID=int(empresa_id),
-            tipoIdent=tipo_ident or "CC",
-            identificacion=identificacion_text or None,
-            indicativo=indicativo,
-            telefonoCompleto=_normalizar_telefono_completo_pedido(indicativo, telefono_text) or telefono_text or None,
-            nombreCompleto=nombre_completo,
-            telefono=telefono_text or None,
-            email=email,
-            activo=1,
-            createdAt=colombia_now_naive(),
+        if _cliente_nombre_conflictivo(cliente, nombre_completo):
+            identificacion_para_crear = ""
+            cliente = None
+
+    if not cliente and telefono_text:
+        cliente = (
+            db.query(Cliente)
+            .filter(
+                Cliente.empresaID == int(empresa_id),
+                or_(Cliente.telefono == telefono_text, Cliente.telefonoCompleto == telefono_text),
+            )
+            .order_by(Cliente.updatedAt.desc().nullslast(), Cliente.idCliente.desc())
+            .first()
         )
-        db.add(cliente)
-        db.flush()
-        return cliente
+
+        if _cliente_nombre_conflictivo(cliente, nombre_completo):
+            cliente = None
+
+    if not cliente:
+        return _crear_cliente_pedido_manual(
+            db,
+            empresa_id=empresa_id,
+            tipo_ident=tipo_ident,
+            identificacion=identificacion_para_crear or None,
+            indicativo=indicativo,
+            nombre_completo=nombre_completo,
+            telefono=telefono_text,
+            email=email,
+        )
 
     cliente.tipoIdent = tipo_ident or cliente.tipoIdent or "CC"
     cliente.identificacion = identificacion_text or cliente.identificacion
@@ -5704,21 +5758,39 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             if not cliente:
                 raise HTTPException(status_code=404, detail={"code": "CLIENTE_NOT_FOUND", "message": "Cliente no encontrado"})
             cliente_nombre_payload = str(data.cliente.nombreCompleto or data.cliente.nombres or "").strip()
-            if cliente_nombre_payload:
+            cliente_payload_conflictivo = _cliente_nombre_conflictivo(cliente, cliente_nombre_payload)
+            if cliente_payload_conflictivo:
+                identificacion_payload = str(data.cliente.identificacion or "").strip()
+                identificacion_actual = str(cliente.identificacion or "").strip()
+                cliente = _crear_cliente_pedido_manual(
+                    db,
+                    empresa_id=empresa_id,
+                    tipo_ident=_normalize_ident_type(data.cliente.tipoIdent) or "CC",
+                    identificacion=(
+                        identificacion_payload
+                        if identificacion_payload and identificacion_payload != identificacion_actual
+                        else None
+                    ),
+                    indicativo=data.cliente.indicativo,
+                    nombre_completo=cliente_nombre_payload,
+                    telefono=str(data.cliente.telefono or "").strip(),
+                    email=data.cliente.email,
+                )
+            elif cliente_nombre_payload:
                 cliente.nombreCompleto = cliente_nombre_payload
-            if data.cliente.telefono is not None:
+            if data.cliente.telefono is not None and not cliente_payload_conflictivo:
                 cliente.telefono = str(data.cliente.telefono).strip() or cliente.telefono
                 cliente.telefonoCompleto = (
                     _normalizar_telefono_completo_pedido(data.cliente.indicativo or cliente.indicativo, cliente.telefono)
                     or cliente.telefonoCompleto
                 )
-            if data.cliente.email is not None:
+            if data.cliente.email is not None and not cliente_payload_conflictivo:
                 cliente.email = data.cliente.email
-            if data.cliente.tipoIdent is not None:
+            if data.cliente.tipoIdent is not None and not cliente_payload_conflictivo:
                 cliente.tipoIdent = _normalize_ident_type(data.cliente.tipoIdent) or cliente.tipoIdent
-            if data.cliente.identificacion is not None:
+            if data.cliente.identificacion is not None and not cliente_payload_conflictivo:
                 cliente.identificacion = str(data.cliente.identificacion).strip() or cliente.identificacion
-            if data.cliente.indicativo is not None:
+            if data.cliente.indicativo is not None and not cliente_payload_conflictivo:
                 cliente.indicativo = data.cliente.indicativo
             cliente.updatedAt = colombia_now_naive()
             db.flush()
@@ -5855,6 +5927,19 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             extra={
                 "total": float(pedido.totalNeto or 0),
                 "cantidadProductos": len(productos_normalizados),
+                "cliente": {
+                    "clienteID": int(cliente.idCliente),
+                    "nombre": str(cliente.nombreCompleto or ""),
+                    "telefono": str(cliente.telefono or ""),
+                    "identificacion": str(cliente.identificacion or ""),
+                },
+                "entrega": {
+                    "destinatario": str(data.entrega.destinatario or data.entrega.destinatarioNombre or ""),
+                    "telefonoDestino": str(data.entrega.telefonoDestino or ""),
+                    "tipoEntrega": str(tipo_entrega or ""),
+                    "barrioNombre": str(data.entrega.barrioNombre or ""),
+                    "direccion": str(data.entrega.direccion or ""),
+                },
             },
         )
         db.commit()
