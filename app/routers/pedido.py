@@ -2925,6 +2925,103 @@ def listar_pedidos(
     )
 
 
+@router.get("/pedidos/alertas/nuevos-creados", dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
+@limiter.limit(rate_limit("pedidos_voice_alerts", "120/minute"))
+def listar_alertas_pedidos_nuevos_creados(
+    request: Request,
+    empresa_id: int = Query(..., alias="empresaID"),
+    sucursal_id: int | None = Query(None, alias="sucursalID"),
+    since_audit_id: int = Query(0, ge=0, alias="sinceAuditId"),
+    limit: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+    _ensure_pedido_auditoria_table(db)
+
+    params = {
+        "empresa_id": int(empresa_id),
+        "sucursal_id": int(sucursal_id) if sucursal_id is not None else None,
+        "since_audit_id": int(since_audit_id or 0),
+        "limit": int(limit),
+    }
+    sucursal_filter = "AND p.sucursal_id = :sucursal_id" if sucursal_id is not None else ""
+
+    rows = db.execute(
+        text(
+            f"""
+            WITH latest_create AS (
+                SELECT DISTINCT ON (pa.pedido_id)
+                    pa.id_audit,
+                    pa.pedido_id,
+                    pa.accion,
+                    pa.created_at AS audit_created_at
+                FROM petalops.pedido_auditoria pa
+                WHERE pa.empresa_id = :empresa_id
+                  AND pa.accion LIKE 'CREAR_%'
+                ORDER BY pa.pedido_id, pa.created_at DESC, pa.id_audit DESC
+            )
+            SELECT
+                lc.id_audit,
+                lc.accion,
+                lc.audit_created_at,
+                p.id_pedido,
+                p.numero_pedido,
+                p.codigo_pedido,
+                p.total_neto,
+                p.created_at,
+                c.nombre_completo AS cliente,
+                e.destinatario,
+                ep.nombre_estado AS estado,
+                MAX(lc.id_audit) OVER() AS latest_audit_id
+            FROM latest_create lc
+            JOIN petalops.pedido p
+              ON p.id_pedido = lc.pedido_id
+             AND p.empresa_id = :empresa_id
+            LEFT JOIN petalops.cliente c
+              ON c.cliente_id = p.cliente_id
+             AND c.empresa_id = p.empresa_id
+            LEFT JOIN petalops.entrega e
+              ON e.pedido_id = p.id_pedido
+             AND e.empresa_id = p.empresa_id
+            LEFT JOIN petalops.estado_pedido ep
+              ON ep.id_estado_pedido = p.estado_pedido_id
+            WHERE lc.id_audit > :since_audit_id
+              {sucursal_filter}
+              AND UPPER(COALESCE(ep.nombre_estado, '')) IN ('CREADO', 'PENDIENTE')
+              AND lc.accion NOT IN ('CREAR_PEDIDO_MANUAL', 'CREAR_VENTA_RAPIDA', 'CREAR_PEDIDO_LEGACY')
+            ORDER BY lc.id_audit ASC
+            LIMIT :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+
+    items = [
+        {
+            "auditID": int(row["id_audit"]),
+            "pedidoID": int(row["id_pedido"]),
+            "numeroPedido": (int(row["numero_pedido"]) if row["numero_pedido"] is not None else None),
+            "codigoPedido": str(row["codigo_pedido"] or "").strip() or None,
+            "cliente": str(row["cliente"] or "Cliente").strip() or "Cliente",
+            "destinatario": str(row["destinatario"] or "").strip() or None,
+            "estado": str(row["estado"] or "CREADO").strip() or "CREADO",
+            "total": float(row["total_neto"] or 0),
+            "origen": str(row["accion"] or "").strip(),
+            "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
+            "auditCreatedAt": row["audit_created_at"].isoformat() if row["audit_created_at"] else None,
+        }
+        for row in rows
+    ]
+    latest_audit_id = max(
+        [int(row["latest_audit_id"] or 0) for row in rows]
+        + [int(item["auditID"]) for item in items]
+        + [int(since_audit_id or 0)]
+    )
+
+    return {"items": items, "latestAuditID": latest_audit_id}
+
+
 @router.get("/pedido/{pedido_id}/detalle", response_model=PedidoDetalleResponse, dependencies=[Depends(require_module_access("pedidos", "puedeVer"))])
 def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     try:
