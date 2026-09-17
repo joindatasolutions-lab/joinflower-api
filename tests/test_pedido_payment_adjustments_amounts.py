@@ -13,6 +13,7 @@ from app.routers.pedido import (
     _payload_cliente_tipo_ident_value,
     _payload_producto_precio_value,
     _serialize_pago_metadata,
+    _sync_existing_pago_total,
 )
 
 
@@ -72,6 +73,37 @@ class _FakeScalarRowResult:
 
     def first(self):
         return self._row
+
+
+class _FakePaymentMethodRowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSyncPagoDb:
+    def __init__(self, method_rows=None):
+        self.method_rows = method_rows or [
+            {"id_pago_metodo": 1, "monto": Decimal("50000.00")},
+            {"id_pago_metodo": 2, "monto": Decimal("50000.00")},
+        ]
+        self.method_updates = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+        if "SELECT id_pago" in sql and "FROM petalops.pago" in sql:
+            return _FakeScalarRowResult((77,))
+        if "SELECT pm.id_pago_metodo, pm.monto" in sql:
+            return _FakePaymentMethodRowsResult(self.method_rows)
+        if "UPDATE petalops.pago_metodo" in sql:
+            self.method_updates.append(params)
+        return _FakeScalarResult()
 
 
 def test_build_pedido_adjustments_uses_fixed_amount_discount_and_saldo_favor():
@@ -222,6 +254,54 @@ def test_load_pago_resumen_legacy_payment_includes_amount_for_cash_breakdown():
     assert resumen["metodoPago"] == "Efectivo"
     assert resumen["metodosPago"] == ["Efectivo"]
     assert resumen["montoEfectivo"] == 125000.0
+
+
+def test_sync_existing_pago_total_redistributes_multiple_payment_methods(monkeypatch):
+    from app.routers import pedido as pedido_router
+
+    db = _FakeSyncPagoDb()
+    pedido = SimpleNamespace(
+        idPedido=2326,
+        empresaID=3,
+        totalNeto=Decimal("119000.00"),
+        totalBruto=Decimal("100000.00"),
+    )
+    monkeypatch.setattr(pedido_router, "_flora_phase2_ready", lambda _db: True)
+    monkeypatch.setattr(pedido_router.caja_service, "refresh_caja_por_pedido", lambda *args, **kwargs: None)
+
+    _sync_existing_pago_total(db, pedido=pedido, usuario_id=10)
+
+    assert [item["monto"] for item in db.method_updates] == [
+        Decimal("59500.00"),
+        Decimal("59500.00"),
+    ]
+
+
+def test_sync_existing_pago_total_applies_nit_tax_to_full_custom_arrangement(monkeypatch):
+    from app.routers import pedido as pedido_router
+
+    db = _FakeSyncPagoDb(
+        [
+            {"id_pago_metodo": 1, "monto": Decimal("120000.00")},
+            {"id_pago_metodo": 2, "monto": Decimal("80000.00")},
+        ]
+    )
+    pedido = SimpleNamespace(
+        idPedido=2326,
+        empresaID=3,
+        totalNeto=Decimal("238000.00"),
+        totalBruto=Decimal("200000.00"),
+    )
+    monkeypatch.setattr(pedido_router, "_flora_phase2_ready", lambda _db: True)
+    monkeypatch.setattr(pedido_router.caja_service, "refresh_caja_por_pedido", lambda *args, **kwargs: None)
+
+    _sync_existing_pago_total(db, pedido=pedido, usuario_id=10)
+
+    assert sum(item["monto"] for item in db.method_updates) == Decimal("238000.00")
+    assert [item["monto"] for item in db.method_updates] == [
+        Decimal("142800.00"),
+        Decimal("95200.00"),
+    ]
 
 
 def test_flora_phase2_requires_expected_columns():

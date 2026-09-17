@@ -2392,51 +2392,63 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido, usuario_id: int | 
         caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
         return
 
-    pago_resumen = _load_pago_resumen(db, pedido_id=int(pedido.idPedido), empresa_id=int(pedido.empresaID))
-    metodos_pago = list(pago_resumen.get("metodosPago") or [])
-    if len(metodos_pago) != 1:
-        caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
-        return
-
-    metodo_row = db.execute(
+    metodo_rows = db.execute(
         text(
             """
-            SELECT pm.id_pago_metodo
+            SELECT pm.id_pago_metodo, pm.monto
             FROM petalops.pago_metodo pm
-            JOIN petalops.metodo_pago_catalogo mpc
-              ON mpc.id_metodo_pago = pm.metodo_pago_id
             WHERE pm.empresa_id = :empresa_id
               AND pm.pedido_id = :pedido_id
-              AND mpc.nombre = :metodo
-            LIMIT 1
+            ORDER BY pm.orden ASC, pm.id_pago_metodo ASC
             """
         ),
         {
             "empresa_id": int(pedido.empresaID),
             "pedido_id": int(pedido.idPedido),
-            "metodo": str(metodos_pago[0]),
         },
-    ).first()
-    if not metodo_row:
+    ).mappings().all()
+    if not metodo_rows:
         caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
         return
 
-    db.execute(
-        text(
-            """
-            UPDATE petalops.pago_metodo
-            SET monto = :monto,
-                updated_at = NOW()
-            WHERE id_pago_metodo = :id_pago_metodo
-              AND empresa_id = :empresa_id
-            """
-        ),
-        {
-            "id_pago_metodo": int(metodo_row[0]),
-            "empresa_id": int(pedido.empresaID),
-            "monto": monto,
-        },
+    monto = _round_money_decimal(monto)
+    monto_actual_total = sum(
+        _round_money_decimal(row.get("monto") or 0)
+        for row in metodo_rows
     )
+    monto_restante = monto
+    total_rows = len(metodo_rows)
+    for index, row in enumerate(metodo_rows, start=1):
+        if total_rows == 1:
+            monto_metodo = monto
+        elif monto_actual_total > 0 and index < total_rows:
+            monto_metodo = _round_money_decimal(
+                (monto * _round_money_decimal(row.get("monto") or 0)) / monto_actual_total
+            )
+        elif monto_actual_total > 0:
+            monto_metodo = monto_restante
+        elif index < total_rows:
+            monto_metodo = _round_money_decimal(monto / Decimal(str(total_rows)))
+        else:
+            monto_metodo = monto_restante
+        monto_restante -= monto_metodo
+
+        db.execute(
+            text(
+                """
+                UPDATE petalops.pago_metodo
+                SET monto = :monto,
+                    updated_at = NOW()
+                WHERE id_pago_metodo = :id_pago_metodo
+                  AND empresa_id = :empresa_id
+                """
+            ),
+            {
+                "id_pago_metodo": int(row["id_pago_metodo"]),
+                "empresa_id": int(pedido.empresaID),
+                "monto": monto_metodo,
+            },
+        )
     caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
 
 
