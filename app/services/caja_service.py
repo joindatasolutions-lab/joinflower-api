@@ -95,7 +95,7 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
                     lower(COALESCE(mpc.codigo, '')) = 'efectivo'
                     OR lower(COALESCE(mpc.nombre, '')) = 'efectivo'
                   )
-                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CANCELADO', 'RECHAZADO', 'ANULADO')
+                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
                 """
             ),
             {
@@ -134,7 +134,7 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
                   AND p.sucursal_id = :sucursal_id
                   AND CAST(p.fecha_pedido AS DATE) = :fecha_operacion
                   AND COALESCE(pa.metodo_pago, '') ILIKE '%Efectivo%'
-                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CANCELADO', 'RECHAZADO', 'ANULADO')
+                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
                   {legacy_filter}
                 """
             ),

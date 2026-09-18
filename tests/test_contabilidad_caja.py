@@ -473,6 +473,7 @@ class _FakeResult:
 class _CajaRefreshDb:
     def __init__(self):
         self.upsert_params = None
+        self.cash_sum_sql = None
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -481,6 +482,7 @@ class _CajaRefreshDb:
         if "information_schema.columns" in sql:
             return _FakeResult((1,))
         if "SUM(pm.monto)" in sql:
+            self.cash_sum_sql = sql
             return _FakeResult((Decimal("3000"),))
         if "SELECT base, gasto, guardado" in sql:
             return _FakeResult(None)
@@ -502,3 +504,4 @@ def test_refresh_caja_por_pedido_accumulates_cash_total_for_day():
     assert db.upsert_params["total_efectivo"] == Decimal("3000")
     assert db.upsert_params["nueva_base"] == Decimal("3000")
     assert db.upsert_params["usuario_id"] == 9
+    assert "'CREADO'" in db.cash_sum_sql
