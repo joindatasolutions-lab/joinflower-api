@@ -45,6 +45,12 @@ def _tenant_estado_expr(db: Session) -> str:
     return "NULL"
 
 
+def _tenant_logo_expr(db: Session) -> str:
+    if column_exists(db, "empresa", "logo_url"):
+        return "e.logo_url"
+    return "NULL"
+
+
 def _month_range(year: int, month: int) -> tuple[date, date]:
     start = date(int(year), int(month), 1)
     next_month = date(start.year + (1 if start.month == 12 else 0), 1 if start.month == 12 else start.month + 1, 1)
@@ -53,6 +59,7 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
 
 def _seguimiento_tenants_sql(db: Session) -> str:
     estado_expr = _tenant_estado_expr(db)
+    logo_expr = _tenant_logo_expr(db)
     return f"""
         WITH pedidos AS (
             SELECT
@@ -74,6 +81,7 @@ def _seguimiento_tenants_sql(db: Session) -> str:
             e.id_empresa AS empresa_id,
             COALESCE(NULLIF(TRIM(e.nombre_comercial), ''), NULLIF(TRIM(e.nombre_empresa), ''), CONCAT('Empresa ', e.id_empresa)) AS nombre,
             e.slug,
+            {logo_expr} AS logo_url,
             {estado_expr} AS estado,
             COALESCE(p.pedidos_hoy, 0) AS pedidos_hoy,
             COALESCE(p.pedidos_mes, 0) AS pedidos_mes
@@ -89,6 +97,7 @@ def _row_to_tenant_item(row) -> TenantSeguimientoItem:
         empresaID=int(row["empresa_id"]),
         nombre=str(row.get("nombre") or f"Empresa {row['empresa_id']}"),
         slug=_str_or_none(row.get("slug")),
+        logoUrl=_str_or_none(row.get("logo_url")),
         estado=_str_or_none(row.get("estado")),
         pedidosHoy=_int(row.get("pedidos_hoy")),
         pedidosMes=_int(row.get("pedidos_mes")),

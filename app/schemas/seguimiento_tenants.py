@@ -9,6 +9,7 @@ class TenantSeguimientoItem(BaseModel):
     empresaID: int
     nombre: str
     slug: str | None = None
+    logoUrl: str | None = None
     estado: str | None = None
     pedidosHoy: int = 0
     pedidosMes: int = 0

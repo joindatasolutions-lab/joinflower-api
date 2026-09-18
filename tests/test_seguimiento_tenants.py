@@ -50,6 +50,7 @@ def test_row_to_tenant_item_and_resumen_contract_only_today_and_month():
             "empresa_id": 3,
             "nombre": "Flora",
             "slug": "flora",
+            "logo_url": "https://cdn.example.com/flora/logo.png",
             "estado": "Activo",
             "pedidos_hoy": 3,
             "pedidos_mes": 10,
@@ -59,6 +60,7 @@ def test_row_to_tenant_item_and_resumen_contract_only_today_and_month():
     resumen = seguimiento_tenants._build_resumen([item])
 
     assert item.empresaID == 3
+    assert item.logoUrl == "https://cdn.example.com/flora/logo.png"
     assert item.pedidosHoy == 3
     assert item.pedidosMes == 10
     assert resumen.tenants == 1
@@ -99,6 +101,7 @@ def test_seguimiento_sql_omits_optional_empresa_columns_when_missing():
     sql = seguimiento_tenants._seguimiento_tenants_sql(_NoOptionalTablesDb())
 
     assert "NULL AS estado" in sql
+    assert "NULL AS logo_url" in sql
     assert ":fecha_hoy" in sql
     assert ":mes_desde" in sql
     assert ":mes_hasta" in sql
