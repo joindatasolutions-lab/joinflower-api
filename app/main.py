@@ -26,6 +26,7 @@ from app.routers import contabilidad
 from app.routers import domicilios
 from app.routers import entregas
 from app.routers import inventario
+from app.routers import seguimiento_tenants
 from app.routers import pedido
 from app.routers import pipeline
 from app.routers import produccion
@@ -88,6 +89,7 @@ app.include_router(contabilidad.router)
 app.include_router(barrios.router)
 app.include_router(produccion.router)
 app.include_router(auth.router)
+app.include_router(seguimiento_tenants.router)
 app.include_router(domicilios.router)
 # NOTA: se elimino el registro duplicado "/api/domicilios" (2026-08-03).
 # ATENCION antes de desplegar esta rama a produccion: la app movil de
