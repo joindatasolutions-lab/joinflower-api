@@ -678,6 +678,11 @@ def _parametros_pedido_aceptado(db: Session, *, pedido: Pedido, cliente: Cliente
     if not direccion:
         direccion = "Recoger en tienda"
     numero_pedido = str(getattr(pedido, "numeroPedido", "") or getattr(pedido, "idPedido", ""))
+    whatsapp_oficial = (
+        str(getattr(empresa, "celular", "") or "").strip()
+        or str(getattr(empresa, "celularResponsable", "") or "").strip()
+        or "No disponible"
+    )
     parametros = [
         str(getattr(cliente, "nombreCompleto", "") or "Cliente").strip() or "Cliente",
         numero_pedido,
@@ -686,6 +691,7 @@ def _parametros_pedido_aceptado(db: Session, *, pedido: Pedido, cliente: Cliente
         _valor_texto(getattr(pedido, "totalNeto", None) or getattr(pedido, "totalBruto", None)),
         direccion,
         _nombre_empresa(empresa),
+        whatsapp_oficial,
     ]
     return parametros, _logo_empresa_url(db, int(pedido.empresaID))
 

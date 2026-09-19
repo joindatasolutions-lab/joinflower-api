@@ -753,6 +753,7 @@ def test_mensaje_pedido_entregado_envia_nombre_del_tenant(monkeypatch):
 
 def test_mensaje_pedido_aceptado_envia_variables_y_logo(monkeypatch):
     empresa = _empresa(3, "FLORA")
+    empresa.celular = "+573006294582"
     cliente = _cliente(84, empresa_id=3, nombre="Andrea")
     pedido = _pedido(987, empresa_id=3, cliente_id=84, numero_pedido=9988877)
     pedido.estadoPedidoID = 2
@@ -814,6 +815,7 @@ def test_mensaje_pedido_aceptado_envia_variables_y_logo(monkeypatch):
         "200000",
         "CALLE 118 # 43 -46 TORRE 8 503",
         "FLORA",
+        "+573006294582",
     ]
 
 
