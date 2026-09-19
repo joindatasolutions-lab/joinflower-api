@@ -107,3 +107,5 @@ def test_seguimiento_sql_omits_optional_empresa_columns_when_missing():
     assert ":mes_hasta" in sql
     assert "pedidos_mes" in sql
     assert "APROBADO" in sql
+    assert "WHERE p.empresa_id NOT IN (1, 2, 8)" in sql
+    assert "WHERE e.id_empresa NOT IN (1, 2, 8)" in sql

@@ -18,6 +18,8 @@ from app.services.caja_service import column_exists
 
 router = APIRouter(prefix="/seguimiento-tenants", tags=["Seguimiento Tenants"])
 
+DEMO_EMPRESA_IDS = (1, 2, 8)
+
 
 def _require_joinadmin_session(auth=Depends(get_current_auth_context)):
     if not bool(getattr(auth, "esGlobalJoin", False)) or not is_global_join_login(getattr(auth, "login", None)):
@@ -60,6 +62,7 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
 def _seguimiento_tenants_sql(db: Session) -> str:
     estado_expr = _tenant_estado_expr(db)
     logo_expr = _tenant_logo_expr(db)
+    demo_empresa_ids = ", ".join(str(empresa_id) for empresa_id in DEMO_EMPRESA_IDS)
     return f"""
         WITH pedidos AS (
             SELECT
@@ -75,6 +78,7 @@ def _seguimiento_tenants_sql(db: Session) -> str:
             FROM petalops.pedido p
             LEFT JOIN petalops.estado_pedido ep
               ON ep.id_estado_pedido = p.estado_pedido_id
+            WHERE p.empresa_id NOT IN ({demo_empresa_ids})
             GROUP BY p.empresa_id
         )
         SELECT
@@ -87,6 +91,7 @@ def _seguimiento_tenants_sql(db: Session) -> str:
             COALESCE(p.pedidos_mes, 0) AS pedidos_mes
         FROM petalops.empresa e
         LEFT JOIN pedidos p ON p.empresa_id = e.id_empresa
+        WHERE e.id_empresa NOT IN ({demo_empresa_ids})
         ORDER BY pedidos_mes DESC, pedidos_hoy DESC, e.id_empresa ASC
         LIMIT :limit
     """
