@@ -24,3 +24,4 @@ class Empresa(Base):
     correoResponsable = Column("correo_responsable", String(180), nullable=True)
     celularResponsable = Column("celular_responsable", String(40), nullable=True)
     logoUrl = Column("logo_url", String, nullable=True)
+    tarifa = Column("tarifa", BigInteger, nullable=False, default=2500, server_default="2500")

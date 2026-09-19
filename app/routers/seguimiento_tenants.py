@@ -88,7 +88,8 @@ def _seguimiento_tenants_sql(db: Session) -> str:
             {logo_expr} AS logo_url,
             {estado_expr} AS estado,
             COALESCE(p.pedidos_hoy, 0) AS pedidos_hoy,
-            COALESCE(p.pedidos_mes, 0) AS pedidos_mes
+            COALESCE(p.pedidos_mes, 0) AS pedidos_mes,
+            e.tarifa
         FROM petalops.empresa e
         LEFT JOIN pedidos p ON p.empresa_id = e.id_empresa
         WHERE e.id_empresa NOT IN ({demo_empresa_ids})
@@ -98,14 +99,20 @@ def _seguimiento_tenants_sql(db: Session) -> str:
 
 
 def _row_to_tenant_item(row) -> TenantSeguimientoItem:
+    pedidos_hoy = _int(row.get("pedidos_hoy"))
+    pedidos_mes = _int(row.get("pedidos_mes"))
+    tarifa = _int(row.get("tarifa"))
     return TenantSeguimientoItem(
         empresaID=int(row["empresa_id"]),
         nombre=str(row.get("nombre") or f"Empresa {row['empresa_id']}"),
         slug=_str_or_none(row.get("slug")),
         logoUrl=_str_or_none(row.get("logo_url")),
         estado=_str_or_none(row.get("estado")),
-        pedidosHoy=_int(row.get("pedidos_hoy")),
-        pedidosMes=_int(row.get("pedidos_mes")),
+        pedidosHoy=pedidos_hoy,
+        pedidosMes=pedidos_mes,
+        tarifa=tarifa,
+        totalHoy=pedidos_hoy * tarifa,
+        totalMes=pedidos_mes * tarifa,
     )
 
 
@@ -114,6 +121,8 @@ def _build_resumen(items: list[TenantSeguimientoItem]) -> TenantSeguimientoResum
         tenants=len(items),
         pedidosHoy=sum(item.pedidosHoy for item in items),
         pedidosMes=sum(item.pedidosMes for item in items),
+        totalHoy=sum(item.totalHoy for item in items),
+        totalMes=sum(item.totalMes for item in items),
     )
 
 

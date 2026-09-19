@@ -54,6 +54,7 @@ def test_row_to_tenant_item_and_resumen_contract_only_today_and_month():
             "estado": "Activo",
             "pedidos_hoy": 3,
             "pedidos_mes": 10,
+            "tarifa": 1500,
         }
     )
 
@@ -63,9 +64,14 @@ def test_row_to_tenant_item_and_resumen_contract_only_today_and_month():
     assert item.logoUrl == "https://cdn.example.com/flora/logo.png"
     assert item.pedidosHoy == 3
     assert item.pedidosMes == 10
+    assert item.tarifa == 1500
+    assert item.totalHoy == 4500
+    assert item.totalMes == 15000
     assert resumen.tenants == 1
     assert resumen.pedidosHoy == 3
     assert resumen.pedidosMes == 10
+    assert resumen.totalHoy == 4500
+    assert resumen.totalMes == 15000
 
 
 def test_month_range_returns_whole_month():
@@ -106,6 +112,7 @@ def test_seguimiento_sql_omits_optional_empresa_columns_when_missing():
     assert ":mes_desde" in sql
     assert ":mes_hasta" in sql
     assert "pedidos_mes" in sql
+    assert "e.tarifa" in sql
     assert "APROBADO" in sql
     assert "WHERE p.empresa_id NOT IN (1, 2, 8)" in sql
     assert "WHERE e.id_empresa NOT IN (1, 2, 8)" in sql

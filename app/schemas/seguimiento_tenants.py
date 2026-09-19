@@ -13,12 +13,17 @@ class TenantSeguimientoItem(BaseModel):
     estado: str | None = None
     pedidosHoy: int = 0
     pedidosMes: int = 0
+    tarifa: int = 0
+    totalHoy: int = 0
+    totalMes: int = 0
 
 
 class TenantSeguimientoResumen(BaseModel):
     tenants: int = 0
     pedidosHoy: int = 0
     pedidosMes: int = 0
+    totalHoy: int = 0
+    totalMes: int = 0
 
 
 class TenantSeguimientoResponse(BaseModel):
