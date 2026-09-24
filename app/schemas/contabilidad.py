@@ -167,7 +167,6 @@ class CajaCierreRequest(BaseModel):
     totalEfectivo: Decimal = Field(
         default=Decimal("0"),
         validation_alias=AliasChoices("totalEfectivo", "total_efectivo", "tEfectivo", "t_efectivo"),
-        ge=Decimal("0"),
     )
     montoGuardado: Decimal = Field(
         default=Decimal("0"),
@@ -177,7 +176,6 @@ class CajaCierreRequest(BaseModel):
     nuevaBase: Decimal = Field(
         default=Decimal("0"),
         validation_alias=AliasChoices("nuevaBase", "nueva_base"),
-        ge=Decimal("0"),
     )
     observacion: str | None = Field(default=None, max_length=1000)
     usuarioID: int | None = Field(

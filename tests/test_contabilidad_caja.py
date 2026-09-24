@@ -97,6 +97,27 @@ def test_caja_cierre_request_accepts_front_formatted_values():
     assert payload.nuevaBase == Decimal("602000")
 
 
+def test_caja_cierre_request_accepts_negative_calculated_balances():
+    payload = CajaCierreRequest(
+        empresaID=2,
+        sucursalID=1,
+        fecha="24/09/2026",
+        base=100000,
+        efectivo="$70.000",
+        gasto=180000,
+        totalEfectivo="$-10.000",
+        guardado=0,
+        nuevaBase="$-10.000",
+    )
+
+    assert payload.baseInicial == Decimal("100000")
+    assert payload.efectivo == Decimal("70000")
+    assert payload.gasto == Decimal("180000")
+    assert payload.totalEfectivo == Decimal("-10000")
+    assert payload.montoGuardado == Decimal("0")
+    assert payload.nuevaBase == Decimal("-10000")
+
+
 def test_parse_query_date_accepts_frontend_display_format():
     assert _parse_query_date("11/06/2026") == date(2026, 6, 11)
     assert _parse_query_date("2026-06-11") == date(2026, 6, 11)
