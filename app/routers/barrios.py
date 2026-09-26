@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from app.core.timezone import colombia_now_naive
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -96,8 +96,8 @@ def create_barrio(
         nombreBarrio=payload.nombreBarrio.strip(),
         costoDomicilio=payload.costoDomicilio,
         activo=1 if bool(payload.activo) else 0,
-        createdAt=datetime.now(timezone.utc),
-        updatedAt=datetime.now(timezone.utc),
+        createdAt=colombia_now_naive(),
+        updatedAt=colombia_now_naive(),
     )
     db.add(barrio)
     db.commit()
@@ -151,7 +151,7 @@ def update_barrio(
     barrio.nombreBarrio = payload.nombreBarrio.strip()
     barrio.zonaID = int(payload.zonaID)
     barrio.costoDomicilio = payload.costoDomicilio
-    barrio.updatedAt = datetime.now(timezone.utc)
+    barrio.updatedAt = colombia_now_naive()
     db.commit()
     db.refresh(barrio)
     _invalidate_barrios_cache(empresa_id=empresa_id, sucursal_id=int(payload.sucursalID))

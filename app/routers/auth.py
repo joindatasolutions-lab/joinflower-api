@@ -1,3 +1,4 @@
+from app.core.timezone import colombia_now_naive
 from datetime import datetime, timezone
 import json
 import os
@@ -1143,8 +1144,8 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
             if not rol:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol invalido para la empresa")
 
-        usuario.ultimoLogin = datetime.now(timezone.utc)
-        usuario.updatedAt = datetime.now(timezone.utc)
+        usuario.ultimoLogin = colombia_now_naive()
+        usuario.updatedAt = colombia_now_naive()
         db.commit()
 
         user_id = _safe_int(usuario.idusuario)
@@ -1441,8 +1442,8 @@ def crear_usuario(
             passwordHash=pwd_context.hash(payload.password),
             rolID=int(payload.rolID),
             estado=estado,
-            createdAt=datetime.now(timezone.utc),
-            updatedAt=datetime.now(timezone.utc),
+            createdAt=colombia_now_naive(),
+            updatedAt=colombia_now_naive(),
         )
         db.add(usuario)
         db.flush()
@@ -1748,7 +1749,7 @@ def actualizar_usuario(
                 plain_password=payload.password,
                 actor_user_id=int(auth.userID),
             )
-        usuario.updatedAt = datetime.now(timezone.utc)
+        usuario.updatedAt = colombia_now_naive()
         _sync_user_roles(db, usuario, assigned_role_ids)
         _sync_employee_profile_for_operational_user(
             db,
@@ -1833,7 +1834,7 @@ def actualizar_estado_usuario(
         raise HTTPException(status_code=400, detail="estado debe ser Activo o Inactivo")
 
     usuario.estado = estado
-    usuario.updatedAt = datetime.now(timezone.utc)
+    usuario.updatedAt = colombia_now_naive()
     db.execute(
         text(
             """
@@ -1928,7 +1929,7 @@ def eliminar_usuario(
             usuario.login = deleted_login
             usuario.email = f"{deleted_login}@deleted.local"
             usuario.estado = "Eliminado"
-            usuario.updatedAt = datetime.now(timezone.utc)
+            usuario.updatedAt = colombia_now_naive()
             _ensure_usuario_modulo_table(db)
             _ensure_usuario_rol_table(db)
             db.execute(text("DELETE FROM petalops.usuario_rol WHERE usuario_id = :user_id"), {"user_id": target_id})
@@ -2687,7 +2688,7 @@ def actualizar_tema_empresa(
             tema = Tema(
                 empresaID=empresa_id,
                 activo=True,
-                createdAt=datetime.now(timezone.utc),
+                createdAt=colombia_now_naive(),
                 colorFondo="#FFFFFF",
                 colorFondoSuave="#F8F6F1",
                 colorTexto="#1F2937",
@@ -2700,7 +2701,7 @@ def actualizar_tema_empresa(
         tema.colorPrimario = payload.colorPrimario
         tema.colorSecundario = payload.colorSecundario
         tema.fuenteFamilia = payload.fuenteFamilia
-        tema.updatedAt = datetime.now(timezone.utc)
+        tema.updatedAt = colombia_now_naive()
 
         auth_logger.info(
             "EMPRESA_TEMA_UPDATED empresa_id=%s actor=%s colorPrimario=%s colorSecundario=%s fuenteFamilia=%s",

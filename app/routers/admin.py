@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from app.core.timezone import colombia_now_naive, COLOMBIA_TZ
+
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -85,11 +87,11 @@ def _motivo_regularizacion(payload: RegularizarEntregasRequest) -> str:
     return motivo
 
 
-def _naive_utc(value: datetime | None) -> datetime | None:
+def _naive_colombia(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(COLOMBIA_TZ).replace(tzinfo=None)
     return value
 
 
@@ -100,7 +102,7 @@ def _fecha_programada(entrega: Entrega | None, pedido: Pedido) -> datetime | Non
         or getattr(entrega, "fechaEntrega", None)
         or getattr(pedido, "fechaPedido", None)
     )
-    return _naive_utc(value)
+    return _naive_colombia(value)
 
 
 def _timeline_for_regularizacion(programada: datetime, entregada: datetime) -> tuple[datetime, datetime]:
@@ -141,7 +143,7 @@ def _ensure_entrega(db: Session, pedido: Pedido, entrega: Entrega | None) -> Ent
     if entrega is not None:
         return entrega
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     entrega = Entrega(
         empresaID=int(pedido.empresaID),
         sucursalID=int(pedido.sucursalID) if pedido.sucursalID is not None else None,
@@ -279,7 +281,7 @@ def _regularizar_produccion(
         anterior = int(produccion.floristaID) if produccion.floristaID is not None else None
         produccion.estado = para_entrega_id
         produccion.fechaFinalizacion = fecha_para_entrega
-        produccion.updatedAt = datetime.now(timezone.utc)
+        produccion.updatedAt = colombia_now_naive()
         if entrega.produccionID is None:
             entrega.produccionID = int(produccion.idProduccion)
         produccion_service.log_historial(
@@ -313,7 +315,7 @@ def regularizar_entregas_historicas(
         raise _err("REGULARIZACION_PEDIDO_DUPLICADO", "No se puede regularizar el mismo pedido dos veces en el lote")
 
     actor_login = str(getattr(auth, "login", None) or getattr(auth, "nombre", None) or "admin").strip() or "admin"
-    execution_at = datetime.now(timezone.utc)
+    execution_at = colombia_now_naive()
     responses: list[RegularizarEntregaItemResponse] = []
 
     try:

@@ -1,4 +1,5 @@
-from sqlalchemy import Column, DateTime, BigInteger, Integer, String, case, func, select
+from app.core.db_types import ColombiaDateTime as DateTime
+from sqlalchemy import Column, BigInteger, Integer, String, case, func, select
 from sqlalchemy.orm import column_property
 
 from app.models.perfilflorista import PerfilFlorista

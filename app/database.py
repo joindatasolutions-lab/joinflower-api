@@ -94,7 +94,7 @@ database_logger.info(
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"options": "-csearch_path=petalops"},
+    connect_args={"options": "-csearch_path=petalops -ctimezone=America/Bogota"},
     pool_size=DB_POOL_SIZE,
     max_overflow=DB_MAX_OVERFLOW,
     pool_timeout=DB_POOL_TIMEOUT,

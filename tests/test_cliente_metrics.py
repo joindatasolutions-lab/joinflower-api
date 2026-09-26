@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -235,7 +235,8 @@ def test_customer_metrics_payload_returns_p0_kpis():
     assert payload["insights"]
 
 
-def test_customer_priorities_endpoint_filters_and_totals_historical_value():
+def test_customer_priorities_endpoint_filters_and_totals_historical_value(monkeypatch):
+    monkeypatch.setattr("app.routers.cliente.colombia_now_naive", lambda: datetime(2026, 8, 14, 12))
     db = _MetricRowsDb(
         [
             _row(1, 1000, 2, date(2026, 1, 1), date(2026, 8, 1), avg_days=Decimal("30")),

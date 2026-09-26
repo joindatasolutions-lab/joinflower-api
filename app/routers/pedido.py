@@ -1,3 +1,4 @@
+from app.core.timezone import COLOMBIA_TZ
 import json
 import os
 import re
@@ -10,7 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session, aliased, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import and_, or_, cast, String, func, text
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from io import BytesIO
 import textwrap
 from reportlab.lib.units import mm
@@ -415,7 +416,7 @@ def _sincronizar_cancelacion_operativa_desde_pedido(
     *,
     motivo: str | None = None,
 ) -> dict[str, int]:
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     note = f"Cancelado desde pedidos por estado del pedido {int(pedido.idPedido)}."
     motivo_text = str(motivo or "").strip()
     if motivo_text:
@@ -610,7 +611,7 @@ def _parse_iso_date(value: str) -> datetime:
         ) from exc
 
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        parsed = parsed.astimezone(COLOMBIA_TZ).replace(tzinfo=None)
     return parsed
 
 
@@ -762,7 +763,7 @@ def _upsert_cliente_pedido_manual(
 
 
 def _numero_pedido_temporal() -> int:
-    return -int(datetime.now(timezone.utc).timestamp() * 1000000)
+    return -int(colombia_now().timestamp() * 1000000)
 
 
 def _find_branch_product_price(db: Session, *, empresa_id: int, sucursal_id: int, producto_id: int) -> Decimal:
@@ -1896,7 +1897,7 @@ def _mark_factura_impresa(
         row.get("raw_respuesta"),
         canal_flora=_extract_canal_flora(row.get("raw_respuesta")),
         factura_impresa=True,
-        factura_impresa_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        factura_impresa_at=colombia_now_naive().replace(microsecond=0).isoformat(),
         factura_impresa_by=str(actor_login or "").strip() or None,
     )
     db.execute(
@@ -4325,7 +4326,7 @@ def eliminar_detalle_pedido(
             .all()
         )
         estado_cancelado_id = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_CANCELADO)
-        now = datetime.now(timezone.utc)
+        now = colombia_now_naive()
         for produccion in producciones_detalle:
             if int(produccion.estado or 0) == int(estado_cancelado_id):
                 continue
@@ -5153,7 +5154,7 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
 
     pedido.estadoPedidoID = estado_aprobado.idEstadoPedido
     pedido.motivoRechazo = None
-    pedido.updatedAt = datetime.now(timezone.utc)
+    pedido.updatedAt = colombia_now_naive()
 
     _validar_cupos_inventario_pedido(db, pedido)
 
@@ -5246,7 +5247,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
 
     pedido.estadoPedidoID = estado_rechazado.idEstadoPedido
     pedido.motivoRechazo = motivo[:300]
-    pedido.updatedAt = datetime.now(timezone.utc)
+    pedido.updatedAt = colombia_now_naive()
     cancelacion_operativa = _sincronizar_cancelacion_operativa_desde_pedido(
         db,
         pedido,
@@ -5354,7 +5355,7 @@ def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_d
 
     estado_entregado_id = domicilio_service.resolve_estado_entrega_id(db, domicilio_service.ESTADO_ENTREGADO)
     estado_entrega_origen_id = int(entrega.estadoEntregaID or 0)
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     entrega.estadoEntregaID = int(estado_entregado_id)
     entrega.fechaEntrega = now
     entrega.updatedAt = now
@@ -6490,7 +6491,7 @@ def cambiar_estado(
 
     # 3️⃣ Actualizar estado
     pedido.estadoPedidoID = nuevo_estado_id
-    pedido.updatedAt = datetime.now(timezone.utc)
+    pedido.updatedAt = colombia_now_naive()
 
     estado_destino = (
         db.query(EstadoPedido)

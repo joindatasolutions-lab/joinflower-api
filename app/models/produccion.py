@@ -1,4 +1,5 @@
-from sqlalchemy import Column, BigInteger, String, Date, DateTime, ForeignKey, Text
+from app.core.db_types import ColombiaDateTime as DateTime
+from sqlalchemy import Column, BigInteger, String, Date, ForeignKey, Text
 from app.database import Base
 
 

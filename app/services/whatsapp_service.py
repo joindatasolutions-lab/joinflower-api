@@ -1,3 +1,4 @@
+from app.core.timezone import colombia_now_naive, COLOMBIA_TZ
 import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -464,9 +465,9 @@ def _marcar(db: Session, notificacion: WhatsappNotificacion, **campos) -> None:
 
 def _datetime_from_meta_timestamp(timestamp: Any) -> datetime:
     try:
-        return datetime.utcfromtimestamp(int(timestamp))
+        return datetime.fromtimestamp(int(timestamp), tz=COLOMBIA_TZ).replace(tzinfo=None)
     except (TypeError, ValueError, OSError, OverflowError):
-        return datetime.utcnow()
+        return colombia_now_naive()
 
 
 def _error_message_from_meta_status(status_payload: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -697,7 +698,7 @@ def _parametros_pedido_aceptado(db: Session, *, pedido: Pedido, cliente: Cliente
 
 
 def _procesar_una(db: Session, notificacion: WhatsappNotificacion) -> None:
-    ahora = datetime.utcnow()
+    ahora = colombia_now_naive()
     pedido = (
         db.query(Pedido)
         .filter(Pedido.idPedido == notificacion.pedidoID, Pedido.empresaID == notificacion.empresaID)
@@ -978,7 +979,7 @@ def procesar_notificaciones_pendientes(db: Session, *, limite: int = 20) -> int:
     """
     reconciliar_entregas_entregadas_sin_notificacion(db, limite=RECONCILIAR_ENTREGAS_BATCH_SIZE)
 
-    ahora = datetime.utcnow()
+    ahora = colombia_now_naive()
     pendientes = (
         db.query(WhatsappNotificacion)
         .filter(
@@ -1013,7 +1014,7 @@ def procesar_notificacion_pendiente(
     pedido. Si falla, queda marcada con la misma logica de reintentos/errores del worker.
     """
     try:
-        ahora = datetime.utcnow()
+        ahora = colombia_now_naive()
         notificacion = (
             db.query(WhatsappNotificacion)
             .filter(

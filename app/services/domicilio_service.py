@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from app.core.timezone import colombia_now_naive, COLOMBIA_TZ
+
 import os
 from math import atan2, cos, radians, sin, sqrt
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import func, text
@@ -104,8 +106,8 @@ def is_store_pickup_tipo_entrega(value: str | None) -> bool:
     return normalized in STORE_PICKUP_TIPO_ENTREGA_VALUES
 
 
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+def now_colombia() -> datetime:
+    return colombia_now_naive()
 
 
 DEFAULT_DOMICILIO_MAX_TAREAS_ACTIVAS = 0
@@ -201,7 +203,7 @@ def _ensure_transiciones_entrega_defaults(db: Session, empresa_id: int):
     ).all()
     existing = {(int(row[0]), int(row[1])) for row in existing_rows}
 
-    now = now_utc().replace(tzinfo=None)
+    now = now_colombia().replace(tzinfo=None)
     inserted = False
     for origen, destino in DEFAULT_TRANSICIONES_ENTREGA:
         origen_id = resolve_estado_entrega_id(db, origen)
@@ -420,7 +422,7 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
             .first()
         )
 
-    current_time = now_utc()
+    current_time = now_colombia()
 
     if not entrega:
         entrega = Entrega(
@@ -470,9 +472,9 @@ def tiempo_restante_horas(entrega: Entrega) -> int | None:
     if not target:
         return None
 
-    now = now_utc().replace(tzinfo=None)
+    now = now_colombia().replace(tzinfo=None)
     if target.tzinfo is not None:
-        target = target.astimezone(timezone.utc).replace(tzinfo=None)
+        target = target.astimezone(COLOMBIA_TZ).replace(tzinfo=None)
     delta = target - now
     return int(delta.total_seconds() // 3600)
 
@@ -516,7 +518,7 @@ def create_retry_entrega(
     domiciliario_id: int | None,
     next_state: str,
 ) -> Entrega:
-    current_time = now_utc()
+    current_time = now_colombia()
     next_entrega = Entrega(
         empresaID=int(previous.empresaID),
         sucursalID=(int(previous.sucursalID) if previous.sucursalID is not None else None),

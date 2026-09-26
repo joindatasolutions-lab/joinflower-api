@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta, timezone
+from app.core.timezone import colombia_now_naive
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -948,7 +949,7 @@ def obtener_metricas_clientes_tenant(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = _resolve_empresa_id(auth, int(tenant_id))
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     payload = _customer_metrics_payload(
         db,
         empresa_id=empresa_id,
@@ -993,7 +994,7 @@ def listar_clientes_por_segmento_tenant(
     if requested_segment not in CUSTOMER_SEGMENTS:
         raise HTTPException(status_code=400, detail=f"Segmento inválido: {segment}")
 
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     period_start, period_end = _period_params(start_date, end_date, today)
     rows = _decorate_customer_segments(
         _customer_metric_rows(
@@ -1035,7 +1036,7 @@ def listar_oportunidades_clientes_tenant(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = _resolve_empresa_id(auth, int(tenant_id))
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     rows = _decorate_customer_segments(
         _customer_metric_rows(
             db,
@@ -1093,7 +1094,7 @@ def listar_clientes_por_prioridad_comercial_tenant(
     if requested_priority not in CUSTOMER_COMMERCIAL_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Prioridad comercial invalida: {priority}")
 
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     requested_period = bool(start_date or end_date)
     period_start, period_end = _period_params(start_date, end_date, today)
     rows = _decorate_customer_segments(
@@ -1138,7 +1139,7 @@ def obtener_metricas_cliente_tenant(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = _resolve_empresa_id(auth, int(tenant_id))
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     period_start, period_end = _period_params(start_date, end_date, today)
     rows = _decorate_customer_segments(
         _customer_metric_rows(
@@ -1180,7 +1181,7 @@ def listar_inteligencia_clientes_tenant(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = _resolve_empresa_id(auth, int(tenant_id))
-    today = datetime.now(timezone.utc).date()
+    today = colombia_now_naive().date()
     rows = _decorate_customer_segments(
         _customer_metric_rows(
             db,
@@ -1318,7 +1319,7 @@ def list_clientes(
 
     items = [_cliente_to_dict(cliente) for cliente in clientes]
     if include_metrics and items:
-        today = datetime.now(timezone.utc).date()
+        today = colombia_now_naive().date()
         period_start, period_end = _period_params(start_date, end_date, today)
         metric_rows = _decorate_customer_segments(
             _customer_metric_rows(
@@ -1369,7 +1370,7 @@ def create_cliente(
     if existing:
         raise HTTPException(status_code=400, detail="Ya existe un cliente con esa identificación")
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     cliente = Cliente(
         empresaID=scoped_empresa_id,
         tipoIdent=str(payload.tipoIdent or "").strip() or None,
@@ -1439,7 +1440,7 @@ def update_cliente(
     cliente.fechaCumpleanos = payload.fechaCumpleanos
     cliente.fechaAniversario = payload.fechaAniversario
     cliente.activo = 1 if bool(payload.activo) else 0
-    cliente.updatedAt = datetime.now(timezone.utc)
+    cliente.updatedAt = colombia_now_naive()
     db.commit()
     db.refresh(cliente)
 

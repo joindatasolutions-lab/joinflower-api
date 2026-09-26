@@ -1,6 +1,7 @@
+from app.core.timezone import colombia_now_naive, colombia_today
 import re
 import secrets
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -424,7 +425,7 @@ def _apply_stock_movement(
     movimiento_tipo = _normalize_movimiento_tipo(tipo_movimiento)
     movimiento_tipo_id = _resolve_movimiento_tipo_id(db, movimiento_tipo)
     cantidad = Decimal(cantidad or 0)
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     fecha_movimiento = fecha or now
     stock_actual = Decimal(item.stockActual or 0)
     tipo_key = _movement_tipo_key(movimiento_tipo)
@@ -532,7 +533,7 @@ def crear_proveedor(
 ):
     assert_same_empresa(auth, empresa_id)
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     empresa_scope = int(empresa_id) if _has_column(db, "proveedor", "empresa_id") else None
     try:
         row = db.execute(
@@ -615,7 +616,7 @@ def actualizar_proveedor(
     proveedor.email = (payload.email.strip() if payload.email else None)
     proveedor.direccion = (payload.direccion.strip() if payload.direccion else None)
     proveedor.activo = bool(payload.activo)
-    proveedor.updatedAt = datetime.now(timezone.utc)
+    proveedor.updatedAt = colombia_now_naive()
 
     try:
         db.commit()
@@ -675,7 +676,7 @@ def obtener_metricas_inventario(
     if categoria_norm:
         query = query.filter(func.upper(_categoria_expr(has_categoria_col)) == categoria_norm)
 
-    today = date.today()
+    today = colombia_today()
     vence_hasta = today + timedelta(days=int(dias_vencimiento))
     total_referencias = 0
     disponibles = 0
@@ -855,7 +856,7 @@ def crear_item_inventario(
     has_cat    = _has_column(db, "insumo", "categoria")
     has_marca  = has_cat and _has_column(db, "insumo", "marca")
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
 
     try:
         if has_cat and has_marca:
@@ -1067,7 +1068,7 @@ def actualizar_item_inventario(
     has_cat   = _has_column(db, "insumo", "categoria")
     has_marca = has_cat and _has_column(db, "insumo", "marca")
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
 
     insumo.nombreInsumo = payload.nombre.strip()
     insumo.proveedorID = (int(payload.proveedorID) if payload.proveedorID is not None else None)
@@ -1124,7 +1125,7 @@ def ajustar_stock_inventario(
     movimiento_tipo = _normalize_movimiento_tipo(payload.tipoMovimiento)
     movimiento_tipo_id = _resolve_movimiento_tipo_id(db, movimiento_tipo)
     cantidad = Decimal(payload.cantidad or 0)
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
 
     stock_actual = Decimal(item.stockActual or 0)
 
@@ -1204,10 +1205,10 @@ def registrar_compra_inventario(
     insumo = db.query(Insumo).filter(Insumo.idInsumo == int(item.insumoID), Insumo.empresaID == int(item.empresaID)).first()
     if insumo and payload.fechaVencimiento and _has_column(db, "insumo", "fecha_vencimiento"):
         insumo.fechaVencimiento = payload.fechaVencimiento
-        insumo.updatedAt = datetime.now(timezone.utc)
+        insumo.updatedAt = colombia_now_naive()
     if insumo and payload.proveedorID is not None:
         insumo.proveedorID = int(payload.proveedorID)
-        insumo.updatedAt = datetime.now(timezone.utc)
+        insumo.updatedAt = colombia_now_naive()
 
     motivo = _movement_note(
         "Compra registrada",
@@ -1309,7 +1310,7 @@ def actualizar_activo_inventario(
 
     assert_same_empresa(auth, int(item.empresaID))
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     item.activo = bool(payload.activo)
     item.fechaUltimaActualizacion = now
     item.updatedAt = now
@@ -1418,7 +1419,7 @@ def obtener_metricas_movimientos_inventario(
     ajustes = Decimal("0")
     danos = Decimal("0")
     total_hoy = 0
-    today = date.today()
+    today = colombia_today()
 
     for mov, _inv, _ins in query.all():
         tipo = _movimiento_tipo_label(mov.tipoMovimiento).lower()
@@ -1521,7 +1522,7 @@ def anular_movimiento_inventario(
     if not item:
         raise HTTPException(status_code=404, detail="Item de inventario no encontrado")
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     stock_actual = Decimal(item.stockActual or 0)
     cantidad = Decimal(mov.cantidad or 0)
     tipo_key = _movement_tipo_key(mov.tipoMovimiento)
@@ -1646,7 +1647,7 @@ def imprimir_movimiento_inventario(
             y = height - 22 * mm
         y = _pdf_line(pdf, y, label, value)
     pdf.setFont("Helvetica", 8)
-    pdf.drawRightString(width - 18 * mm, 14 * mm, f"Generado: {datetime.now(timezone.utc).isoformat()}")
+    pdf.drawRightString(width - 18 * mm, 14 * mm, f"Generado: {colombia_now_naive().isoformat()}")
     pdf.save()
     content = buffer.getvalue()
     filename = f"movimiento-inventario-{int(mov.idMovimiento)}.pdf"
@@ -1757,7 +1758,7 @@ def _crear_producto_para_receta(
     imagen_url: str | None,
 ) -> int:
     categoria_id = _obtener_o_crear_categoria_arreglos(db, empresa_id)
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     base_slug = re.sub(r"[^A-Z0-9]+", "", nombre.strip().upper())[:12] or "ARR"
     codigo_producto = f"ARR-{base_slug}-{secrets.token_hex(3).upper()}"
     row = db.execute(
@@ -1891,7 +1892,7 @@ def crear_receta(
         )
         producto_nuevo_sucursal_id = auth.sucursalID
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     try:
         rec = Receta(
             empresaID=int(empresa_id),
@@ -2007,7 +2008,7 @@ def actualizar_receta(
     rec.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
     rec.capacidadManual = payload.capacidadManual
     rec.activo = bool(payload.activo)
-    rec.updatedAt = datetime.now(timezone.utc)
+    rec.updatedAt = colombia_now_naive()
 
     try:
         db.commit()
@@ -2042,7 +2043,7 @@ def agregar_ingrediente_receta(
     if not inv:
         raise HTTPException(status_code=400, detail="Item de inventario no válido para esta empresa")
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     try:
         det = RecetaDetalle(
             empresaID=int(rec.empresaID),

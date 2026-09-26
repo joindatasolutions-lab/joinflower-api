@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from app.core.timezone import COLOMBIA_TZ
 from typing import Callable, Iterable, TypeVar
 
 T = TypeVar("T")
@@ -19,7 +20,7 @@ def _to_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=COLOMBIA_TZ).astimezone(timezone.utc)
     return value.astimezone(timezone.utc)
 
 

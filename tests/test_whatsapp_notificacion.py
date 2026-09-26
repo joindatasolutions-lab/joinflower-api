@@ -1,3 +1,4 @@
+from app.core.timezone import colombia_now_naive
 """Casos obligatorios de pendientes/Mejoras/promt-meta.md (seccion 16).
 
 No requiere una base de datos real: se usa una sesion falsa (FakeSession/FakeQuery) que
@@ -94,7 +95,7 @@ def _notificacion_domiciliario(empresa_id, pedido_id, entrega_id, usuario_id):
         evento=f"{whatsapp_service.EVENTO_COURIER_ASSIGNED_PREFIX}:{usuario_id}",
         status=whatsapp_service.STATUS_PENDING,
         attempts=0,
-        createdAt=datetime.utcnow(),
+        createdAt=colombia_now_naive(),
     )
 
 
@@ -108,7 +109,7 @@ def _notificacion(empresa_id, pedido_id, entrega_id):
         evento=whatsapp_service.EVENTO_ORDER_DELIVERED,
         status=whatsapp_service.STATUS_PENDING,
         attempts=0,
-        createdAt=datetime.utcnow(),
+        createdAt=colombia_now_naive(),
     )
 
 
@@ -586,7 +587,7 @@ def test_caso6_error_transitorio_de_meta_programa_reintento(monkeypatch):
     # debe quedar PENDING con un nextAttemptAt en el futuro, no FAILED definitivo.
     assert notificacion.status == whatsapp_service.STATUS_PENDING
     assert notificacion.errorCode == "TRANSIENT"
-    assert notificacion.nextAttemptAt > datetime.utcnow()
+    assert notificacion.nextAttemptAt > colombia_now_naive()
 
 
 def test_caso6b_error_transitorio_agota_intentos_y_queda_failed(monkeypatch):

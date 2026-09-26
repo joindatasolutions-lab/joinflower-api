@@ -1,5 +1,5 @@
+from app.core.timezone import colombia_now_naive
 import json
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
@@ -71,7 +71,7 @@ def _get_or_create_configuracion_asignacion(db: Session, empresa_id: int) -> Emp
     if config is not None:
         return config
 
-    now = datetime.now(timezone.utc)
+    now = colombia_now_naive()
     config = EmpresaConfiguracionAsignacion(
         empresaID=empresa_id,
         asignacionProduccionActiva=True,
@@ -593,7 +593,7 @@ def actualizar_configuracion_asignacion(
         config.notificacionNuevoPedidoDomiciliarioActiva = payload.notificacionNuevoPedidoDomiciliarioActiva
     if payload.vozPedidosActiva is not None:
         config.vozPedidosActiva = payload.vozPedidosActiva
-    config.updatedAt = datetime.now(timezone.utc)
+    config.updatedAt = colombia_now_naive()
 
     db.commit()
     db.refresh(config)
@@ -615,7 +615,7 @@ def actualizar_configuracion_voz_pedidos(
     assert_same_empresa(auth, empresa_id)
     config = _get_or_create_configuracion_asignacion(db, empresa_id)
     config.vozPedidosActiva = bool(payload.vozPedidosActiva)
-    config.updatedAt = datetime.now(timezone.utc)
+    config.updatedAt = colombia_now_naive()
     db.commit()
     db.refresh(config)
     return ConfiguracionVozPedidosResponse(

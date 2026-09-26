@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from app.core.timezone import colombia_now_naive, COLOMBIA_TZ
+
 import json
 import re
 import unicodedata
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 import os
@@ -1675,11 +1677,11 @@ _TRAZABILIDAD_ORDER = {
 }
 
 
-def _datetime_naive_utc(value: datetime | None) -> datetime | None:
+def _datetime_naive_colombia(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(COLOMBIA_TZ).replace(tzinfo=None)
     return value
 
 
@@ -1695,7 +1697,7 @@ def _estado_entrega_reached(actual: str, target: str) -> bool:
 
 def _latest_para_entrega_timestamp(producciones: list[Produccion]) -> datetime | None:
     values = [
-        _datetime_naive_utc(getattr(produccion, "fechaFinalizacion", None))
+        _datetime_naive_colombia(getattr(produccion, "fechaFinalizacion", None))
         for produccion in producciones
         if getattr(produccion, "fechaFinalizacion", None) is not None
     ]
@@ -1704,7 +1706,7 @@ def _latest_para_entrega_timestamp(producciones: list[Produccion]) -> datetime |
 
 def _validate_fecha_coherente_con_entrega(entrega: Entrega, pedido: Pedido, fecha_efectiva: datetime):
     referencia = _fecha_entrega_programada(entrega) or getattr(pedido, "fechaPedido", None)
-    referencia = _datetime_naive_utc(referencia)
+    referencia = _datetime_naive_colombia(referencia)
     if referencia is None:
         return
     if fecha_efectiva.date() != referencia.date():
@@ -1726,9 +1728,9 @@ def _build_trazabilidad_timeline(
     if estado_target == produccion_service.ESTADO_PARA_ENTREGA:
         para_entrega_at = fecha_target
 
-    fecha_asignacion = _datetime_naive_utc(getattr(entrega, "fechaAsignacion", None))
-    fecha_salida = _datetime_naive_utc(getattr(entrega, "fechaSalida", None))
-    fecha_entrega = _datetime_naive_utc(getattr(entrega, "fechaEntrega", None))
+    fecha_asignacion = _datetime_naive_colombia(getattr(entrega, "fechaAsignacion", None))
+    fecha_salida = _datetime_naive_colombia(getattr(entrega, "fechaSalida", None))
+    fecha_entrega = _datetime_naive_colombia(getattr(entrega, "fechaEntrega", None))
     if estado_target == ESTADO_ASIGNADO:
         fecha_asignacion = fecha_target
     elif estado_target == ESTADO_EN_RUTA:
@@ -1950,8 +1952,8 @@ def crear_domiciliario(
         rolID=int(rol.idRol),
         estado=estado,
         esSuperadmin=False,
-        createdAt=datetime.now(timezone.utc),
-        updatedAt=datetime.now(timezone.utc),
+        createdAt=colombia_now_naive(),
+        updatedAt=colombia_now_naive(),
     )
     db.add(usuario)
     db.flush()
@@ -1971,8 +1973,8 @@ def crear_domiciliario(
         placa=(payload.placa.strip() if payload.placa else None),
         detalleVehiculo=(payload.detalleVehiculo.strip() if payload.detalleVehiculo else None),
         activo=activo_flag,
-        createdAt=datetime.now(timezone.utc),
-        updatedAt=datetime.now(timezone.utc),
+        createdAt=colombia_now_naive(),
+        updatedAt=colombia_now_naive(),
     )
     db.add(domiciliario)
     db.commit()
@@ -2072,7 +2074,7 @@ def actualizar_domiciliario(
     if not has_changes:
         raise _err("DOMICILIARIO_UPDATE_EMPTY", "No hay campos para actualizar", status_code=400)
 
-    domiciliario.updatedAt = datetime.now(timezone.utc)
+    domiciliario.updatedAt = colombia_now_naive()
     db.commit()
     db.refresh(domiciliario)
 
@@ -2126,7 +2128,7 @@ def eliminar_domiciliario(
 
     domiciliario.activo = 0
     domiciliario.estado = "Eliminado"
-    domiciliario.updatedAt = datetime.now(timezone.utc)
+    domiciliario.updatedAt = colombia_now_naive()
     db.commit()
 
     return DomiciliarioDeleteResponse(
@@ -2141,7 +2143,7 @@ def listar_admin(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     filtro: str = Query("hoy"),
-    fecha: date = Query(default_factory=date.today),
+    fecha: date = Query(default_factory=colombia_today),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -2268,7 +2270,7 @@ def corregir_trazabilidad_pedido(
             status_code=400,
         )
 
-    fecha_nueva = _datetime_naive_utc(payload.fechaEfectiva)
+    fecha_nueva = _datetime_naive_colombia(payload.fechaEfectiva)
     if fecha_nueva is None:
         raise _err(
             "DOMICILIO_TRAZABILIDAD_FECHA_REQUIRED",
@@ -2341,7 +2343,7 @@ def corregir_trazabilidad_pedido(
                 status_code=400,
             )
         field_name = _TRAZABILIDAD_ENTREGA_FIELDS[estado]
-        fecha_anterior = _datetime_naive_utc(getattr(entrega, field_name, None))
+        fecha_anterior = _datetime_naive_colombia(getattr(entrega, field_name, None))
 
     timeline = _build_trazabilidad_timeline(
         entrega,
@@ -2351,7 +2353,7 @@ def corregir_trazabilidad_pedido(
     )
     _validate_trazabilidad_cronologica(timeline)
 
-    fecha_modificacion = datetime.now(timezone.utc)
+    fecha_modificacion = colombia_now_naive()
     if estado == produccion_service.ESTADO_PARA_ENTREGA:
         for produccion in producciones:
             if (
@@ -2451,12 +2453,12 @@ def asignar_domiciliario(
         )
 
         entrega.domiciliarioID = int(domiciliario.idDomiciliario)
-        entrega.fechaAsignacion = datetime.now(timezone.utc)
+        entrega.fechaAsignacion = colombia_now_naive()
         entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
         accion_auditoria = "ASIGNAR_DOMICILIARIO"
         estado_nuevo = ESTADO_ASIGNADO
 
-    entrega.updatedAt = datetime.now(timezone.utc)
+    entrega.updatedAt = colombia_now_naive()
     _audit_domicilio_action(
         db=db,
         auth=auth,
@@ -2538,7 +2540,7 @@ def tomar_entrega(
             current=actual,
             target=ESTADO_ASIGNADO,
         )
-        assigned_at = datetime.now(timezone.utc)
+        assigned_at = colombia_now_naive()
         updated_rows = (
             db.query(Entrega)
             .filter(
@@ -2648,7 +2650,7 @@ def devolver_entrega(
     entrega.fechaAsignacion = None
     entrega.fechaSalida = None
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_PENDIENTE)
-    entrega.updatedAt = datetime.now(timezone.utc)
+    entrega.updatedAt = colombia_now_naive()
     _audit_domicilio_action(
         db=db,
         auth=auth,
@@ -2690,8 +2692,8 @@ def marcar_en_ruta(
         raise _err("DOMICILIO_DOMICILIARIO_REQUIRED", "Debes asignar un domiciliario antes de salir a ruta", status_code=400)
 
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_EN_RUTA)
-    entrega.fechaSalida = datetime.now(timezone.utc)
-    entrega.updatedAt = datetime.now(timezone.utc)
+    entrega.fechaSalida = colombia_now_naive()
+    entrega.updatedAt = colombia_now_naive()
     _audit_domicilio_action(
         db=db,
         auth=auth,
@@ -2750,7 +2752,7 @@ def _marcar_entregado_impl(
             raise _err("DOMICILIO_LONGITUD_REQUIRED", "longitudEntrega es requerida para marcar entregado", status_code=422)
 
     entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ENTREGADO)
-    entrega.fechaEntrega = datetime.now(timezone.utc)
+    entrega.fechaEntrega = colombia_now_naive()
     if str(firmaNombre or "").strip():
         entrega.firmaNombre = str(firmaNombre).strip()
     if str(firmaDocumento or "").strip():
@@ -2765,7 +2767,7 @@ def _marcar_entregado_impl(
     if longitudEntrega is not None:
         entrega.longitudEntrega = longitudEntrega
     entrega.observaciones = (observaciones or "").strip() or entrega.observaciones
-    entrega.updatedAt = datetime.now(timezone.utc)
+    entrega.updatedAt = colombia_now_naive()
     _audit_domicilio_action(
         db=db,
         auth=auth,
@@ -2900,7 +2902,7 @@ def marcar_no_entregado(
     entrega.motivoNoEntregado = payload.motivo.strip()
     entrega.observaciones = (payload.observaciones or "").strip() or entrega.observaciones
     entrega.reprogramadaPara = payload.reprogramarPara
-    entrega.updatedAt = datetime.now(timezone.utc)
+    entrega.updatedAt = colombia_now_naive()
     _audit_domicilio_action(
         db=db,
         auth=auth,
@@ -2924,7 +2926,7 @@ def listar_mis_entregas(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
     domiciliario_id: int = Query(..., alias="domiciliarioID"),
-    fecha: date = Query(default_factory=date.today),
+    fecha: date = Query(default_factory=colombia_today),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -2944,7 +2946,7 @@ def listar_mis_entregas(
 def listar_mis_pedidos(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
-    fecha: date = Query(default_factory=date.today),
+    fecha: date = Query(default_factory=colombia_today),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -2965,7 +2967,7 @@ def listar_mis_pedidos(
 def listar_pedidos_disponibles(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
-    fecha: date = Query(default_factory=date.today),
+    fecha: date = Query(default_factory=colombia_today),
     latitud: float | None = Query(None),
     longitud: float | None = Query(None),
     db: Session = Depends(get_db),
@@ -3280,7 +3282,7 @@ def autoasignar_pedido(
         target=ESTADO_ASIGNADO,
     )
 
-    assigned_at = datetime.now(timezone.utc)
+    assigned_at = colombia_now_naive()
     estado_asignado_id = domicilio_service.resolve_estado_entrega_id(db, ESTADO_ASIGNADO)
     updated_rows = (
         db.query(Entrega)
@@ -3380,7 +3382,7 @@ def autoasignar_pedido(
 def listar_mis_entregas_propias(
     empresa_id: int = Query(..., alias="empresaID"),
     sucursal_id: int | None = Query(None, alias="sucursalID"),
-    fecha: date = Query(default_factory=date.today),
+    fecha: date = Query(default_factory=colombia_today),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):

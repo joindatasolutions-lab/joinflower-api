@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -83,7 +83,7 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
         raise HTTPException(status_code=400, detail="Sucursal no existe para la empresa indicada")
 
     prefijo = _prefijo_desde_sucursal(sucursal)
-    now_utc = datetime.now(timezone.utc)
+    now_colombia = colombia_now_naive()
 
     db.execute(
         text(
@@ -96,7 +96,7 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
         {
             "empresa_id": int(empresa_id),
             "sucursal_id": int(sucursal_id),
-            "updated_at": now_utc,
+            "updated_at": now_colombia,
         },
     )
 
@@ -121,7 +121,7 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
         {
             "empresa_id": int(empresa_id),
             "sucursal_id": int(sucursal_id),
-            "updated_at": now_utc,
+            "updated_at": now_colombia,
         },
     ).first()
 
@@ -260,7 +260,7 @@ def _crear_pedido_checkout_compuesto(
         totalIva=Decimal("0.00"),
         costoDomicilio=Decimal("0.00"),
         totalNeto=Decimal("0.00"),
-        createdAt=datetime.now(timezone.utc),
+        createdAt=colombia_now_naive(),
     )
     db.add(pedido)
     db.flush()
@@ -319,7 +319,7 @@ def _crear_pedido_checkout_compuesto(
         latitudDestino=entrega_payload.latitudDestino,
         longitudDestino=entrega_payload.longitudDestino,
         intentoNumero=1,
-        createdAt=datetime.now(timezone.utc),
+        createdAt=colombia_now_naive(),
     )
     db.add(entrega)
     return pedido
@@ -384,7 +384,7 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
                 telefono=payload.cliente.telefono,
                 email=payload.cliente.email,
                 activo=_normalizar_activo_legacy(True),
-                createdAt=datetime.now(timezone.utc),
+                createdAt=colombia_now_naive(),
             )
             db.add(cliente)
             db.flush()
