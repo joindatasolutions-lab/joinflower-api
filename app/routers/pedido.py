@@ -16,7 +16,7 @@ from io import BytesIO
 import textwrap
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from app.core.timezone import as_colombia_naive_datetime, colombia_now_naive
+from app.core.timezone import as_colombia_naive_datetime, colombia_now, colombia_now_naive
 from app.database import get_db
 from app.models.producto import Producto
 from app.models.barrio import Barrio
