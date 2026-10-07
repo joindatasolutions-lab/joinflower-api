@@ -59,7 +59,6 @@ from app.core.ordering import sort_operativo
 from app.core.security import (
     assert_same_empresa,
     get_current_auth_context,
-    is_empresa_admin_context,
     is_super_admin_context,
     require_module_access,
 )
@@ -3636,16 +3635,6 @@ def actualizar_detalle_pedido(
             detalle.cantidad = cantidad
             needs_totals_recalc = True
 
-        if any(value is not None for value in (payload.clienteNombre, payload.clienteTelefono)):
-            if not (is_empresa_admin_context(auth) or is_super_admin_context(auth)):
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "PEDIDO_CLIENT_EDIT_FORBIDDEN",
-                        "message": "Solo un usuario administrador puede editar nombre o teléfono del cliente.",
-                    },
-                )
-
         if payload.clienteNombre is not None:
             cliente.nombreCompleto = str(payload.clienteNombre).strip() or cliente.nombreCompleto
         if payload.clienteTelefono is not None:
@@ -4277,13 +4266,12 @@ def eliminar_detalle_pedido(
         assert_same_empresa(auth, int(pedido.empresaID))
 
         estado_nombre = _estado_pedido_nombre(db, pedido.estadoPedidoID)
-        es_admin = is_empresa_admin_context(auth) or is_super_admin_context(auth)
-        if estado_nombre not in {"PENDIENTE", "CREADO"} and not (estado_nombre == "APROBADO" and es_admin):
+        if estado_nombre not in {"PENDIENTE", "CREADO", "APROBADO"}:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "code": "PEDIDO_DETALLE_DELETE_INVALID_STATE",
-                    "message": "Solo administradores pueden eliminar arreglos en pedidos aprobados.",
+                    "message": "Solo se pueden eliminar arreglos en pedidos pendientes, creados o aprobados.",
                 },
             )
 
@@ -5226,8 +5214,8 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
     estado_actual = _estado_pedido_nombre(db, estado_origen_id)
     es_pendiente = estado_actual in {"CREADO", "PENDIENTE"}
     es_aprobado = estado_actual in {"APROBADO", "PAGADO"}
-    if not es_pendiente and not (es_aprobado and (is_empresa_admin_context(auth) or is_super_admin_context(auth))):
-        raise HTTPException(status_code=400, detail="Solo administradores pueden cancelar pedidos aprobados")
+    if not es_pendiente and not es_aprobado:
+        raise HTTPException(status_code=400, detail="Solo se pueden cancelar pedidos creados, pendientes, aprobados o pagados")
 
     estado_rechazado = (
         _buscar_estado_por_nombre(db, "CANCELADO")

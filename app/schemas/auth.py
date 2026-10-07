@@ -99,6 +99,9 @@ class AuthContext(BaseModel):
 
     def can(self, modulo: str, accion: str) -> bool:
         permisos_modulo = self.permisos.get(modulo.lower()) or {}
+        # Pedidos se habilita como un modulo completo, sin permisos por operacion.
+        if modulo.lower() == "pedidos" and accion in {"puedeVer", "puedeCrear", "puedeEditar", "puedeEliminar"}:
+            return bool(permisos_modulo.get("puedeVer", False))
         return bool(permisos_modulo.get(accion, False))
 
     def to_me_response(self) -> dict[str, Any]:
@@ -107,10 +110,10 @@ class AuthContext(BaseModel):
             permisos.append(
                 {
                     "modulo": modulo,
-                    "puedeVer": bool(data.get("puedeVer", False)),
-                    "puedeCrear": bool(data.get("puedeCrear", False)),
-                    "puedeEditar": bool(data.get("puedeEditar", False)),
-                    "puedeEliminar": bool(data.get("puedeEliminar", False)),
+                    "puedeVer": self.can(modulo, "puedeVer"),
+                    "puedeCrear": self.can(modulo, "puedeCrear"),
+                    "puedeEditar": self.can(modulo, "puedeEditar"),
+                    "puedeEliminar": self.can(modulo, "puedeEliminar"),
                 }
             )
 
