@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.security import assert_same_empresa, get_current_auth_context, require_admin_role, require_module_access
+from app.core.security import assert_same_empresa, get_current_auth_context, is_empresa_admin_context, require_admin_role, require_module_access
 from app.database import get_db
 from app.models.empresa_configuracion_asignacion import EmpresaConfiguracionAsignacion
 from app.schemas.configuracion import (
@@ -30,6 +30,13 @@ from app.services.empresa_menu_service import (
 )
 
 router = APIRouter(prefix="/configuracion", tags=["Configuracion"])
+
+
+def require_order_catalog_read(auth=Depends(get_current_auth_context)):
+    """Allow sales staff to read catalogs without granting configuration edits."""
+    if is_empresa_admin_context(auth):
+        return auth
+    return require_module_access("pedidos", "puedeVer")(auth)
 
 
 def _next_orden(db: Session, *, tabla: str, empresa_id: int) -> int:
@@ -317,7 +324,7 @@ def _actualizar_catalogo_item(
 
 
 @router.get("/empresas/{empresa_id}/metodos-pago", response_model=CatalogoListResponse)
-def listar_metodos_pago(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)):
+def listar_metodos_pago(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_order_catalog_read)):
     assert_same_empresa(auth, empresa_id)
     return _listar_catalogo(db, empresa_id=empresa_id, campo="pedido_metodos_pago")
 
@@ -403,7 +410,7 @@ def actualizar_configuracion_catalogo_transferencia(
 
 
 @router.get("/empresas/{empresa_id}/canales-venta", response_model=CatalogoListResponse)
-def listar_canales_venta(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)):
+def listar_canales_venta(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_order_catalog_read)):
     assert_same_empresa(auth, empresa_id)
     return _listar_catalogo(db, empresa_id=empresa_id, campo="pedido_canal_venta")
 
@@ -431,7 +438,7 @@ def actualizar_canal_venta(
 
 
 @router.get("/empresas/{empresa_id}/menu-pedido", response_model=MenuCampoListResponse)
-def listar_menu_pedido(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_admin_role)):
+def listar_menu_pedido(empresa_id: int, db: Session = Depends(get_db), auth=Depends(require_order_catalog_read)):
     assert_same_empresa(auth, empresa_id)
 
     items = []
