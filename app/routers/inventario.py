@@ -98,6 +98,8 @@ def _to_item(
     tamano: str | None = None,
     unidad_medida: str | None = None,
     fecha_vencimiento=None,
+    dias_vida_util: int | None = None,
+    observaciones: str | None = None,
     marca: str | None = None,
     precio_venta: Decimal | None = None,
     vendible_unidad: bool = False,
@@ -120,6 +122,8 @@ def _to_item(
         tamano=(str(tamano) if tamano is not None else None),
         unidadMedida=(str(unidad_medida) if unidad_medida is not None else None),
         fechaVencimiento=fecha_vencimiento,
+        diasVidaUtil=(int(dias_vida_util) if dias_vida_util is not None else None),
+        observaciones=(str(observaciones) if observaciones is not None else None),
         marca=(str(marca) if marca is not None else None),
         precioVenta=(Decimal(precio_venta) if precio_venta is not None else None),
         vendibleUnidad=bool(vendible_unidad),
@@ -302,6 +306,8 @@ def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
         tamano=(str(insumo.tamano) if insumo and insumo.tamano else None),
         unidad_medida=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else None),
         fecha_vencimiento=(insumo.fechaVencimiento if insumo else None),
+        dias_vida_util=(getattr(insumo, "diasVidaUtil", None) if insumo else None),
+        observaciones=(getattr(insumo, "observaciones", None) if insumo else None),
         marca=(str(insumo.marca) if insumo and insumo.marca else None),
         precio_venta=(Decimal(insumo.precioVenta) if insumo and insumo.precioVenta is not None else None),
         vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo else False,
@@ -810,6 +816,8 @@ def listar_inventario(
                 tamano=(str(insumo.tamano) if insumo and has_categoria_col and insumo.tamano else None),
                 unidad_medida=(str(insumo.unidadMedida) if insumo and insumo.unidadMedida else None),
                 fecha_vencimiento=(insumo.fechaVencimiento if insumo and has_categoria_col else None),
+                dias_vida_util=(getattr(insumo, "diasVidaUtil", None) if insumo else None),
+                observaciones=(getattr(insumo, "observaciones", None) if insumo else None),
                 marca=(str(insumo.marca) if insumo and has_categoria_col and insumo.marca else None),
                 precio_venta=(Decimal(insumo.precioVenta) if insumo and has_categoria_col and insumo.precioVenta is not None else None),
                 vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo and has_vendible_col else False,
@@ -856,6 +864,8 @@ def crear_item_inventario(
     has_cat    = _has_column(db, "insumo", "categoria")
     has_marca  = has_cat and _has_column(db, "insumo", "marca")
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
+    has_dias_vida_util = _has_column(db, "insumo", "dias_vida_util")
+    has_observaciones = _has_column(db, "insumo", "observaciones")
     now = colombia_now_naive()
 
     try:
@@ -959,6 +969,26 @@ def crear_item_inventario(
             ).first()
 
         insumo_id = int(insumo_row[0])
+        if has_dias_vida_util or has_observaciones:
+            updates = []
+            params = {"insumo_id": insumo_id, "empresa_id": int(payload.empresaID)}
+            if has_dias_vida_util:
+                updates.append("dias_vida_util = :dias_vida_util")
+                params["dias_vida_util"] = payload.diasVidaUtil
+            if has_observaciones:
+                updates.append("observaciones = :observaciones")
+                params["observaciones"] = payload.observaciones.strip() if payload.observaciones else None
+            db.execute(
+                text(
+                    f"""
+                    UPDATE petalops.insumo
+                    SET {', '.join(updates)}
+                    WHERE id_insumo = :insumo_id
+                      AND empresa_id = :empresa_id
+                    """
+                ),
+                params,
+            )
         if has_vendible:
             db.execute(
                 text(
@@ -1068,12 +1098,17 @@ def actualizar_item_inventario(
     has_cat   = _has_column(db, "insumo", "categoria")
     has_marca = has_cat and _has_column(db, "insumo", "marca")
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
+    has_dias_vida_util = _has_column(db, "insumo", "dias_vida_util")
+    has_observaciones = _has_column(db, "insumo", "observaciones")
     now = colombia_now_naive()
 
     insumo.nombreInsumo = payload.nombre.strip()
+    if payload.codigo:
+        insumo.codigoBarra = payload.codigo.strip()
     insumo.proveedorID = (int(payload.proveedorID) if payload.proveedorID is not None else None)
     insumo.updatedAt = now
-    insumo.activo = bool(item.activo)
+    item.activo = bool(payload.activo)
+    insumo.activo = bool(payload.activo)
 
     if has_cat:
         insumo.categoria = payload.categoria.strip()
@@ -1082,6 +1117,10 @@ def actualizar_item_inventario(
         insumo.descripcion = (payload.descripcion.strip() if payload.descripcion else None)
         insumo.tamano = (payload.tamano.strip() if payload.tamano else None)
         insumo.fechaVencimiento = payload.fechaVencimiento
+        if has_dias_vida_util:
+            insumo.diasVidaUtil = payload.diasVidaUtil
+        if has_observaciones:
+            insumo.observaciones = payload.observaciones.strip() if payload.observaciones else None
         if payload.unidadMedida:
             insumo.unidadMedida = payload.unidadMedida.strip()
     else:
@@ -1667,12 +1706,18 @@ def _producto_precio_imagen(db: Session, producto_id: int | None, sucursal_id: i
     actual (petalops.producto_sucursal). No depende del ORM porque el modelo
     Producto declara una FK a categoria desactualizada frente a la BD real."""
     if not producto_id:
-        return {"codigoProducto": None, "precioVenta": None, "imagenUrl": None}
+        return {"codigoProducto": None, "categoria": None, "coleccion": None, "precioVenta": None, "imagenUrl": None}
+    coleccion_select = "p.coleccion" if _has_column(db, "producto", "coleccion") else "NULL::VARCHAR"
     row = db.execute(
         text(
-            """
-            SELECT p.codigo_producto AS codigo_producto, ps.precio AS precio, ps.imagen_url AS imagen_url
+            f"""
+            SELECT p.codigo_producto AS codigo_producto,
+                   c.nombre AS categoria,
+                   {coleccion_select} AS coleccion,
+                   ps.precio AS precio,
+                   ps.imagen_url AS imagen_url
             FROM petalops.producto p
+            LEFT JOIN petalops.categoria c ON c.id_categoria = p.categoria_id
             LEFT JOIN petalops.producto_sucursal ps
               ON ps.producto_id = p.id_producto
              AND ps.sucursal_id = :sucursal_id
@@ -1682,9 +1727,11 @@ def _producto_precio_imagen(db: Session, producto_id: int | None, sucursal_id: i
         {"producto_id": int(producto_id), "sucursal_id": int(sucursal_id or 0)},
     ).mappings().first()
     if not row:
-        return {"codigoProducto": None, "precioVenta": None, "imagenUrl": None}
+        return {"codigoProducto": None, "categoria": None, "coleccion": None, "precioVenta": None, "imagenUrl": None}
     return {
         "codigoProducto": row["codigo_producto"],
+        "categoria": row["categoria"],
+        "coleccion": row["coleccion"],
         "precioVenta": Decimal(row["precio"]) if row["precio"] is not None else None,
         "imagenUrl": row["imagen_url"],
     }
@@ -1727,10 +1774,19 @@ def _ventas_receta(db: Session, empresa_id: int, producto_id: int | None) -> dic
     }
 
 
-def _obtener_o_crear_categoria_arreglos(db: Session, empresa_id: int) -> int:
+def _obtener_o_crear_categoria_producto(db: Session, empresa_id: int, nombre: str | None) -> int:
+    nombre_categoria = str(nombre or "Arreglos").strip() or "Arreglos"
     row = db.execute(
-        text("SELECT id_categoria FROM petalops.categoria WHERE empresa_id = :empresa_id AND nombre ILIKE 'Arreglos' LIMIT 1"),
-        {"empresa_id": int(empresa_id)},
+        text(
+            """
+            SELECT id_categoria
+            FROM petalops.categoria
+            WHERE empresa_id = :empresa_id
+              AND lower(trim(nombre)) = lower(:nombre)
+            LIMIT 1
+            """
+        ),
+        {"empresa_id": int(empresa_id), "nombre": nombre_categoria},
     ).first()
     if row:
         return int(row[0])
@@ -1738,11 +1794,11 @@ def _obtener_o_crear_categoria_arreglos(db: Session, empresa_id: int) -> int:
         text(
             """
             INSERT INTO petalops.categoria (empresa_id, nombre, created_at, activo)
-            VALUES (:empresa_id, 'Arreglos', now(), true)
+            VALUES (:empresa_id, :nombre, now(), true)
             RETURNING id_categoria
             """
         ),
-        {"empresa_id": int(empresa_id)},
+        {"empresa_id": int(empresa_id), "nombre": nombre_categoria},
     ).first()
     return int(row[0])
 
@@ -1756,21 +1812,45 @@ def _crear_producto_para_receta(
     descripcion: str | None,
     precio: Decimal,
     imagen_url: str | None,
+    codigo_producto: str | None = None,
+    categoria: str | None = None,
+    coleccion: str | None = None,
+    activo: bool = True,
 ) -> int:
-    categoria_id = _obtener_o_crear_categoria_arreglos(db, empresa_id)
+    categoria_id = _obtener_o_crear_categoria_producto(db, empresa_id, categoria)
     now = colombia_now_naive()
     base_slug = re.sub(r"[^A-Z0-9]+", "", nombre.strip().upper())[:12] or "ARR"
-    codigo_producto = f"ARR-{base_slug}-{secrets.token_hex(3).upper()}"
-    row = db.execute(
+    codigo_producto = str(codigo_producto or "").strip() or f"ARR-{base_slug}-{secrets.token_hex(3).upper()}"
+    codigo_duplicado = db.execute(
         text(
             """
+            SELECT 1
+            FROM petalops.producto
+            WHERE empresa_id = :empresa_id
+              AND lower(codigo_producto) = lower(:codigo_producto)
+            LIMIT 1
+            """
+        ),
+        {"empresa_id": int(empresa_id), "codigo_producto": codigo_producto},
+    ).first()
+    if codigo_duplicado:
+        raise HTTPException(status_code=409, detail="Ya existe un producto con ese codigo en esta empresa")
+
+    has_coleccion = _has_column(db, "producto", "coleccion")
+    if coleccion and not has_coleccion:
+        raise HTTPException(status_code=503, detail="La base de datos requiere la migracion de coleccion de productos")
+    coleccion_column = ", coleccion" if has_coleccion else ""
+    coleccion_value = ", :coleccion" if has_coleccion else ""
+    row = db.execute(
+        text(
+            f"""
             INSERT INTO petalops.producto (
               empresa_id, categoria_id, codigo_producto, nombre_producto, descripcion,
-              porcentaje_iva, iva_incluido, activo, created_at, updated_at
+              porcentaje_iva, iva_incluido, activo, created_at, updated_at{coleccion_column}
             )
             VALUES (
               :empresa_id, :categoria_id, :codigo_producto, :nombre, :descripcion,
-              0, true, true, :now, :now
+              0, true, :activo, :now, :now{coleccion_value}
             )
             RETURNING id_producto
             """
@@ -1781,6 +1861,8 @@ def _crear_producto_para_receta(
             "codigo_producto": codigo_producto,
             "nombre": nombre.strip(),
             "descripcion": (descripcion.strip() if descripcion else None),
+            "coleccion": (str(coleccion).strip() if coleccion else "General"),
+            "activo": bool(activo),
             "now": now,
         },
     ).first()
@@ -1793,7 +1875,7 @@ def _crear_producto_para_receta(
                 INSERT INTO petalops.producto_sucursal (
                   producto_id, sucursal_id, precio, imagen_url, activo, created_at, updated_at
                 )
-                VALUES (:producto_id, :sucursal_id, :precio, :imagen_url, true, :now, :now)
+                VALUES (:producto_id, :sucursal_id, :precio, :imagen_url, :activo, :now, :now)
                 """
             ),
             {
@@ -1801,6 +1883,7 @@ def _crear_producto_para_receta(
                 "sucursal_id": int(sucursal_id),
                 "precio": precio,
                 "imagen_url": imagen_url,
+                "activo": bool(activo),
                 "now": now,
             },
         )
@@ -1889,6 +1972,10 @@ def crear_receta(
             descripcion=payload.descripcion,
             precio=payload.precioVenta,
             imagen_url=payload.imagenUrl,
+            codigo_producto=payload.codigoProducto,
+            categoria=payload.categoria,
+            coleccion=payload.coleccion,
+            activo=payload.activo,
         )
         producto_nuevo_sucursal_id = auth.sucursalID
 
@@ -1900,7 +1987,7 @@ def crear_receta(
             descripcion=(payload.descripcion.strip() if payload.descripcion else None),
             productoID=producto_id,
             capacidadManual=payload.capacidadManual,
-            activo=True,
+            activo=bool(payload.activo),
             createdAt=now,
             updatedAt=now,
         )
@@ -2001,6 +2088,10 @@ def actualizar_receta(
             descripcion=payload.descripcion,
             precio=payload.precioVenta,
             imagen_url=payload.imagenUrl,
+            codigo_producto=payload.codigoProducto,
+            categoria=payload.categoria,
+            coleccion=payload.coleccion,
+            activo=payload.activo,
         )
         producto_nuevo_sucursal_id = auth.sucursalID
 

@@ -48,6 +48,8 @@ class InventarioCreateRequest(BaseModel):
     tamano: str | None = Field(default=None, max_length=50)
     unidadMedida: str | None = Field(default=None, max_length=50)
     fechaVencimiento: date | None = Field(default=None)
+    diasVidaUtil: int | None = Field(default=None, ge=0, le=3650)
+    observaciones: str | None = Field(default=None, max_length=1000)
     marca: str | None = Field(default=None, max_length=100)
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     vendibleUnidad: bool = False
@@ -60,6 +62,7 @@ class InventarioCreateRequest(BaseModel):
 
 
 class InventarioUpdateRequest(BaseModel):
+    codigo: str | None = Field(default=None, min_length=1, max_length=80)
     nombre: str = Field(min_length=2, max_length=180)
     categoria: str = Field(min_length=2, max_length=80)
     subcategoria: str | None = Field(default=None, max_length=80)
@@ -68,6 +71,8 @@ class InventarioUpdateRequest(BaseModel):
     tamano: str | None = Field(default=None, max_length=50)
     unidadMedida: str | None = Field(default=None, max_length=50)
     fechaVencimiento: date | None = Field(default=None)
+    diasVidaUtil: int | None = Field(default=None, ge=0, le=3650)
+    observaciones: str | None = Field(default=None, max_length=1000)
     marca: str | None = Field(default=None, max_length=100)
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     vendibleUnidad: bool = False
@@ -75,6 +80,7 @@ class InventarioUpdateRequest(BaseModel):
     codigoProveedor: str | None = Field(default=None, max_length=80)
     stockMinimo: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     valorUnitario: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    activo: bool = True
 
 
 class InventarioStockAdjustRequest(BaseModel):
@@ -131,6 +137,8 @@ class InventarioItem(BaseModel):
     tamano: str | None = None
     unidadMedida: str | None = None
     fechaVencimiento: date | None = None
+    diasVidaUtil: int | None = None
+    observaciones: str | None = None
     marca: str | None = None
     precioVenta: Decimal | None = None
     vendibleUnidad: bool = False
@@ -238,6 +246,10 @@ class RecetaCreateRequest(BaseModel):
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     imagenUrl: str | None = Field(default=None)
     capacidadManual: Decimal | None = Field(default=None, ge=Decimal("0"))
+    codigoProducto: str | None = Field(default=None, max_length=50)
+    categoria: str | None = Field(default="Arreglos", max_length=100)
+    coleccion: str | None = Field(default="General", max_length=100)
+    activo: bool = True
 
 
 class RecetaUpdateRequest(BaseModel):
@@ -247,6 +259,9 @@ class RecetaUpdateRequest(BaseModel):
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
     imagenUrl: str | None = Field(default=None)
     capacidadManual: Decimal | None = Field(default=None, ge=Decimal("0"))
+    codigoProducto: str | None = Field(default=None, max_length=50)
+    categoria: str | None = Field(default="Arreglos", max_length=100)
+    coleccion: str | None = Field(default="General", max_length=100)
     activo: bool = True
 
 
@@ -266,6 +281,8 @@ class RecetaItem(BaseModel):
     descripcion: str | None = None
     productoID: int | None = None
     codigoProducto: str | None = None
+    categoria: str | None = None
+    coleccion: str | None = None
     precioVenta: Decimal | None = None
     imagenUrl: str | None = None
     capacidadManual: Decimal | None = None
@@ -282,6 +299,8 @@ class RecetaListItem(BaseModel):
     descripcion: str | None = None
     productoID: int | None = None
     codigoProducto: str | None = None
+    categoria: str | None = None
+    coleccion: str | None = None
     precioVenta: Decimal | None = None
     imagenUrl: str | None = None
     capacidadManual: Decimal | None = None
