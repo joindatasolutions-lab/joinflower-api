@@ -105,8 +105,10 @@ def test_stale_edit_cannot_overwrite_new_version():
 
 
 @pytest.mark.parametrize("model", [ActualizarDetallePedidoRequest, AgregarDetallePedidoRequest])
-def test_edit_contract_requires_positive_version(model):
-    for value in ({}, {"version": 0}):
+def test_edit_contract_accepts_legacy_payload_and_validates_supplied_version(model):
+    assert model(productoID=1).version is None
+    assert model(productoID=1, version=2).version == 2
+    for value in ({"version": 0}, {"version": -1}):
         with pytest.raises(ValidationError):
             model(productoID=1, **value)
 
@@ -152,3 +154,13 @@ def test_checkout_persists_result_with_audit_or_rolls_back(db, monkeypatch, fail
         first = run()
         assert run() == first
         assert calls == ["create"]
+
+
+def test_legacy_edit_advances_version_and_explicit_stale_edit_still_conflicts():
+    pedido = SimpleNamespace(version=7)
+    check_and_increment_version(pedido, None)
+    assert pedido.version == 8
+    with pytest.raises(HTTPException) as error:
+        check_and_increment_version(pedido, 7)
+    assert error.value.status_code == 409
+    assert pedido.version == 8

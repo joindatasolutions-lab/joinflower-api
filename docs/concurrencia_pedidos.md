@@ -2,7 +2,7 @@
 
 ## Despliegue y cliente
 
-Ejecutar `sql/create_pedido_operacion.sql` antes de desplegar. No se ejecuta DDL durante solicitudes. Coordinar el cambio del cliente: la creacion ahora exige `Idempotency-Key` (1 a 128 caracteres); editar/agregar detalle exige `version` positiva en el cuerpo; eliminar detalle exige `?version=N`. GET de listado y detalle devuelven `version` y las ediciones devuelven la nueva version.
+Ejecutar `sql/create_pedido_operacion.sql` antes de desplegar. No se ejecuta DDL durante solicitudes. Coordinar el cambio del cliente: la creacion ahora exige `Idempotency-Key` (1 a 128 caracteres); editar/agregar detalle acepta `version` positiva en el cuerpo; eliminar detalle acepta `?version=N`. Para compatibilidad con el frontend anterior, se permite omitir version. GET de listado y detalle devuelven `version` y las ediciones devuelven la nueva version.
 
 ## Creacion
 
@@ -12,7 +12,7 @@ Usar UUID generado una sola vez por accion, persistirlo antes de enviar y conser
 
 ## Edicion
 
-El backend bloquea el pedido con SELECT FOR UPDATE antes de comprobar version. Una version desactualizada produce 409 `PEDIDO_VERSION_CONFLICT` con `versionActual`; no aplica cambios. Las ediciones y los cambios de estado avanzan la version. Ante conflicto, volver a leer y reconciliar los cambios del usuario; no sustituir la version automaticamente.
+El backend bloquea el pedido con SELECT FOR UPDATE antes de comprobar version. Sin version se conserva el bloqueo de fila y se incrementa la version, pero no se detectan ediciones basadas en datos obsoletos. Los clientes deben enviar version para obtener esa proteccion. Una version desactualizada produce 409 `PEDIDO_VERSION_CONFLICT` con `versionActual`; no aplica cambios. Las ediciones y los cambios de estado avanzan la version. Ante conflicto, volver a leer y reconciliar los cambios del usuario; no sustituir la version automaticamente.
 
 ## Duplicaciones realizadas en varios pasos
 

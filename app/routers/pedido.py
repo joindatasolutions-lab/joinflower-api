@@ -3216,7 +3216,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 
 class ActualizarDetallePedidoRequest(BaseModel):
-    version: int = Field(..., ge=1)
+    version: int | None = Field(None, ge=1)
     pedidoID: int | None = None
     pedidoId: int | None = None
     detalleID: int | None = None
@@ -3273,7 +3273,7 @@ class ActualizarDetallePedidoRequest(BaseModel):
 
 
 class AgregarDetallePedidoRequest(BaseModel):
-    version: int = Field(..., ge=1)
+    version: int | None = Field(None, ge=1)
     productoID: int
     cantidad: float | None = 1
     productoObservaciones: str | None = None
@@ -4128,7 +4128,7 @@ def agregar_detalle_pedido(
 def eliminar_detalle_pedido(
     pedido_id: int,
     detalle_id: int,
-    version: int = Query(..., ge=1),
+    version: int | None = Query(None, ge=1),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):

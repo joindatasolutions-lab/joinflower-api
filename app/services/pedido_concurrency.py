@@ -41,10 +41,10 @@ def complete_creation(db, reservation, result):
     """), {**reservation, "response": json.dumps(result, ensure_ascii=True)})
 
 
-def check_and_increment_version(pedido, expected: int):
+def check_and_increment_version(pedido, expected: int | None):
     """Caller must hold the order's row lock until commit/rollback."""
     current = int(pedido.version or 1)
-    if expected != current:
+    if expected is not None and expected != current:
         raise HTTPException(409, detail={"code": "PEDIDO_VERSION_CONFLICT", "versionActual": current,
                                          "message": "El pedido cambio. Recarga antes de guardar."})
     pedido.version = current + 1
