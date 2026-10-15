@@ -1,5 +1,5 @@
 from app.core.db_types import ColombiaDateTime as DateTime
-from sqlalchemy import BigInteger, Boolean, Column, Date, ForeignKey, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, Date, ForeignKey, Integer, Numeric, String, Text
 
 from app.database import Base
 
@@ -19,6 +19,8 @@ class Insumo(Base):
     descripcion = Column("descripcion", Text, nullable=True)
     tamano = Column("tamano", String(50), nullable=True)
     fechaVencimiento = Column("fecha_vencimiento", Date, nullable=True)
+    diasVidaUtil = Column("dias_vida_util", Integer, nullable=True)
+    observaciones = Column("observaciones", Text, nullable=True)
     marca = Column("marca", String(100), nullable=True)
     precioVenta = Column("precio_venta", Numeric(12, 2), nullable=True)
     vendibleUnidad = Column("vendible_unidad", Boolean, nullable=False, default=False)

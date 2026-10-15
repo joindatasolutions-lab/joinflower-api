@@ -15,6 +15,7 @@ class Producto(Base):
     codigoCatalogo = Column("codigo_catalogo", String(50))
     nombreProducto = Column("nombre_producto", String(200))
     descripcion = Column("descripcion", Text)
+    coleccion = Column("coleccion", String(100))
     imageUrl = Column("image_url", Text)
     porcentajeIva = Column("porcentaje_iva", Numeric(5,2))
     ivaIncluido = Column("iva_incluido", Boolean)

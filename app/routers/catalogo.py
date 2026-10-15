@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models.producto import Producto
 from app.core.security import assert_same_empresa, get_current_auth_context
 from app.services.cache import cache_ttl, get_cache, set_cache
+from app.services.caja_service import column_exists
 
 router = APIRouter()
 catalogo_logger = get_logger("catalogo")
@@ -50,6 +51,9 @@ def obtener_catalogo(
             if cached is not None:
                 return cached
 
+        has_coleccion = column_exists(db, "producto", "coleccion")
+        coleccion_select = "p.coleccion" if has_coleccion else "NULL::VARCHAR"
+
         params = {
             "empresa_id": int(empresa_id),
             "sucursal_id": target_sucursal_id,
@@ -57,12 +61,14 @@ def obtener_catalogo(
         term_filter = ""
         if term:
             params["term"] = f"%{term}%"
-            term_filter = """
+            coleccion_filter = "OR COALESCE(p.coleccion, '') ILIKE :term" if has_coleccion else ""
+            term_filter = f"""
                 AND (
                     p.nombre_producto ILIKE :term
                     OR COALESCE(p.descripcion, '') ILIKE :term
                     OR COALESCE(p.codigo_producto, '') ILIKE :term
                     OR COALESCE(p.codigo_catalogo, '') ILIKE :term
+                    {coleccion_filter}
                 )
             """
 
@@ -75,11 +81,14 @@ def obtener_catalogo(
                     p.codigo_catalogo AS codigo_catalogo,
                     p.nombre_producto AS nombre_producto,
                     p.descripcion AS descripcion,
+                    c.nombre AS nombre_categoria,
+                    {coleccion_select} AS coleccion,
                     ps.precio AS precio,
                     ps.imagen_url AS imagen_url,
                     ps.es_destacado AS es_destacado,
                     ps.orden_catalogo AS orden_catalogo
                 FROM petalops.producto p
+                LEFT JOIN petalops.categoria c ON c.id_categoria = p.categoria_id
                 JOIN petalops.producto_sucursal ps
                   ON ps.producto_id = p.id_producto
                  AND ps.sucursal_id = :sucursal_id
@@ -106,7 +115,8 @@ def obtener_catalogo(
                     "imagenUrl": row["imagen_url"],
                     "esDestacado": bool(row["es_destacado"]) if row["es_destacado"] is not None else False,
                     "ordenCatalogo": row["orden_catalogo"],
-                    "nombreCategoria": None,
+                    "nombreCategoria": row["nombre_categoria"],
+                    "coleccion": row["coleccion"],
                 }
             )
 
