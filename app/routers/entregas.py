@@ -41,7 +41,7 @@ def _obtener_mensaje_tarjeta(
 
     entrega = (
         db.query(Entrega)
-        .filter(Entrega.pedidoID == pedido.idPedido)
+        .filter(Entrega.pedidoID == pedido.idPedido, Entrega.empresaID == pedido.empresaID)
         .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
         .first()
     )

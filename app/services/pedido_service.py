@@ -1,3 +1,5 @@
+from app.core.tenant_scope import assert_sucursal_empresa
+
 from datetime import datetime
 from decimal import Decimal
 
@@ -77,8 +79,6 @@ def generar_numeracion_pedido(db: Session, empresa_id: int, sucursal_id: int) ->
         .filter(Sucursal.idSucursal == sucursal_id, Sucursal.empresaID == empresa_id)
         .first()
     )
-    if not sucursal:
-        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == sucursal_id).first()
     if not sucursal:
         raise HTTPException(status_code=400, detail="Sucursal no existe para la empresa indicada")
 
@@ -325,8 +325,9 @@ def _crear_pedido_checkout_compuesto(
     return pedido
 
 
-def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
+def checkout_pedido(db: Session, payload: PedidoCheckoutRequest, *, commit: bool = True) -> dict:
     """Registra un pedido completo en transacción y retorna pedidoID, total y estado."""
+    assert_sucursal_empresa(db, int(payload.empresaID), payload.sucursalID)
     if not payload.productos:
         raise HTTPException(status_code=400, detail="productos no puede estar vacío")
 
@@ -433,7 +434,10 @@ def checkout_pedido(db: Session, payload: PedidoCheckoutRequest) -> dict:
             entrega_payload=payload.entrega,
         )
 
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         total_general = Decimal(str(pedido.totalNeto or 0)).quantize(Decimal("0.01"))
 
         return {

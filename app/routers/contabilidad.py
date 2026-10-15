@@ -1,3 +1,4 @@
+from app.core.tenant_scope import assert_sucursal_empresa
 from datetime import date, timedelta
 from decimal import Decimal
 from datetime import datetime
@@ -524,6 +525,7 @@ def obtener_resumen_floristas_contabilidad(
     if fecha_desde > fecha_hasta:
         raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     rows = db.execute(
         text(_florist_rows_sql()),
@@ -554,6 +556,7 @@ def obtener_pedidos_domiciliario_contabilidad(
     if fecha_desde > fecha_hasta:
         raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     info_row = db.execute(
         text(_domiciliario_info_sql()),
@@ -606,6 +609,7 @@ def listar_cierres_caja(
     if fecha_desde > fecha_hasta:
         raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     rows = db.execute(
         text(_caja_totales_sql(db, single_day=False)),
@@ -630,6 +634,7 @@ def obtener_caja_dia(
 ):
     fecha = _parse_query_date(fecha_raw)
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     item = _load_caja_dia(
         db,
         empresa_id=int(empresa_id),
@@ -656,6 +661,7 @@ def obtener_efectivo_caja_dia(
 ):
     fecha = _parse_query_date(fecha_raw)
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     item = _load_caja_dia(
         db,
         empresa_id=int(empresa_id),
@@ -690,6 +696,7 @@ def guardar_cierre_caja(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(payload.empresaID))
+    assert_sucursal_empresa(db, payload.empresaID, payload.sucursalID)
     usuario_id = _resolve_usuario_id(
         db,
         empresa_id=int(payload.empresaID),

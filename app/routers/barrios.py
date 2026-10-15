@@ -1,3 +1,4 @@
+from app.core.tenant_scope import assert_sucursal_empresa
 from app.core.timezone import colombia_now_naive
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,6 +44,7 @@ def list_barrios(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = int(auth.empresaID)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     barrios = (
         db.query(Barrio)
@@ -76,6 +78,7 @@ def create_barrio(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = int(auth.empresaID)
+    assert_sucursal_empresa(db, empresa_id, payload.sucursalID)
 
     existing = (
         db.query(Barrio)
@@ -122,6 +125,7 @@ def update_barrio(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = int(auth.empresaID)
+    assert_sucursal_empresa(db, empresa_id, payload.sucursalID)
 
     barrio = (
         db.query(Barrio)
@@ -174,6 +178,7 @@ def delete_barrio(
     auth=Depends(get_current_auth_context),
 ):
     empresa_id = int(auth.empresaID)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     barrio = (
         db.query(Barrio)
@@ -206,6 +211,7 @@ def search_barrios(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     texto = q.strip()
     modo_base = len(texto) < 2
 

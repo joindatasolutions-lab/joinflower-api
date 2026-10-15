@@ -410,14 +410,14 @@ def haversine_distance_km(lat1: float | None, lon1: float | None, lat2: float | 
 def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido | None = None) -> Entrega:
     entrega = (
         db.query(Entrega)
-        .filter(Entrega.produccionID == produccion.idProduccion)
+        .filter(Entrega.produccionID == produccion.idProduccion, Entrega.empresaID == produccion.empresaID)
         .first()
     )
 
     if not entrega:
         entrega = (
             db.query(Entrega)
-            .filter(Entrega.pedidoID == produccion.pedidoID)
+            .filter(Entrega.pedidoID == produccion.pedidoID, Entrega.empresaID == produccion.empresaID)
             .order_by(Entrega.idEntrega.desc())
             .first()
         )
@@ -456,10 +456,10 @@ def ensure_entrega_desde_produccion(db, produccion: Produccion, pedido: Pedido |
     return entrega
 
 
-def is_produccion_bloqueada_por_entrega_en_ruta(db, produccion_id: int) -> bool:
+def is_produccion_bloqueada_por_entrega_en_ruta(db, produccion_id: int, empresa_id: int) -> bool:
     row = (
         db.query(Entrega)
-        .filter(Entrega.produccionID == produccion_id)
+        .filter(Entrega.produccionID == produccion_id, Entrega.empresaID == empresa_id)
         .first()
     )
     if not row:

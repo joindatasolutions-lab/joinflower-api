@@ -11,6 +11,9 @@ class _ScalarQuery:
     def filter(self, *args, **kwargs):
         return self
 
+    def first(self):
+        return (3,)  # Existing branch in the fixture company.
+
     def scalar(self):
         return self.value
 

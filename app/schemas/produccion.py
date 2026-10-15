@@ -94,6 +94,8 @@ class ProduccionMetricasResumen(BaseModel):
 class ProduccionListResponse(BaseModel):
     items: List[ProduccionItem]
     total: int
+    page: int = 1
+    pageSize: int = 50
     autoAsignacion: Optional[AutoAsignacionResumen] = None
     metricas: Optional[ProduccionMetricasResumen] = None
 

@@ -398,6 +398,15 @@ def test_obtener_resumen_floristas_contabilidad_returns_florist_rows(monkeypatch
 
 
 class _DomiciliarioPedidosDb:
+    def query(self, *args):
+        return self
+
+    def filter(self, *args):
+        return self
+
+    def first(self):
+        return (2,)  # Existing branch in company 1.
+
     def __init__(self):
         self.params = []
 
@@ -515,6 +524,19 @@ class _CajaRefreshDb:
         return _FakeResult(None)
 
 
+class _CajaMixedPaymentsDb(_CajaRefreshDb):
+    def __init__(self):
+        super().__init__()
+        self.legacy_cash_sum_sql = None
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "SUM(pa.monto)" in sql:
+            self.legacy_cash_sum_sql = sql
+            return _FakeResult((Decimal("2000"),))
+        return super().execute(statement, params)
+
+
 def test_refresh_caja_por_pedido_accumulates_cash_total_for_day():
     db = _CajaRefreshDb()
 
@@ -526,3 +548,19 @@ def test_refresh_caja_por_pedido_accumulates_cash_total_for_day():
     assert db.upsert_params["nueva_base"] == Decimal("3000")
     assert db.upsert_params["usuario_id"] == 9
     assert "'CREADO'" in db.cash_sum_sql
+
+
+def test_cash_query_matches_custom_cash_method_names():
+    db = _CajaMixedPaymentsDb()
+
+    total = caja_service.load_efectivo_ventas(
+        db,
+        empresa_id=1,
+        sucursal_id=2,
+        fecha_operacion=date(2026, 6, 30),
+    )
+
+    assert "ILIKE '%efectivo%'" in db.cash_sum_sql
+    assert "ILIKE '%efectivo%'" in db.legacy_cash_sum_sql
+    assert "NOT EXISTS" in db.legacy_cash_sum_sql
+    assert total == Decimal("5000")

@@ -386,10 +386,10 @@ def _sync_user_roles(db: Session, usuario: Usuario, role_ids: list[int]) -> None
             SET activo = FALSE,
                 principal = FALSE,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE usuario_id = :usuario_id
+            WHERE usuario_id = :usuario_id AND empresa_id = :empresa_id
             """
         ),
-        {"usuario_id": int(usuario.idusuario)},
+        {"usuario_id": int(usuario.idusuario), "empresa_id": int(usuario.empresaID)},
     )
     for index, role_id in enumerate(role_ids):
         db.execute(
@@ -779,7 +779,7 @@ def _get_target_user_for_admin(db: Session, auth, user_id: int) -> tuple[Usuario
     if not is_super_admin_context(auth) and int(usuario.empresaID or 0) != int(auth.empresaID):
         raise HTTPException(status_code=403, detail="No puedes modificar usuarios de otra empresa")
 
-    target_role = db.query(Rol).filter(Rol.idRol == usuario.rolID).first()
+    target_role = db.query(Rol).filter(Rol.idRol == usuario.rolID, Rol.empresaID == usuario.empresaID).first()
     if target_role:
         target_role_name = normalize_role_name(target_role.nombreRol)
         if not is_super_admin_context(auth) and target_role_name in STRUCTURAL_ROLES:
@@ -872,12 +872,12 @@ def _sync_employee_profile_for_operational_user(
             """
             SELECT id_empleado
             FROM petalops.empleado
-            WHERE usuario_id = :usuario_id
+            WHERE usuario_id = :usuario_id AND empresa_id = :empresa_id
             ORDER BY id_empleado ASC
             LIMIT 1
             """
         ),
-        {"usuario_id": int(usuario.idusuario)},
+        {"usuario_id": int(usuario.idusuario), "empresa_id": int(usuario.empresaID)},
     ).mappings().first()
 
     empleado_id: int | None = int(empleado["id_empleado"]) if empleado else None
@@ -1426,7 +1426,7 @@ def crear_usuario(
         if int(active_users or 0) >= max_users:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Límite de usuarios alcanzado para el plan ({max_users})")
 
-        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
+        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID, Sucursal.empresaID == target_empresa_id).first()
         if not sucursal:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
 
@@ -1531,7 +1531,7 @@ def listar_usuarios(
 ):
     query = (
         db.query(Usuario, Rol)
-        .join(Rol, Rol.idRol == Usuario.rolID)
+        .join(Rol, (Rol.idRol == Usuario.rolID) & (Rol.empresaID == Usuario.empresaID))
     )
 
     if not is_super_admin_context(auth):
@@ -1726,7 +1726,7 @@ def actualizar_usuario(
             auth,
         )
 
-        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID).first()
+        sucursal = db.query(Sucursal).filter(Sucursal.idSucursal == payload.sucursalID, Sucursal.empresaID == target_empresa_id).first()
         if not sucursal:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sucursal invalida")
 

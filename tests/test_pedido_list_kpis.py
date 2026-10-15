@@ -1,55 +1,55 @@
+from datetime import date, datetime
 from decimal import Decimal
 
-from app.routers.pedido import _build_pedido_list_kpis
+import pytest
+from sqlalchemy import literal
+from app.models.pedido import Pedido
+from app.models.estadopedido import EstadoPedido
+from app.routers import pedido as router
+from test_sql_order_pagination import db
 
 
-class FakeQuery:
-    def __init__(self, rows):
-        self.rows = rows
+def test_statistics_use_colombia_day_and_all_filtered_orders(db, monkeypatch):
+    monkeypatch.setattr(router, "_factura_impresa_condition", lambda: literal(False))
+    db.add_all([EstadoPedido(idEstadoPedido=2, nombreEstado=" PENDIENTE "), EstadoPedido(idEstadoPedido=3, nombreEstado="CANCELADO")])
+    orders = db.query(Pedido).filter(Pedido.empresaID == 1).order_by(Pedido.idPedido).all()
+    orders[0].fechaPedido = datetime(2026, 9, 1, 23, 59, 59)
+    orders[1].fechaPedido = datetime(2026, 9, 2, 0)
+    orders[1].totalIva = Decimal("19")
+    orders[2].fechaPedido = datetime(2026, 9, 2, 23, 59, 59)
+    orders[2].estadoPedidoID = 2
+    orders[3].fechaPedido = datetime(2026, 9, 3, 0)
+    orders[4].fechaPedido = datetime(2026, 9, 2, 12)
+    orders[4].estadoPedidoID = 3
+    db.flush()
+    query = db.query(Pedido).outerjoin(EstadoPedido).filter(Pedido.empresaID == 1)
+    total, kpis, _ = router._pedido_list_statistics(query, fecha_hoy=date(2026, 9, 2))
+    assert total == 5
+    assert kpis.ventaHoy == 119
+    assert kpis.pedidosHoy == 2
+    assert (kpis.aprobados, kpis.pendientes, kpis.cancelados, kpis.sinImprimir) == (3, 1, 1, 3)
+    total, empty, _ = router._pedido_list_statistics(query.filter(Pedido.sucursalID == 999), fecha_hoy=date(2026, 9, 2))
+    assert total == 0
+    assert all(value == 0 for value in empty.model_dump().values())
 
-    def filter(self, *_args, **_kwargs):
-        return self
 
-    def all(self):
-        return self.rows
-
-
-class FakeDb:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def query(self, *_args, **_kwargs):
-        return FakeQuery(self.rows)
-
-
-def test_pedido_list_kpis_are_calculated_from_all_filtered_candidates():
-    pedido_rows = [
-        (pedido_id, Decimal("100.00"), Decimal("0.00"))
-        for pedido_id in range(1, 52)
-    ]
-    estado_map = {pedido_id: "APROBADO" for pedido_id in range(1, 46)}
-    estado_map.update(
-        {
-            46: "CREADO",
-            47: "PENDIENTE",
-            48: "CANCELADO",
-            49: "RECHAZADO",
-            50: "CANCELADO",
-            51: "RECHAZADO",
-        }
+@pytest.mark.parametrize("total, allowed", [(100, True), (99, False), (0, False)])
+def test_mixed_payment_approval_uses_supplied_total_without_queries(total, allowed):
+    class NoQueries:
+        def query(self, *args):
+            raise AssertionError("Unexpected per-order query")
+    result = router._approval_gate_summary(
+        NoQueries(), pedido_id=1, empresa_id=1,
+        rules={"require_payment_before_approval": True, "require_sales_channel_before_approval": False},
+        pago_resumen={"metodosPago": ["Efectivo", "Tarjeta"], "canalFlora": None,
+                      "detallePago": [{"metodo": "Efectivo", "monto": 40}, {"metodo": "Tarjeta", "monto": 60}]},
+        total_pedido=Decimal(total),
     )
+    assert result["puedeAprobar"] is allowed
 
-    kpis = _build_pedido_list_kpis(
-        db=FakeDb(pedido_rows),
-        empresa_id=3,
-        pedido_ids=list(range(1, 52)),
-        estado_map=estado_map,
-        facturas_pendientes_impresion=7,
-    )
 
-    assert kpis.pedidosHoy == 47
-    assert kpis.cancelados == 4
-    assert kpis.aprobados == 45
-    assert kpis.pendientes == 2
-    assert kpis.sinImprimir == 7
-    assert kpis.ventaHoy == 4500.0
+def test_pedido_router_has_no_schema_creation():
+    import inspect
+    source = inspect.getsource(router)
+    assert "CREATE TABLE" not in source
+    assert "CREATE INDEX" not in source

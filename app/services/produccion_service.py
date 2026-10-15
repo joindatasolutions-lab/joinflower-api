@@ -451,8 +451,8 @@ def seleccionar_florista_auto(
     return ranking[0][2] if ranking else None
 
 
-def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int) -> int:
-    rows = db.query(PedidoDetalle.cantidad).filter(PedidoDetalle.pedidoID == pedido_id).all()
+def calcular_tiempo_estimado_pedido(db: Session, pedido_id: int, empresa_id: int) -> int:
+    rows = db.query(PedidoDetalle.cantidad).filter(PedidoDetalle.pedidoID == pedido_id, PedidoDetalle.empresaID == empresa_id).all()
 
     if not rows:
         return 30
@@ -511,17 +511,18 @@ def asegurar_produccion_desde_pedido_aprobado(
     usuario: str = "system",
 ) -> dict[str, Any]:
     estados = _resolve_estado_produccion_ids(db)
-    entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
+    entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido, Entrega.empresaID == pedido.empresaID).first()
     fecha_programada = calcular_fecha_programada(
         fecha_entrega=entrega_fecha_programada(entrega),
         dias_anticipacion=dias_anticipacion,
     )
-    tiempo_estimado = calcular_tiempo_estimado_pedido(db, int(pedido.idPedido))
+    tiempo_estimado = calcular_tiempo_estimado_pedido(db, int(pedido.idPedido), int(pedido.empresaID))
 
     existente = (
         db.query(Produccion)
         .filter(
             Produccion.pedidoID == pedido.idPedido,
+            Produccion.empresaID == pedido.empresaID,
             Produccion.estado != estados["cancelado"],
         )
         .first()
@@ -859,7 +860,7 @@ def asegurar_produccion_desde_pedido_aprobado_por_detalle(
     usuario: str = "system",
 ) -> dict[str, Any]:
     estados = _resolve_estado_produccion_ids(db)
-    entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido).first()
+    entrega = db.query(Entrega).filter(Entrega.pedidoID == pedido.idPedido, Entrega.empresaID == pedido.empresaID).first()
     fecha_programada = calcular_fecha_programada(
         fecha_entrega=entrega_fecha_programada(entrega),
         dias_anticipacion=dias_anticipacion,

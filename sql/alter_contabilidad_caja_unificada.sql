@@ -146,8 +146,8 @@ BEGIN
             LEFT JOIN petalops.estado_pedido ep
               ON ep.id_estado_pedido = p.estado_pedido_id
             WHERE (
-                lower(COALESCE(mpc.codigo, '')) = 'efectivo'
-                OR lower(COALESCE(mpc.nombre, '')) = 'efectivo'
+                                COALESCE(mpc.codigo, '') ILIKE '%efectivo%'
+                                OR COALESCE(mpc.nombre, '') ILIKE '%efectivo%'
             )
               AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CANCELADO', 'RECHAZADO', 'ANULADO')
             GROUP BY pm.empresa_id, p.sucursal_id, CAST(p.fecha_pedido AS DATE)

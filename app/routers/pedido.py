@@ -1,3 +1,7 @@
+from app.services.pedido_concurrency import begin_creation, complete_creation, check_and_increment_version
+from app.core.order_search import order_search_condition
+from app.core.delivery_queries import current_delivery_id
+from app.core.tenant_scope import assert_sucursal_empresa
 from app.core.timezone import COLOMBIA_TZ
 import json
 import os
@@ -6,11 +10,11 @@ import unicodedata
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, aliased, load_only
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy import and_, or_, cast, String, func, text
+from sqlalchemy import and_, or_, cast, String, func, text, case, select, table, column
 from datetime import date, datetime, timedelta
 from io import BytesIO
 import textwrap
@@ -468,48 +472,6 @@ def _dias_anticipacion_produccion() -> int:
     return max(int(os.getenv("PRODUCCION_DIAS_ANTICIPACION", "0")), 0)
 
 
-def _ensure_pedido_auditoria_table(db: Session):
-    db.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS petalops.pedido_auditoria (
-              id_audit BIGSERIAL PRIMARY KEY,
-              empresa_id BIGINT NOT NULL,
-              sucursal_id BIGINT NOT NULL,
-              pedido_id BIGINT NOT NULL,
-              actor_user_id BIGINT,
-              actor_login VARCHAR(120) NOT NULL,
-              accion VARCHAR(60) NOT NULL,
-              estado_origen_id BIGINT,
-              estado_destino_id BIGINT,
-              detalle_json TEXT,
-              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
-    )
-    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_auditoria_empresa_fecha ON petalops.pedido_auditoria (empresa_id, created_at DESC);"))
-    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_auditoria_pedido ON petalops.pedido_auditoria (empresa_id, pedido_id);"))
-
-
-def _ensure_pedido_alerta_voz_table(db: Session):
-    db.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS petalops.pedido_alerta_voz (
-              id_alerta BIGSERIAL PRIMARY KEY,
-              empresa_id BIGINT NOT NULL,
-              sucursal_id BIGINT,
-              pedido_id BIGINT NOT NULL,
-              created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              CONSTRAINT uq_pedido_alerta_voz_empresa_pedido UNIQUE (empresa_id, pedido_id)
-            );
-            """
-        )
-    )
-    db.execute(text("CREATE INDEX IF NOT EXISTS idx_pedido_alerta_voz_empresa_fecha ON petalops.pedido_alerta_voz (empresa_id, created_at DESC);"))
-
-
 def _audit_pedido_action(
     db: Session,
     actor,
@@ -519,7 +481,6 @@ def _audit_pedido_action(
     estado_destino_id: int | None,
     extra: dict | None = None,
 ):
-    _ensure_pedido_auditoria_table(db)
     payload = json.dumps(extra or {}, ensure_ascii=True)
     db.execute(
         text(
@@ -1449,6 +1410,7 @@ def _invalidate_factura_impresa(db: Session, *, pedido_id: int, empresa_id: int)
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -1744,6 +1706,7 @@ def _load_pago_resumen(db: Session, *, pedido_id: int, empresa_id: int) -> dict:
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -1859,6 +1822,7 @@ def _mark_factura_impresa(
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -1924,10 +1888,11 @@ def _load_pago_resumen_batch(db: Session, *, empresa_id: int, pedido_ids: list[i
     pago_rows = db.execute(
         text(
             """
-            SELECT pedido_id, metodo_pago, proveedor, referencia, raw_respuesta, monto
+            SELECT DISTINCT ON (pedido_id) pedido_id, metodo_pago, proveedor, referencia, raw_respuesta, monto
             FROM petalops.pago
             WHERE empresa_id = :empresa_id
               AND pedido_id = ANY(:pedido_ids)
+            ORDER BY pedido_id, id_pago DESC
             """
         ),
         {"empresa_id": int(empresa_id), "pedido_ids": pedido_ids},
@@ -2042,6 +2007,7 @@ def _approval_gate_summary(
     empresa_id: int,
     rules: dict | None = None,
     pago_resumen: dict | None = None,
+    total_pedido: Decimal | None = None,
 ) -> dict:
     # rules/pago_resumen pueden precalcularse (una sola vez / en lote) cuando se
     # evalua esto para muchos pedidos a la vez (ej. listar_pedidos), para evitar
@@ -2073,7 +2039,9 @@ def _approval_gate_summary(
                     total_detalle += monto
             if any(metodo not in metodos_con_monto for metodo in metodos_pago):
                 missing.append("monto por cada método de pago")
-            total_pedido = _round_money_decimal(db.query(Pedido.totalNeto).filter(Pedido.idPedido == int(pedido_id), Pedido.empresaID == int(empresa_id)).scalar() or 0)
+            if total_pedido is None:
+                total_pedido = db.query(Pedido.totalNeto).filter(Pedido.idPedido == int(pedido_id), Pedido.empresaID == int(empresa_id)).scalar() or 0
+            total_pedido = _round_money_decimal(total_pedido)
             if _round_money_decimal(total_detalle) != total_pedido:
                 missing.append("distribución correcta de los montos de pago")
 
@@ -2131,6 +2099,7 @@ def _upsert_pago_flora(
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -2233,6 +2202,7 @@ def _upsert_pago_flora(
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -2443,6 +2413,7 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido, usuario_id: int | 
             FROM petalops.pago
             WHERE pedido_id = :pedido_id
               AND empresa_id = :empresa_id
+            ORDER BY id_pago DESC
             LIMIT 1
             """
         ),
@@ -2536,54 +2507,43 @@ def _sync_existing_pago_total(db: Session, *, pedido: Pedido, usuario_id: int | 
     caja_service.refresh_caja_por_pedido(db, pedido=pedido, usuario_id=usuario_id)
 
 
-def _build_pedido_list_kpis(
-    db: Session,
-    *,
-    empresa_id: int,
-    pedido_ids: list[int],
-    estado_map: dict[int, str],
-    facturas_pendientes_impresion: int,
-) -> PedidoListKpiSummary:
-    if not pedido_ids:
-        return PedidoListKpiSummary(sinImprimir=int(facturas_pendientes_impresion))
+def _factura_impresa_condition():
+    pago = table("pago", column("empresa_id"), column("pedido_id"),
+                 column("id_pago"), column("raw_respuesta"), schema="petalops")
+    latest = (select(func.petalops.factura_impresa(pago.c.raw_respuesta))
+              .where(pago.c.empresa_id == Pedido.empresaID, pago.c.pedido_id == Pedido.idPedido)
+              .order_by(pago.c.id_pago.desc()).limit(1).correlate(Pedido).scalar_subquery())
+    return func.coalesce(latest, False)
 
-    rows = (
-        db.query(Pedido.idPedido, Pedido.totalBruto, Pedido.totalIva)
-        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(pedido_ids))
-        .all()
+
+def _pedido_list_statistics(summary_query, *, fecha_hoy: date | None = None):
+    """Aggregate filtered orders; Hoy uses fechaPedido in Colombia, [start, end)."""
+    inicio = datetime.combine(fecha_hoy or colombia_now_naive().date(), datetime.min.time())
+    hoy = and_(Pedido.fechaPedido >= inicio, Pedido.fechaPedido < inicio + timedelta(days=1))
+    estado_sql = func.upper(func.trim(func.coalesce(EstadoPedido.nombreEstado, "")))
+    approved = estado_sql.in_(["APROBADO", "PAGADO"])
+    pending = estado_sql.in_(["CREADO", "PENDIENTE"])
+    cancelled = estado_sql.in_(["CANCELADO", "RECHAZADO"])
+    invoice_pending = and_(approved, ~_factura_impresa_condition())
+
+    def count_if(condition):
+        return func.coalesce(func.sum(case((condition, 1), else_=0)), 0)
+
+    totals = summary_query.with_entities(
+        func.count(Pedido.idPedido), count_if(invoice_pending),
+        count_if(approved), count_if(pending), count_if(cancelled),
+        func.coalesce(func.sum(case(
+            (and_(hoy, approved), func.coalesce(Pedido.totalBruto, 0) + func.coalesce(Pedido.totalIva, 0)),
+            else_=0,
+        )), 0),
+        count_if(and_(hoy, or_(approved, pending))),
+    ).one()
+    kpis = PedidoListKpiSummary(
+        ventaHoy=float(totals[5]), pedidosHoy=int(totals[6]),
+        aprobados=int(totals[2]), pendientes=int(totals[3]), cancelados=int(totals[4]),
+        sinImprimir=int(totals[1]),
     )
-
-    venta_hoy = Decimal("0.00")
-    pedidos_hoy = 0
-    aprobados = 0
-    pendientes = 0
-    cancelados = 0
-    cancelado_estados = {"CANCELADO", "RECHAZADO"}
-    aprobado_estados = {"APROBADO", "PAGADO"}
-    pendiente_estados = {"CREADO", "PENDIENTE"}
-
-    for pedido_id, total_bruto, total_iva in rows:
-        estado_nombre = str(estado_map.get(int(pedido_id), "SIN_ESTADO") or "SIN_ESTADO").strip().upper()
-        if estado_nombre in cancelado_estados:
-            cancelados += 1
-            continue
-
-        if estado_nombre in aprobado_estados:
-            aprobados += 1
-            pedidos_hoy += 1
-            venta_hoy += Decimal(str(total_bruto or 0)) + Decimal(str(total_iva or 0))
-        elif estado_nombre in pendiente_estados:
-            pendientes += 1
-            pedidos_hoy += 1
-
-    return PedidoListKpiSummary(
-        ventaHoy=float(venta_hoy.quantize(Decimal("0.01"))),
-        pedidosHoy=int(pedidos_hoy),
-        aprobados=int(aprobados),
-        pendientes=int(pendientes),
-        cancelados=int(cancelados),
-        sinImprimir=int(facturas_pendientes_impresion),
-    )
+    return int(totals[0]), kpis, invoice_pending
 
 
 class TipoIdentificacionPedidoItem(BaseModel):
@@ -2612,7 +2572,7 @@ def listar_tipos_identificacion_pedido(
 
     rows = (
         db.query(Cliente.tipoIdent)
-        .filter(func.nullif(func.trim(Cliente.tipoIdent), "").isnot(None))
+        .filter(Cliente.empresaID == int(empresa_id), func.nullif(func.trim(Cliente.tipoIdent), "").isnot(None))
         .distinct()
         .all()
     )
@@ -2654,6 +2614,7 @@ def listar_pedidos(
     sin_imprimir: bool = Query(False, alias="sinImprimir"),
     solo_tienda: bool = Query(False, alias="soloTienda"),
     solo_entregas_hoy: bool = Query(False, alias="soloEntregasHoy"),
+    orden_consecutivo: bool = Query(False, alias="ordenConsecutivo"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100, alias="pageSize"),
     db: Session = Depends(get_db),
@@ -2661,6 +2622,7 @@ def listar_pedidos(
 ):  
 
     assert_same_empresa(auth, empresa_id)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     base = (
         db.query(
             Pedido.idPedido,
@@ -2708,6 +2670,7 @@ def listar_pedidos(
             and_(
                 Entrega.pedidoID == Pedido.idPedido,
                 Entrega.empresaID == Pedido.empresaID,
+                Entrega.idEntrega == current_delivery_id(db),
             ),
         )
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
@@ -2746,151 +2709,32 @@ def listar_pedidos(
         base = _filtrar_pedidos_por_entrega_hoy(base, db)
 
     if has_search:
-        term = f"%{q.strip()}%"
-        payment_and_channel_search = text(
-            """
-            (
-                EXISTS (
-                    SELECT 1
-                    FROM petalops.pago p
-                    LEFT JOIN petalops.pago_metodo pm
-                      ON pm.pago_id = p.id_pago
-                     AND pm.empresa_id = p.empresa_id
-                    LEFT JOIN petalops.metodo_pago_catalogo mpc
-                      ON mpc.id_metodo_pago = pm.metodo_pago_id
-                     AND mpc.empresa_id = p.empresa_id
-                    WHERE p.empresa_id = petalops.pedido.empresa_id
-                      AND p.pedido_id = petalops.pedido.id_pedido
-                      AND (
-                          COALESCE(p.metodo_pago, '') ILIKE :search_term
-                          OR COALESCE(p.proveedor, '') ILIKE :search_term
-                          OR COALESCE(p.referencia, '') ILIKE :search_term
-                          OR COALESCE(mpc.nombre, '') ILIKE :search_term
-                      )
-                )
-                OR EXISTS (
-                    SELECT 1
-                    FROM petalops.pedido_canal_venta pcv
-                    JOIN petalops.canal_venta cv
-                      ON cv.id_canal_venta = pcv.canal_venta_id
-                     AND cv.empresa_id = pcv.empresa_id
-                    WHERE pcv.empresa_id = petalops.pedido.empresa_id
-                      AND pcv.pedido_id = petalops.pedido.id_pedido
-                      AND COALESCE(cv.nombre, '') ILIKE :search_term
-                )
-            )
-            """
-        ).bindparams(search_term=term)
-        base = (
-            base.outerjoin(
-                PedidoDetalle,
-                and_(
-                    PedidoDetalle.pedidoID == Pedido.idPedido,
-                    PedidoDetalle.empresaID == Pedido.empresaID,
-                ),
-            )
-            .outerjoin(
-                Producto,
-                and_(
-                    Producto.idProducto == PedidoDetalle.productoID,
-                    Producto.empresaID == Pedido.empresaID,
-                ),
-            )
-            .outerjoin(
-                Sucursal,
-                and_(
-                    Sucursal.idSucursal == Pedido.sucursalID,
-                    Sucursal.empresaID == Pedido.empresaID,
-                ),
-            )
-            .filter(
-                or_(
-                    cast(Pedido.idPedido, String).ilike(term),
-                    cast(Pedido.numeroPedido, String).ilike(term),
-                    func.coalesce(Pedido.codigoPedido, "").ilike(term),
-                    func.coalesce(Cliente.nombreCompleto, "").ilike(term),
-                    func.coalesce(Cliente.telefono, "").ilike(term),
-                    func.coalesce(Cliente.telefonoCompleto, "").ilike(term),
-                    func.coalesce(Cliente.identificacion, "").ilike(term),
-                    func.coalesce(Entrega.destinatario, "").ilike(term),
-                    func.coalesce(Entrega.telefonoDestino, "").ilike(term),
-                    func.coalesce(Entrega.direccion, "").ilike(term),
-                    func.coalesce(Entrega.barrioNombre, "").ilike(term),
-                    func.coalesce(Entrega.mensaje, "").ilike(term),
-                    func.coalesce(Entrega.firma, "").ilike(term),
-                    func.coalesce(Entrega.firmaNombre, "").ilike(term),
-                    func.coalesce(Entrega.observacionGeneral, "").ilike(term),
-                    func.coalesce(Entrega.observaciones, "").ilike(term),
-                    func.coalesce(PedidoDetalle.observacionesPersonalizados, "").ilike(term),
-                    func.coalesce(Producto.nombreProducto, "").ilike(term),
-                    func.coalesce(Producto.codigoProducto, "").ilike(term),
-                    func.coalesce(Producto.codigoCatalogo, "").ilike(term),
-                    func.coalesce(Sucursal.telefono, "").ilike(term),
-                    payment_and_channel_search,
-                )
-            )
-        )
+        base = base.filter(order_search_condition(f"%{q.strip()}%"))
 
-    candidate_rows = (
-        base.distinct()
-        .order_by(
-            text("\"numeroOrdenFlag\""),
-            text("\"ordenListado\" DESC"),
-            Pedido.idPedido.desc(),
-        )
-        .all()
-    )
-    candidate_ids = [int(row[0]) for row in candidate_rows]
-    if not candidate_ids:
-        return PedidoListResponse(
-            items=[],
-            total=0,
-            page=page,
-            pageSize=page_size,
-            facturasPendientesImpresion=0,
-            kpis=PedidoListKpiSummary(),
-        )
-
-    estado_rows = (
-        db.query(Pedido.idPedido, EstadoPedido.nombreEstado)
+    candidates = base.with_entities(Pedido.idPedido.label("pedido_id")).distinct().subquery()
+    summary_query = (
+        db.query(Pedido).join(candidates, candidates.c.pedido_id == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-        .filter(Pedido.empresaID == int(empresa_id), Pedido.idPedido.in_(candidate_ids))
-        .all()
     )
-    estado_map = {
-        int(pedido_id): str(nombre_estado or "SIN_ESTADO")
-        for pedido_id, nombre_estado in estado_rows
-    }
-    pago_resumen_map = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=candidate_ids)
-    pending_invoice_ids = [
-        int(pedido_id)
-        for pedido_id in candidate_ids
-        if _estado_permite_factura(estado_map.get(int(pedido_id)))
-        and not bool((pago_resumen_map.get(int(pedido_id)) or {}).get("facturaImpresa"))
-    ]
-    facturas_pendientes_impresion = len(pending_invoice_ids)
-    kpis = _build_pedido_list_kpis(
-        db,
-        empresa_id=int(empresa_id),
-        pedido_ids=candidate_ids,
-        estado_map=estado_map,
-        facturas_pendientes_impresion=facturas_pendientes_impresion,
+    total, kpis, invoice_pending = _pedido_list_statistics(summary_query)
+    facturas_pendientes_impresion = kpis.sinImprimir
+    if sin_imprimir:
+        total = facturas_pendientes_impresion
+    if sin_imprimir:
+        base = base.filter(invoice_pending)
+    page_rows = (
+        base.distinct().order_by(
+            text('"numeroOrdenFlag" DESC' if orden_consecutivo is True else '"numeroOrdenFlag"'),
+            text('"ordenListado" DESC'), Pedido.idPedido.desc(),
+        ).offset((page - 1) * page_size).limit(page_size).all()
     )
-    filtered_ids = pending_invoice_ids if sin_imprimir else candidate_ids
-    total = len(filtered_ids)
-
-    pedido_ids = filtered_ids[(page - 1) * page_size : ((page - 1) * page_size) + page_size]
+    pedido_ids = [int(row[0]) for row in page_rows]
     if not pedido_ids:
         return PedidoListResponse(
-            items=[],
-            total=total,
-            page=page,
-            pageSize=page_size,
-            facturasPendientesImpresion=facturas_pendientes_impresion,
-            kpis=kpis,
+            items=[], total=total, page=page, pageSize=page_size,
+            facturasPendientesImpresion=facturas_pendientes_impresion, kpis=kpis,
         )
-
-    pago_resumen_page = {int(pedido_id): pago_resumen_map.get(int(pedido_id), {}) for pedido_id in pedido_ids}
+    pago_resumen_page = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
     tenant_rules = _tenant_order_rules(db, int(empresa_id))
 
     pedido_rows = (
@@ -2907,6 +2751,7 @@ def listar_pedidos(
             and_(
                 Entrega.pedidoID == Pedido.idPedido,
                 Entrega.empresaID == Pedido.empresaID,
+                Entrega.idEntrega == current_delivery_id(db),
             ),
         )
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
@@ -2965,11 +2810,13 @@ def listar_pedidos(
             empresa_id=int(pedido.empresaID),
             rules=tenant_rules,
             pago_resumen=pago_resumen_page.get(pedido_id) or {},
+            total_pedido=pedido.totalNeto or Decimal("0"),
         )
 
         items.append(
             PedidoListItem(
                 pedidoID=pedido_id,
+                version=int(pedido.version or 1),
                 numeroPedido=_numero_pedido_valor(pedido, estado_nombre),
                 codigoPedido=(
                     str(pedido.codigoPedido)
@@ -3016,7 +2863,7 @@ def listar_pedidos(
 
     items.sort(
         key=lambda item: (
-            0 if item.numeroPedido is None or int(item.numeroPedido or 0) <= 0 else 1,
+            (1 if orden_consecutivo is True else 0) if item.numeroPedido is None or int(item.numeroPedido or 0) <= 0 else (0 if orden_consecutivo is True else 1),
             -(
                 int(item.pedidoID or 0)
                 if item.numeroPedido is None or int(item.numeroPedido or 0) <= 0
@@ -3049,8 +2896,7 @@ def listar_alertas_pedidos_nuevos_creados(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(empresa_id))
-    _ensure_pedido_auditoria_table(db)
-    _ensure_pedido_alerta_voz_table(db)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     params = {
         "empresa_id": int(empresa_id),
@@ -3190,7 +3036,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
     try:
         row_query = (
             db.query(Pedido, Cliente, EstadoPedido)
-            .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
+            .outerjoin(Cliente, (Cliente.idCliente == Pedido.clienteID) & (Cliente.empresaID == Pedido.empresaID))
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .filter(Pedido.idPedido == pedido_id)
         )
@@ -3215,7 +3061,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
         entrega = (
             db.query(Entrega)
-            .filter(Entrega.pedidoID == pedido.idPedido)
+            .filter(Entrega.pedidoID == pedido.idPedido, Entrega.empresaID == pedido.empresaID)
             .order_by(Entrega.intentoNumero.desc(), Entrega.idEntrega.desc())
             .first()
         )
@@ -3235,8 +3081,8 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
                     Producto.descripcion,
                 )
             )
-            .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
-            .filter(PedidoDetalle.pedidoID == pedido.idPedido)
+            .outerjoin(Producto, (Producto.idProducto == PedidoDetalle.productoID) & (Producto.empresaID == PedidoDetalle.empresaID))
+            .filter(PedidoDetalle.pedidoID == pedido.idPedido, PedidoDetalle.empresaID == pedido.empresaID)
             .all()
         )
 
@@ -3269,6 +3115,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
         campos_empresa = _load_empresa_menu_rows(db, empresa_id=int(pedido.empresaID))
 
         return PedidoDetalleResponse(
+            version=int(pedido.version or 1),
             pedidoID=int(pedido.idPedido),
             numeroPedido=_numero_pedido_valor(pedido, estado_nombre),
             codigoPedido=(
@@ -3369,6 +3216,7 @@ def obtener_detalle_pedido(pedido_id: int, db: Session = Depends(get_db), auth=D
 
 
 class ActualizarDetallePedidoRequest(BaseModel):
+    version: int = Field(..., ge=1)
     pedidoID: int | None = None
     pedidoId: int | None = None
     detalleID: int | None = None
@@ -3425,6 +3273,7 @@ class ActualizarDetallePedidoRequest(BaseModel):
 
 
 class AgregarDetallePedidoRequest(BaseModel):
+    version: int = Field(..., ge=1)
     productoID: int
     cantidad: float | None = 1
     productoObservaciones: str | None = None
@@ -3434,6 +3283,7 @@ class AgregarDetallePedidoRequest(BaseModel):
 
 @router.put("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def actualizar_detalle_pedido(
+    request: Request,
     pedido_id: int,
     payload: ActualizarDetallePedidoRequest,
     db: Session = Depends(get_db),
@@ -3450,15 +3300,23 @@ def actualizar_detalle_pedido(
                 },
             )
         empresa_id = int(auth.empresaID)
+        reservation = None
+        if request.headers.get("Idempotency-Key"):
+            reservation, replay = begin_creation(db, request, empresa_id=empresa_id, operation=f"actualizar_detalle_pedido:{pedido_id}", payload=payload)
+            if replay is not None:
+                return replay
         has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
         pedido = (
             db.query(Pedido)
             .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .with_for_update()
+            .populate_existing()
             .first()
         )
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
+        check_and_increment_version(pedido, payload.version)
         if not _estado_pedido_editable(db, pedido.estadoPedidoID):
             raise HTTPException(
                 status_code=409,
@@ -4050,8 +3908,13 @@ def actualizar_detalle_pedido(
             },
         )
 
+        db.flush()
+        result = {"status": "ok", "version": int(pedido.version), "pedidoID": pedido_id}
+        if reservation is not None:
+            complete_creation(db, reservation, result)
         db.commit()
-        return {"status": "ok", "pedidoID": pedido_id}
+        return result
+
     except HTTPException:
         db.rollback()
         raise
@@ -4081,6 +3944,7 @@ def actualizar_detalle_pedido(
 
 @router.post("/pedido/{pedido_id}/detalle", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def agregar_detalle_pedido(
+    request: Request,
     pedido_id: int,
     payload: AgregarDetallePedidoRequest,
     db: Session = Depends(get_db),
@@ -4088,15 +3952,23 @@ def agregar_detalle_pedido(
 ):
     try:
         empresa_id = int(auth.empresaID)
+        reservation = None
+        if request.headers.get("Idempotency-Key"):
+            reservation, replay = begin_creation(db, request, empresa_id=empresa_id, operation=f"agregar_detalle_pedido:{pedido_id}", payload=payload)
+            if replay is not None:
+                return replay
         has_observaciones_personalizados = _pedido_detalle_has_observaciones_personalizados(db)
         pedido = (
             db.query(Pedido)
             .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .with_for_update()
+            .populate_existing()
             .first()
         )
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
+        check_and_increment_version(pedido, payload.version)
         if not _estado_pedido_editable(db, pedido.estadoPedidoID):
             raise HTTPException(
                 status_code=409,
@@ -4213,13 +4085,18 @@ def agregar_detalle_pedido(
             pedido=pedido,
             usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
         )
-        db.commit()
-        return {
-            "status": "ok",
+        db.flush()
+        result = {
+            "status": "ok", "version": int(pedido.version),
             "action": action,
             "pedidoID": int(pedido.idPedido),
             "detalleID": detalle_id,
         }
+        if reservation is not None:
+            complete_creation(db, reservation, result)
+        db.commit()
+        return result
+
     except HTTPException:
         db.rollback()
         raise
@@ -4251,6 +4128,7 @@ def agregar_detalle_pedido(
 def eliminar_detalle_pedido(
     pedido_id: int,
     detalle_id: int,
+    version: int = Query(..., ge=1),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
 ):
@@ -4259,11 +4137,14 @@ def eliminar_detalle_pedido(
         pedido = (
             db.query(Pedido)
             .filter(Pedido.idPedido == pedido_id, Pedido.empresaID == empresa_id)
+            .with_for_update()
+            .populate_existing()
             .first()
         )
         if not pedido:
             raise HTTPException(status_code=404, detail={"code": "PEDIDO_NOT_FOUND", "message": "Pedido no encontrado"})
         assert_same_empresa(auth, int(pedido.empresaID))
+        check_and_increment_version(pedido, version)
 
         estado_nombre = _estado_pedido_nombre(db, pedido.estadoPedidoID)
         if estado_nombre not in {"PENDIENTE", "CREADO", "APROBADO"}:
@@ -4342,7 +4223,7 @@ def eliminar_detalle_pedido(
 
         db.delete(detalle)
         db.flush()
-        cliente = db.query(Cliente).filter(Cliente.idCliente == pedido.clienteID).first()
+        cliente = db.query(Cliente).filter(Cliente.idCliente == pedido.clienteID, Cliente.empresaID == pedido.empresaID).first()
         _recalculate_pedido_financials(
             db,
             pedido=pedido,
@@ -4354,7 +4235,7 @@ def eliminar_detalle_pedido(
             usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
         )
         db.commit()
-        return {"status": "ok", "pedidoID": int(pedido.idPedido), "detalleID": int(detalle_id)}
+        return {"status": "ok", "version": int(pedido.version), "pedidoID": int(pedido.idPedido), "detalleID": int(detalle_id)}
     except HTTPException:
         db.rollback()
         raise
@@ -4386,7 +4267,7 @@ def eliminar_detalle_pedido(
 def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     row_query = (
         db.query(Pedido, Cliente, EstadoPedido)
-        .outerjoin(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .outerjoin(Cliente, (Cliente.idCliente == Pedido.clienteID) & (Cliente.empresaID == Pedido.empresaID))
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
         .filter(Pedido.idPedido == pedido_id)
     )
@@ -4443,8 +4324,8 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
                 Producto.nombreProducto,
             )
         )
-        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
-        .filter(PedidoDetalle.pedidoID == pedido.idPedido)
+        .outerjoin(Producto, (Producto.idProducto == PedidoDetalle.productoID) & (Producto.empresaID == PedidoDetalle.empresaID))
+        .filter(PedidoDetalle.pedidoID == pedido.idPedido, PedidoDetalle.empresaID == pedido.empresaID)
         .all()
     )
 
@@ -4481,7 +4362,11 @@ def descargar_factura_pedido(pedido_id: int, db: Session = Depends(get_db), auth
         tipo_pago = "No especificada"
 
     fecha_entrega_programada = _scheduled_entrega_datetime(entrega)
-    fecha_entrega_label = fecha_entrega_programada.strftime("%Y-%m-%d") if fecha_entrega_programada else "No especificada"
+    dias_semana = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
+    fecha_entrega_label = (
+        f"{dias_semana[fecha_entrega_programada.weekday()]}, {fecha_entrega_programada:%Y-%m-%d}"
+        if fecha_entrega_programada else "No especificada"
+    )
     hora_entrega_label = str((entrega.rangoHora if entrega else None) or "No especificada").strip() or "No especificada"
     zona_label = f"Zona {int(barrio.zonaID)}" if barrio and getattr(barrio, "zonaID", None) is not None else "Sin zona"
     operador_nombre = str(getattr(auth, "nombre", None) or getattr(auth, "login", None) or "-").strip() or "-"
@@ -4579,7 +4464,7 @@ def trazabilidad_aprobaciones_pedidos(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(empresa_id))
-    _ensure_pedido_auditoria_table(db)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     params = {
         "empresa_id": int(empresa_id),
@@ -4694,6 +4579,7 @@ def resumen_contabilidad(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     estados_contables = ["APROBADO", "PAGADO", "CANCELADO", "RECHAZADO"]
     order_query = (
         db.query(Pedido, EstadoPedido)
@@ -4725,7 +4611,7 @@ def resumen_contabilidad(
 
     detalle_rows = (
         db.query(PedidoDetalle, Producto)
-        .outerjoin(Producto, Producto.idProducto == PedidoDetalle.productoID)
+        .outerjoin(Producto, (Producto.idProducto == PedidoDetalle.productoID) & (Producto.empresaID == PedidoDetalle.empresaID))
         .filter(
             PedidoDetalle.empresaID == int(empresa_id),
             PedidoDetalle.pedidoID.in_(pedido_ids),
@@ -4750,7 +4636,6 @@ def resumen_contabilidad(
                 bucket.append(cleaned)
 
     pagos_por_pedido = _load_pago_resumen_batch(db, empresa_id=int(empresa_id), pedido_ids=pedido_ids)
-    _ensure_pedido_auditoria_table(db)
     auditoria_rows = db.execute(
         text(
             """
@@ -5055,6 +4940,7 @@ def resumen_ventas_diario(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     if fecha_desde > fecha_hasta:
         raise HTTPException(status_code=400, detail="fechaDesde no puede ser mayor que fechaHasta")
 
@@ -5170,6 +5056,7 @@ def aprobar_pedido(pedido_id: int, db: Session = Depends(get_db), auth=Depends(g
         pedido_id=int(pedido.idPedido),
     )
 
+    pedido.version = int(pedido.version or 1) + 1
     db.commit()
     whatsapp_service.procesar_notificacion_pendiente(
         db,
@@ -5255,6 +5142,7 @@ def rechazar_pedido(pedido_id: int, payload: RechazarPedidoRequest, db: Session 
         pedido=pedido,
         usuario_id=(int(getattr(auth, "userID", 0)) if getattr(auth, "userID", None) is not None else None),
     )
+    pedido.version = int(pedido.version or 1) + 1
     db.commit()
     if str(estado_destino.nombreEstado or "").strip().upper() in {"APROBADO", "PAGADO"}:
         whatsapp_service.procesar_notificacion_pendiente(
@@ -5370,6 +5258,7 @@ def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_d
         pedido_id=int(pedido.idPedido),
         entrega_id=int(entrega.idEntrega),
     )
+    pedido.version = int(pedido.version or 1) + 1
     db.commit()
 
     return {
@@ -5385,25 +5274,34 @@ def finalizar_pedido_recogida_tienda(pedido_id: int, db: Session = Depends(get_d
 def checkout(request: Request, data: PedidoCheckoutRequest, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
     """Endpoint de checkout: delega la lógica transaccional al servicio de pedidos."""
     assert_same_empresa(auth, int(data.empresaID))
-    result = checkout_pedido(db=db, payload=data)
-    pedido_id = int(result.get("pedidoID") or 0)
-    pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id, Pedido.empresaID == int(data.empresaID)).first()
-    if pedido:
-        _audit_pedido_action(
-            db=db,
-            actor=auth,
-            pedido=pedido,
-            accion="CREAR_PEDIDO_CHECKOUT",
-            estado_origen_id=None,
-            estado_destino_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
-            extra={
-                "numeroPedido": int(pedido.numeroPedido or 0),
-                "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
-                "total": float(pedido.totalNeto or 0),
-            },
-        )
+    assert_sucursal_empresa(db, int(data.empresaID), data.sucursalID)
+    try:
+        reservation, replay = begin_creation(db, request, empresa_id=int(data.empresaID), operation="checkout", payload=data)
+        if replay is not None:
+            return replay
+        result = checkout_pedido(db=db, payload=data, commit=False)
+        pedido_id = int(result.get("pedidoID") or 0)
+        pedido = db.query(Pedido).filter(Pedido.idPedido == pedido_id, Pedido.empresaID == int(data.empresaID)).first()
+        if pedido:
+            _audit_pedido_action(
+                db=db,
+                actor=auth,
+                pedido=pedido,
+                accion="CREAR_PEDIDO_CHECKOUT",
+                estado_origen_id=None,
+                estado_destino_id=int(pedido.estadoPedidoID) if pedido.estadoPedidoID is not None else None,
+                extra={
+                    "numeroPedido": int(pedido.numeroPedido or 0),
+                    "codigoPedido": str(pedido.codigoPedido or "").strip() or None,
+                    "total": float(pedido.totalNeto or 0),
+                },
+            )
+        complete_creation(db, reservation, result)
         db.commit()
-    return result
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _nombres_productos_duplicados(productos_normalizados: list[dict], productos_map: dict[int, "Producto"]) -> list[str]:
@@ -5826,6 +5724,7 @@ def crear_pedido_venta_rapida(request: Request, data: PedidoVentaRapidaRequest, 
     if empresa_id <= 0 or sucursal_id <= 0:
         raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_SCOPE_INVALID", "message": "empresaID y sucursalID son obligatorios."})
     assert_same_empresa(auth, empresa_id)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
     if not data.items:
         raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_ITEMS_EMPTY", "message": "Agrega al menos una flor."})
 
@@ -5837,6 +5736,9 @@ def crear_pedido_venta_rapida(request: Request, data: PedidoVentaRapidaRequest, 
         raise HTTPException(status_code=400, detail={"code": "VENTA_RAPIDA_CHANNEL_REQUIRED", "message": "Canal de venta es obligatorio."})
 
     try:
+        reservation, replay = begin_creation(db, request, empresa_id=empresa_id, operation="crear_pedido_venta_rapida", payload=data)
+        if replay is not None:
+            return replay
         estado_aprobado = _buscar_estado_por_nombre(db, "APROBADO", "PAGADO")
         if not estado_aprobado:
             raise HTTPException(status_code=400, detail="No existe estado de aprobacion activo (APROBADO/PAGADO)")
@@ -5961,8 +5863,8 @@ def crear_pedido_venta_rapida(request: Request, data: PedidoVentaRapidaRequest, 
                 "movimientosInventario": movimientos,
             },
         )
-        db.commit()
-        return {
+        db.flush()
+        result = {
             "pedidoID": int(pedido.idPedido),
             "numeroPedido": int(numero_pedido),
             "codigoPedido": codigo_pedido,
@@ -5973,6 +5875,10 @@ def crear_pedido_venta_rapida(request: Request, data: PedidoVentaRapidaRequest, 
             "estadoEntrega": domicilio_service.ESTADO_ENTREGADO,
             "movimientosInventario": movimientos,
         }
+        complete_creation(db, reservation, result)
+        db.commit()
+        return result
+
     except HTTPException:
         db.rollback()
         raise
@@ -5989,6 +5895,7 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
     if empresa_id <= 0 or sucursal_id <= 0:
         raise HTTPException(status_code=400, detail={"code": "PEDIDO_MANUAL_SCOPE_INVALID", "message": "empresaID y sucursalID son obligatorios"})
     assert_same_empresa(auth, empresa_id)
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     productos_payload = data.productos if data.productos is not None else data.items
     if not productos_payload:
@@ -6015,6 +5922,9 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
     producto_ids = list({item["productoID"] for item in productos_normalizados})
 
     try:
+        reservation, replay = begin_creation(db, request, empresa_id=empresa_id, operation="crear_pedido_manual", payload=data)
+        if replay is not None:
+            return replay
         estado_inicial = _buscar_estado_inicial_pedido(db)
         if not estado_inicial:
             raise HTTPException(status_code=400, detail="No existe un estado inicial activo 'CREADO' o 'PENDIENTE'")
@@ -6253,9 +6163,9 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
                 },
             },
         )
-        db.commit()
+        db.flush()
         total_general = Decimal(str(pedido.totalNeto or 0)).quantize(Decimal("0.01"))
-        return {
+        result = {
             "pedidoID": int(pedido.idPedido),
             "numeroPedido": None,
             "codigoPedido": None,
@@ -6269,6 +6179,10 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
             "domicilioOriginal": float(pedido.domicilioOriginal or 0),
             "descuentoDomicilio": float(pedido.descuentoDomicilio or 0),
         }
+        complete_creation(db, reservation, result)
+        db.commit()
+        return result
+
     except HTTPException:
         db.rollback()
         raise
@@ -6282,8 +6196,12 @@ def crear_pedido_manual(request: Request, data: PedidoManualRequest, db: Session
 def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get_db), auth=Depends(get_current_auth_context)):
 
     assert_same_empresa(auth, int(data.empresaId))
+    assert_sucursal_empresa(db, data.empresaId, data.sucursalId)
 
     try:
+        reservation, replay = begin_creation(db, request, empresa_id=int(data.empresaId), operation="crear_pedido", payload=data)
+        if replay is not None:
+            return replay
         estado_inicial = _buscar_estado_inicial_pedido(db)
         if not estado_inicial:
             raise HTTPException(status_code=400, detail="No existe un estado inicial activo 'CREADO' o 'PENDIENTE'")
@@ -6417,9 +6335,9 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
                 "cantidadProductos": len(data.items),
             },
         )
-        db.commit()
+        db.flush()
 
-        return {
+        result = {
             "status": "ok",
             "idPedido": pedido.idPedido,
             "numeroPedido": (int(pedido.numeroPedido) if int(pedido.numeroPedido or 0) > 0 else None),
@@ -6427,6 +6345,10 @@ def crear_pedido(request: Request, data: PedidoCreate, db: Session = Depends(get
             "total": float(total.quantize(Decimal("0.01"))),
             "estado": str(estado_inicial.nombreEstado or "CREADO"),
         }
+
+        complete_creation(db, reservation, result)
+        db.commit()
+        return result
 
     except SQLAlchemyError as e:
         db.rollback()
@@ -6565,6 +6487,7 @@ def cambiar_estado(
             estado_destino_id=int(nuevo_estado_id),
         )
 
+    pedido.version = int(pedido.version or 1) + 1
     db.commit()
 
     return {

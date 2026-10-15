@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from app.core.delivery_queries import latest_delivery_ids
+
+from app.core.tenant_scope import assert_sucursal_empresa
+
 import re
 from datetime import date, datetime, time
 
@@ -206,16 +210,9 @@ def listar_pipeline_pedidos(
 ):
     try:
         assert_same_empresa(auth, empresa_id)
+        assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
-        entrega_last_sq = (
-            db.query(
-                Entrega.pedidoID.label("pedido_id"),
-                func.max(Entrega.idEntrega).label("entrega_id"),
-            )
-            .filter(Entrega.empresaID == empresa_id)
-            .group_by(Entrega.pedidoID)
-            .subquery()
-        )
+        entrega_last_sq = latest_delivery_ids(db, empresa_id)
 
         prod_last_sq = (
             db.query(
@@ -237,7 +234,7 @@ def listar_pipeline_pedidos(
                 load_only(Domiciliario.idDomiciliario, Domiciliario.empresaID, Domiciliario.nombre),
                 load_only(FloristaLast.idDomiciliario, FloristaLast.empresaID, FloristaLast.nombre),
             )
-            .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+            .join(Cliente, (Cliente.idCliente == Pedido.clienteID) & (Cliente.empresaID == Pedido.empresaID))
             .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
             .outerjoin(entrega_last_sq, entrega_last_sq.c.pedido_id == Pedido.idPedido)
             .outerjoin(EntregaLast, EntregaLast.idEntrega == entrega_last_sq.c.entrega_id)

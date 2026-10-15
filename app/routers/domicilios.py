@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.core.delivery_queries import latest_delivery_ids
+
 from app.core.timezone import colombia_now_naive, COLOMBIA_TZ
 
 import json
@@ -46,6 +48,7 @@ from app.models.usuario import Usuario
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
+    DomicilioEvidenciasResponse,
     DomiciliarioCreateRequest,
     DomiciliarioCreateResponse,
     DomiciliarioDeleteResponse,
@@ -168,6 +171,17 @@ def _err(code: str, message: str, status_code: int = 400) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message, "module": "domicilios"},
     )
+
+
+def _assert_sucursal_empresa(db: Session, empresa_id: int, sucursal_id: int | None):
+    if sucursal_id is None:
+        return
+    sucursal = db.query(Sucursal).filter(
+        Sucursal.idSucursal == int(sucursal_id),
+        Sucursal.empresaID == int(empresa_id),
+    ).first()
+    if sucursal is None:
+        raise _err("DOMICILIO_SCOPE_INVALID", "Sucursal invalida para la empresa", status_code=403)
 
 
 def _domiciliario_id_for_auth(db: Session, auth) -> int | None:
@@ -526,32 +540,7 @@ def _novedad_audit_summary(
 
 
 def _latest_entrega_id_subquery(db: Session, empresa_id: int):
-    latest_attempt_sq = (
-        db.query(
-            Entrega.pedidoID.label("pedido_id"),
-            func.max(Entrega.intentoNumero).label("max_intento"),
-        )
-        .filter(Entrega.empresaID == int(empresa_id))
-        .group_by(Entrega.pedidoID)
-        .subquery()
-    )
-
-    return (
-        db.query(
-            Entrega.pedidoID.label("pedido_id"),
-            func.max(Entrega.idEntrega).label("entrega_id"),
-        )
-        .join(
-            latest_attempt_sq,
-            and_(
-                Entrega.pedidoID == latest_attempt_sq.c.pedido_id,
-                Entrega.intentoNumero == latest_attempt_sq.c.max_intento,
-            ),
-        )
-        .filter(Entrega.empresaID == int(empresa_id))
-        .group_by(Entrega.pedidoID)
-        .subquery()
-    )
+    return latest_delivery_ids(db, empresa_id)
 
 
 def _locked_current_entrega(db: Session, empresa_id: int, entrega_id: int) -> Entrega:
@@ -742,9 +731,9 @@ def _pedido_product_payload_map(
             pd.cantidad
         FROM petalops.pedido_detalle pd
         LEFT JOIN petalops.producto p
-          ON p.id_producto = pd.producto_id
-        WHERE pd.pedido_id IN :pedido_ids
-           OR pd.id_pedido_detalle IN :detalle_ids
+          ON p.id_producto = pd.producto_id AND p.empresa_id = pd.empresa_id
+        WHERE pd.empresa_id = :empresa_id
+          AND (pd.pedido_id IN :pedido_ids OR pd.id_pedido_detalle IN :detalle_ids)
         ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
         """
     ).bindparams(
@@ -754,6 +743,7 @@ def _pedido_product_payload_map(
     rows = db.execute(
         query,
         {
+            "empresa_id": int(empresa_id),
             "pedido_ids": [int(pedido_id) for pedido_id in pedido_ids] or [-1],
             "detalle_ids": list(detalle_id_to_pedido_id.keys()) or [-1],
         },
@@ -801,7 +791,10 @@ def _pedido_product_payload_map(
             JOIN petalops.producto_sucursal ps
               ON ps.producto_id = pd.producto_id
              AND ps.sucursal_id = pd.sucursal_id
-            WHERE (pd.pedido_id IN :pedido_ids OR pd.id_pedido_detalle IN :detalle_ids)
+             AND EXISTS (SELECT 1 FROM petalops.producto p WHERE p.id_producto = pd.producto_id AND p.empresa_id = pd.empresa_id)
+            WHERE pd.empresa_id = :empresa_id
+              AND EXISTS (SELECT 1 FROM petalops.sucursal s WHERE s.id_sucursal = ps.sucursal_id AND s.empresa_id = pd.empresa_id)
+              AND (pd.pedido_id IN :pedido_ids OR pd.id_pedido_detalle IN :detalle_ids)
               AND ps.imagen_url IS NOT NULL
             ORDER BY pd.pedido_id ASC, pd.id_pedido_detalle ASC
             """
@@ -812,6 +805,7 @@ def _pedido_product_payload_map(
         image_rows = db.execute(
             image_query,
             {
+                "empresa_id": int(empresa_id),
                 "pedido_ids": [int(pedido_id) for pedido_id in pedido_ids] or [-1],
                 "detalle_ids": list(detalle_id_to_pedido_id.keys()) or [-1],
             },
@@ -890,9 +884,9 @@ def _build_mis_entregas_query(
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
-        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Pedido, and_(Pedido.idPedido == entrega_actual.pedidoID, Pedido.empresaID == entrega_actual.empresaID))
+        .join(Cliente, and_(Cliente.idCliente == Pedido.clienteID, Cliente.empresaID == Pedido.empresaID))
+        .join(Produccion, and_(Produccion.idProduccion == entrega_actual.produccionID, Produccion.empresaID == entrega_actual.empresaID))
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             entrega_actual.domiciliarioID == int(domiciliario_id),
@@ -946,9 +940,9 @@ def _build_pedidos_disponibles_query(
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
-        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Pedido, and_(Pedido.idPedido == entrega_actual.pedidoID, Pedido.empresaID == entrega_actual.empresaID))
+        .join(Cliente, and_(Cliente.idCliente == Pedido.clienteID, Cliente.empresaID == Pedido.empresaID))
+        .join(Produccion, and_(Produccion.idProduccion == entrega_actual.produccionID, Produccion.empresaID == entrega_actual.empresaID))
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             func.coalesce(
@@ -998,9 +992,9 @@ def _build_pedidos_sin_asignar_query(
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
-        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
-        .join(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
+        .join(Pedido, and_(Pedido.idPedido == entrega_actual.pedidoID, Pedido.empresaID == entrega_actual.empresaID))
+        .join(Cliente, and_(Cliente.idCliente == Pedido.clienteID, Cliente.empresaID == Pedido.empresaID))
+        .join(Produccion, and_(Produccion.idProduccion == entrega_actual.produccionID, Produccion.empresaID == entrega_actual.empresaID))
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             entrega_actual.domiciliarioID == None,
@@ -1056,20 +1050,16 @@ def _listar_pedidos_disponibles_api_rows(
 
     query = text(
         f"""
-        WITH latest_attempt AS (
-            SELECT pedido_id, MAX(intentonumero) AS max_intento
+        WITH ranked_entrega AS (
+            SELECT pedido_id, id_entrega,
+                   ROW_NUMBER() OVER (PARTITION BY empresa_id, pedido_id
+                     ORDER BY intentonumero DESC NULLS LAST, id_entrega DESC) AS position
             FROM petalops.entrega
             WHERE empresa_id = :empresa_id
-            GROUP BY pedido_id
         ),
         latest_entrega AS (
-            SELECT e.pedido_id, MAX(e.id_entrega) AS entrega_id
-            FROM petalops.entrega e
-            JOIN latest_attempt la
-              ON la.pedido_id = e.pedido_id
-             AND la.max_intento = e.intentonumero
-            WHERE e.empresa_id = :empresa_id
-            GROUP BY e.pedido_id
+            SELECT pedido_id, id_entrega AS entrega_id
+            FROM ranked_entrega WHERE position = 1
         ),
         base AS (
             SELECT
@@ -1100,9 +1090,9 @@ def _listar_pedidos_disponibles_api_rows(
                 z.nombre_zona
             FROM petalops.entrega e
             JOIN latest_entrega le ON le.entrega_id = e.id_entrega
-            JOIN petalops.pedido p ON p.id_pedido = e.pedido_id
-            JOIN petalops.cliente c ON c.cliente_id = p.cliente_id
-            JOIN petalops.produccion pr ON pr.id_produccion = e.produccionid
+            JOIN petalops.pedido p ON p.id_pedido = e.pedido_id AND p.empresa_id = e.empresa_id
+            JOIN petalops.cliente c ON c.cliente_id = p.cliente_id AND c.empresa_id = p.empresa_id
+            JOIN petalops.produccion pr ON pr.id_produccion = e.produccionid AND pr.empresa_id = e.empresa_id
             LEFT JOIN petalops.barrio b
               ON (
                     e.barrioid IS NOT NULL
@@ -1172,12 +1162,13 @@ def _listar_pedidos_disponibles_api_rows(
                 )[1] AS image_url
             FROM base b
             JOIN petalops.pedido_detalle pd
-              ON pd.pedido_id = b.pedido_id
-              OR pd.id_pedido_detalle = b.pedido_detalle_id
-            LEFT JOIN petalops.producto prod ON prod.id_producto = pd.producto_id
+              ON (pd.pedido_id = b.pedido_id OR pd.id_pedido_detalle = b.pedido_detalle_id)
+             AND pd.empresa_id = :empresa_id
+            LEFT JOIN petalops.producto prod ON prod.id_producto = pd.producto_id AND prod.empresa_id = pd.empresa_id
             LEFT JOIN petalops.producto_sucursal ps
-              ON ps.producto_id = pd.producto_id
+              ON ps.producto_id = prod.id_producto
              AND ps.sucursal_id = b.sucursal_id
+             AND EXISTS (SELECT 1 FROM petalops.sucursal s WHERE s.id_sucursal = ps.sucursal_id AND s.empresa_id = pd.empresa_id)
             GROUP BY b.pedido_id
         )
         SELECT
@@ -1275,7 +1266,7 @@ def _domicilio_contadores(
     base = (
         db.query(entrega_actual)
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
-        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
+        .join(Pedido, and_(Pedido.idPedido == entrega_actual.pedidoID, Pedido.empresaID == entrega_actual.empresaID))
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             Pedido.empresaID == int(empresa_id),
@@ -1843,6 +1834,58 @@ def _resolve_domiciliario_role(db: Session, empresa_id: int) -> Rol:
     return rol
 
 
+@router.get("/pedidos/{numero_pedido}/evidencias", response_model=DomicilioEvidenciasResponse)
+def obtener_evidencias_pedido(
+    numero_pedido: int,
+    empresa_id: int = Query(..., alias="empresaID", gt=0),
+    sucursal_id: int = Query(..., alias="sucursalID", gt=0),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, empresa_id)
+    if (
+        not is_empresa_admin_context(auth)
+        and auth.sucursalID is not None
+        and int(auth.sucursalID) != sucursal_id
+    ):
+        raise _err("DOMICILIO_SCOPE_INVALID", "Sin acceso a la sucursal indicada", status_code=403)
+    try:
+        _assert_sucursal_empresa(db, empresa_id, sucursal_id)
+        pedido = db.query(Pedido).filter(
+            Pedido.numeroPedido == numero_pedido,
+            Pedido.empresaID == empresa_id,
+            Pedido.sucursalID == sucursal_id,
+        ).first()
+        if pedido is None:
+            raise _err("PEDIDO_NOT_FOUND", "Pedido no encontrado", status_code=404)
+        entrega = db.query(Entrega).filter(
+            Entrega.pedidoID == pedido.idPedido,
+            Entrega.empresaID == pedido.empresaID,
+        ).order_by(
+            Entrega.intentoNumero.desc().nullslast(), Entrega.idEntrega.desc(),
+        ).first()
+        if entrega is not None and entrega.sucursalID not in (None, sucursal_id):
+            raise _err("DOMICILIO_SCOPE_INVALID", "Entrega fuera de la sucursal indicada", status_code=403)
+
+        def optional_text(value):
+            return str(value).strip() or None if value is not None else None
+
+        return DomicilioEvidenciasResponse(
+            numero_pedido=pedido.numeroPedido,
+            id_pedido=pedido.idPedido,
+            id_entrega=entrega.idEntrega if entrega else None,
+            estado=_estado_api(entrega).lower() if entrega else None,
+            firma_nombre=optional_text(entrega.firmaNombre) if entrega else None,
+            firma_documento=optional_text(entrega.firmaDocumento) if entrega else None,
+            observaciones=optional_text(entrega.observaciones) if entrega else None,
+            evidencia_entrega_url=optional_text(entrega.evidenciaFotoUrl) if entrega else None,
+            evidencia_firma_url=optional_text(entrega.firmaImagenUrl) if entrega else None,
+        )
+    except SQLAlchemyError as exc:
+        domicilios_logger.exception("Error consultando evidencias del pedido %s", numero_pedido)
+        raise _err("DOMICILIO_EVIDENCIAS_ERROR", "No fue posible consultar las evidencias", status_code=500) from exc
+
+
 @router.get("/domiciliarios", response_model=DomiciliarioListResponse)
 def listar_domiciliarios(
     empresa_id: int = Query(..., alias="empresaID"),
@@ -1854,6 +1897,7 @@ def listar_domiciliarios(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     q = db.query(Domiciliario).filter(Domiciliario.empresaID == int(empresa_id))
     q = q.filter(func.upper(Domiciliario.cargo) == "DOMICILIARIO")
     if sucursal_id is not None:
@@ -2148,6 +2192,7 @@ def listar_admin(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     estado_para_entrega = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_PARA_ENTREGA)
     latest_entrega_sq = _latest_entrega_id_subquery(db, empresa_id)
     entrega_actual = aliased(Entrega)
@@ -2155,11 +2200,11 @@ def listar_admin(
     q = (
         db.query(entrega_actual, Pedido, Cliente, Produccion, Domiciliario, Barrio, null().label("zona"))
         .join(latest_entrega_sq, latest_entrega_sq.c.entrega_id == entrega_actual.idEntrega)
-        .join(Pedido, Pedido.idPedido == entrega_actual.pedidoID)
-        .join(Cliente, Cliente.idCliente == Pedido.clienteID)
+        .join(Pedido, and_(Pedido.idPedido == entrega_actual.pedidoID, Pedido.empresaID == entrega_actual.empresaID))
+        .join(Cliente, and_(Cliente.idCliente == Pedido.clienteID, Cliente.empresaID == Pedido.empresaID))
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
-        .outerjoin(Produccion, Produccion.idProduccion == entrega_actual.produccionID)
-        .outerjoin(Domiciliario, Domiciliario.idDomiciliario == entrega_actual.domiciliarioID)
+        .outerjoin(Produccion, and_(Produccion.idProduccion == entrega_actual.produccionID, Produccion.empresaID == entrega_actual.empresaID))
+        .outerjoin(Domiciliario, and_(Domiciliario.idDomiciliario == entrega_actual.domiciliarioID, Domiciliario.empresaID == entrega_actual.empresaID))
         .filter(
             entrega_actual.empresaID == int(empresa_id),
             func.upper(func.coalesce(EstadoPedido.nombreEstado, "")) != "CREADO",
@@ -2431,7 +2476,7 @@ def asignar_domiciliario(
                 status_code=400,
             )
 
-        domiciliario = db.query(Domiciliario).filter(Domiciliario.idDomiciliario == payload.domiciliarioID).first()
+        domiciliario = db.query(Domiciliario).filter(Domiciliario.idDomiciliario == payload.domiciliarioID, Domiciliario.empresaID == int(entrega.empresaID)).first()
         if not domiciliario or int(domiciliario.empresaID) != int(entrega.empresaID):
             raise _err("DOMICILIO_DOMICILIARIO_INVALID", "Domiciliario inválido para la empresa", status_code=400)
 
@@ -2931,6 +2976,7 @@ def listar_mis_entregas(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
     items = _build_courier_cards_with_images(db, empresa_id, rows)
@@ -2951,6 +2997,7 @@ def listar_mis_pedidos(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
@@ -2974,6 +3021,7 @@ def listar_pedidos_disponibles(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_pedidos_disponibles_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()
@@ -3043,6 +3091,7 @@ def listar_pedidos_disponibles_api(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
     rows = (
@@ -3134,6 +3183,7 @@ def obtener_contadores_domicilio(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     _assert_role_domiciliario(auth)
     domiciliario_id = _assert_auth_domiciliario(db, auth)
     start, end = _fecha_rango(fecha, fecha_desde, fecha_hasta)
@@ -3155,6 +3205,7 @@ def obtener_metricas_domicilios(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
 
     allowed_group_by = {
         "anio",
@@ -3230,6 +3281,7 @@ def autoasignar_pedido(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     _assert_role_domiciliario(auth)
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
@@ -3387,6 +3439,7 @@ def listar_mis_entregas_propias(
     auth=Depends(get_current_auth_context),
 ):
     assert_same_empresa(auth, empresa_id)
+    _assert_sucursal_empresa(db, empresa_id, sucursal_id)
     domiciliario_id = _assert_auth_domiciliario(db, auth)
 
     rows = _build_mis_entregas_query(db, empresa_id, sucursal_id, domiciliario_id, fecha).all()

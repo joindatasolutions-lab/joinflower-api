@@ -92,8 +92,8 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
                   AND p.sucursal_id = :sucursal_id
                   AND CAST(p.fecha_pedido AS DATE) = :fecha_operacion
                   AND (
-                    lower(COALESCE(mpc.codigo, '')) = 'efectivo'
-                    OR lower(COALESCE(mpc.nombre, '')) = 'efectivo'
+                                        COALESCE(mpc.codigo, '') ILIKE '%efectivo%'
+                                        OR COALESCE(mpc.nombre, '') ILIKE '%efectivo%'
                   )
                   AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
                 """
@@ -105,9 +105,6 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
             },
         ).first()
         total += money(row[0] if row else 0)
-
-    if total > 0:
-        return total
 
     if relation_exists(db, "pago"):
         legacy_filter = ""
@@ -133,7 +130,7 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
                 WHERE pa.empresa_id = :empresa_id
                   AND p.sucursal_id = :sucursal_id
                   AND CAST(p.fecha_pedido AS DATE) = :fecha_operacion
-                  AND COALESCE(pa.metodo_pago, '') ILIKE '%Efectivo%'
+                  AND COALESCE(pa.metodo_pago, '') ILIKE '%efectivo%'
                   AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
                   {legacy_filter}
                 """

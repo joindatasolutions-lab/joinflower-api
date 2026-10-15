@@ -1,3 +1,5 @@
+from app.core.tenant_scope import assert_sucursal_empresa
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import String, cast, func, or_, text
@@ -41,6 +43,7 @@ def obtener_catalogo(
         if target_sucursal_id <= 0:
             raise _err("CATALOGO_SUCURSAL_REQUIRED", "Sucursal inválida para consultar catálogo", status_code=400)
 
+        assert_sucursal_empresa(db, empresa_id, target_sucursal_id)
         term = str(q or "").strip()
         cache_key = (
             f"catalogo:{empresa_id}:sucursal:{target_sucursal_id}:{term.lower()}"

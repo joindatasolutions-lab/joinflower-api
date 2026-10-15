@@ -181,6 +181,7 @@ class PedidoListProducto(BaseModel):
 
 
 class PedidoListItem(BaseModel):
+    version: int
     pedidoID: int
     numeroPedido: Optional[int] = None
     codigoPedido: Optional[str] = None
@@ -246,6 +247,7 @@ class PedidoDetalleProducto(BaseModel):
 
 
 class PedidoDetalleResponse(BaseModel):
+    version: int
     pedidoID: int
     numeroPedido: Optional[int] = None
     codigoPedido: Optional[str] = None

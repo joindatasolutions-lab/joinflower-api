@@ -11,6 +11,18 @@ ESTADO_NO_ENTREGADO = "NoEntregado"
 ESTADO_CANCELADO = "Cancelado"
 
 
+class DomicilioEvidenciasResponse(BaseModel):
+    numero_pedido: int
+    id_pedido: int
+    id_entrega: int | None = None
+    estado: str | None = None
+    firma_nombre: str | None = None
+    firma_documento: str | None = None
+    observaciones: str | None = None
+    evidencia_entrega_url: str | None = None
+    evidencia_firma_url: str | None = None
+
+
 class DomiciliarioItem(BaseModel):
     idDomiciliario: int
     usuarioID: int | None = None

@@ -200,21 +200,21 @@ def test_apply_pedido_domicilio_amounts_forced_recalc_prefers_resolved_over_payl
 
 
 def test_update_detail_price_payload_accepts_precio_unitario_alias():
-    payload = ActualizarDetallePedidoRequest(detalleID=10, precioUnitario=120000)
+    payload = ActualizarDetallePedidoRequest(version=1, detalleID=10, precioUnitario=120000)
     missing = object()
 
     assert _payload_producto_precio_value(payload, missing) == 120000
 
 
 def test_update_detail_ident_type_payload_accepts_tipo_ident_alias():
-    payload = ActualizarDetallePedidoRequest(detalleID=10, tipoIdent="NIT")
+    payload = ActualizarDetallePedidoRequest(version=1, detalleID=10, tipoIdent="NIT")
     missing = object()
 
     assert _payload_cliente_tipo_ident_value(payload, missing) == "NIT"
 
 
 def test_update_detail_ident_type_payload_accepts_nested_cliente_alias():
-    payload = ActualizarDetallePedidoRequest(detalleID=10, cliente={"tipoIdent": "NIT"})
+    payload = ActualizarDetallePedidoRequest(version=1, detalleID=10, cliente={"tipoIdent": "NIT"})
     missing = object()
 
     assert _payload_cliente_tipo_ident_value(payload, missing) == "NIT"
