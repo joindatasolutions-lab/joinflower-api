@@ -4203,6 +4203,9 @@ def eliminar_detalle_pedido(
         estado_cancelado_id = produccion_service.estado_produccion_id(db, produccion_service.ESTADO_CANCELADO)
         now = colombia_now_naive()
         for produccion in producciones_detalle:
+            # Preserve production history without retaining a FK to the deleted line,
+            # including productions that were already cancelled.
+            produccion.pedidoDetalleID = None
             if int(produccion.estado or 0) == int(estado_cancelado_id):
                 continue
             if not produccion_service.transicion_produccion_permitida(
@@ -4227,6 +4230,8 @@ def eliminar_detalle_pedido(
                 else nota_cancelacion
             )
 
+        # Persist the FK updates before deleting their referenced detail.
+        db.flush()
         db.delete(detalle)
         db.flush()
         cliente = db.query(Cliente).filter(Cliente.idCliente == pedido.clienteID, Cliente.empresaID == pedido.empresaID).first()
