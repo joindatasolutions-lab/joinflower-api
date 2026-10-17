@@ -2517,7 +2517,7 @@ def _factura_impresa_condition():
 
 
 def _pedido_list_statistics(summary_query, *, fecha_hoy: date | None = None):
-    """Aggregate filtered orders; Hoy uses fechaPedido in Colombia, [start, end)."""
+    """Aggregate the full filtered period before pagination; retain daily KPIs."""
     inicio = datetime.combine(fecha_hoy or colombia_now_naive().date(), datetime.min.time())
     hoy = and_(Pedido.fechaPedido >= inicio, Pedido.fechaPedido < inicio + timedelta(days=1))
     estado_sql = func.upper(func.trim(func.coalesce(EstadoPedido.nombreEstado, "")))
@@ -2537,9 +2537,15 @@ def _pedido_list_statistics(summary_query, *, fecha_hoy: date | None = None):
             else_=0,
         )), 0),
         count_if(and_(hoy, or_(approved, pending))),
+        func.coalesce(func.sum(case(
+            (approved, func.coalesce(Pedido.totalBruto, 0) + func.coalesce(Pedido.totalIva, 0)),
+            else_=0,
+        )), 0),
+        count_if(or_(approved, pending)),
     ).one()
     kpis = PedidoListKpiSummary(
         ventaHoy=float(totals[5]), pedidosHoy=int(totals[6]),
+        ventaPeriodo=float(totals[7]), pedidosPeriodo=int(totals[8]),
         aprobados=int(totals[2]), pendientes=int(totals[3]), cancelados=int(totals[4]),
         sinImprimir=int(totals[1]),
     )

@@ -53,7 +53,7 @@ def test_delivery_attempt_precedes_id_and_ties_use_id(db):
 @pytest.mark.parametrize("printed, page, expected, total", [(False, 1, [5, 4], 5), (False, 2, [3, 2], 5), (False, 3, [1], 5), (False, 4, [], 5), (True, 1, [5, 3], 3), (True, 2, [1], 3)])
 def test_order_page_and_kpis_are_computed_in_database(db, monkeypatch, printed, page, expected, total):
     calls = []
-    monkeypatch.setattr(router, "colombia_now_naive", lambda: datetime(2026, 9, 1, 12))
+    monkeypatch.setattr(router, "colombia_now_naive", lambda: datetime(2026, 10, 17, 12))
     monkeypatch.setattr(router, "_factura_impresa_condition", lambda: Pedido.idPedido.in_([2, 4]) if printed else literal(False))
     monkeypatch.setattr(router, "_load_pago_resumen_batch", lambda db, **kw: calls.append(kw["pedido_ids"]) or {})
     monkeypatch.setattr(router, "_tenant_order_rules", lambda *a: {})
@@ -68,7 +68,10 @@ def test_order_page_and_kpis_are_computed_in_database(db, monkeypatch, printed, 
     )
     assert [item.pedidoID for item in result.items] == expected
     assert result.total == total
-    assert result.kpis.ventaHoy == 500
+    assert result.kpis.ventaPeriodo == 500
+    assert result.kpis.pedidosPeriodo == 5
+    assert result.kpis.ventaHoy == 0
+    assert result.kpis.pedidosHoy == 0
     assert result.facturasPendientesImpresion == total
     assert calls == ([expected] if expected else [])
 

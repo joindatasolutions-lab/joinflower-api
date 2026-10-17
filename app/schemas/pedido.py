@@ -215,6 +215,8 @@ class PedidoListItem(BaseModel):
 
 
 class PedidoListKpiSummary(BaseModel):
+    ventaPeriodo: float = 0
+    pedidosPeriodo: int = 0
     ventaHoy: float = 0
     pedidosHoy: int = 0
     aprobados: int = 0

@@ -1,6 +1,6 @@
 # Indicadores y consultas auxiliares de pedidos
 
-`ventaHoy` y `pedidosHoy` usan `fecha_pedido` en hora de Colombia: desde las 00:00 incluidas hasta las 00:00 del d?a siguiente excluidas. Se intersectan con los filtros del listado, incluso al buscar; no dependen de la p?gina. Un rango hist?rico sin pedidos de hoy devuelve cero en ambos indicadores.
+`ventaPeriodo` y `pedidosPeriodo` resumen todos los pedidos que cumplen los filtros del listado, independientemente de la fecha actual y de la pagina. Las tarjetas de ventas y pedidos del periodo deben consumir estos campos. `ventaHoy` y `pedidosHoy` conservan el calculo diario en hora de Colombia por compatibilidad.
 
 Se conserva la clasificaci?n comercial: `pedidosHoy` cuenta CREADO, PENDIENTE, APROBADO y PAGADO; `ventaHoy` suma total_bruto + total_iva de APROBADO y PAGADO, tratando valores nulos como cero. Los contadores aprobados, pendientes, cancelados y sinImprimir abarcan todos los candidatos filtrados. Como antes, sinImprimir restringe las filas y el total de paginaci?n, pero no los dem?s indicadores.
 

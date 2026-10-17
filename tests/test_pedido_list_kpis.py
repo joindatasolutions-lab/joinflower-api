@@ -27,10 +27,20 @@ def test_statistics_use_colombia_day_and_all_filtered_orders(db, monkeypatch):
     assert total == 5
     assert kpis.ventaHoy == 119
     assert kpis.pedidosHoy == 2
+    assert kpis.ventaPeriodo == 319
+    assert kpis.pedidosPeriodo == 4
     assert (kpis.aprobados, kpis.pendientes, kpis.cancelados, kpis.sinImprimir) == (3, 1, 1, 3)
     total, empty, _ = router._pedido_list_statistics(query.filter(Pedido.sucursalID == 999), fecha_hoy=date(2026, 9, 2))
     assert total == 0
     assert all(value == 0 for value in empty.model_dump().values())
+
+    # A historical range must keep its totals even when today's KPIs are zero.
+    historical = query.filter(Pedido.fechaPedido < datetime(2026, 9, 2))
+    total, kpis, _ = router._pedido_list_statistics(historical, fecha_hoy=date(2026, 10, 17))
+    assert total == 1
+    assert kpis.ventaHoy == kpis.pedidosHoy == 0
+    assert kpis.ventaPeriodo == 100
+    assert kpis.pedidosPeriodo == 1
 
 
 @pytest.mark.parametrize("total, allowed", [(100, True), (99, False), (0, False)])
