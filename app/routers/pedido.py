@@ -2688,13 +2688,13 @@ def listar_pedidos(
 
     has_search = bool(str(q or "").strip())
 
-    if estado and not has_search:
+    if estado:
         base = base.filter(func.upper(EstadoPedido.nombreEstado) == estado.upper())
 
     fecha_desde_filter = _fecha_filtro_pedido(fecha_desde)
     fecha_hasta_filter = _fecha_filtro_pedido(fecha_hasta)
 
-    if filtrar_por_entrega and not has_search:
+    if filtrar_por_entrega and (fecha_desde_filter or fecha_hasta_filter):
         base = _filtrar_pedidos_por_rango_entrega(
             base,
             db,
@@ -2702,10 +2702,10 @@ def listar_pedidos(
             fecha_hasta=fecha_hasta_filter.date() if fecha_hasta_filter else None,
         )
     else:
-        if fecha_desde_filter and not has_search:
+        if fecha_desde_filter:
             base = base.filter(Pedido.fechaPedido >= fecha_desde_filter)
 
-        if fecha_hasta_filter and not has_search:
+        if fecha_hasta_filter:
             base = base.filter(Pedido.fechaPedido <= fecha_hasta_filter)
 
     if solo_tienda:
@@ -2717,17 +2717,17 @@ def listar_pedidos(
     if has_search:
         base = base.filter(order_search_condition(f"%{q.strip()}%"))
 
+    if sin_imprimir:
+        estado_sql = func.upper(func.trim(func.coalesce(EstadoPedido.nombreEstado, "")))
+        base = base.filter(estado_sql.in_(["APROBADO", "PAGADO"]), ~_factura_impresa_condition())
+
     candidates = base.with_entities(Pedido.idPedido.label("pedido_id")).distinct().subquery()
     summary_query = (
         db.query(Pedido).join(candidates, candidates.c.pedido_id == Pedido.idPedido)
         .outerjoin(EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID)
     )
-    total, kpis, invoice_pending = _pedido_list_statistics(summary_query)
+    total, kpis, _ = _pedido_list_statistics(summary_query)
     facturas_pendientes_impresion = kpis.sinImprimir
-    if sin_imprimir:
-        total = facturas_pendientes_impresion
-    if sin_imprimir:
-        base = base.filter(invoice_pending)
     page_rows = (
         base.distinct().order_by(
             text('"numeroOrdenFlag" DESC' if orden_consecutivo is True else '"numeroOrdenFlag"'),
