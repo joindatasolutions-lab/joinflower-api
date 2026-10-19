@@ -979,8 +979,6 @@ def _load_empresa_menu_rows(db: Session, *, empresa_id: int, seccion: str = "ped
             opciones = []
         codigo = str(row["codigo"])
         opciones_normalizadas = [str(item) for item in opciones if str(item).strip()]
-        if codigo == "pedido_metodos_pago" and "RAPPI" not in opciones_normalizadas:
-            opciones_normalizadas.append("RAPPI")
         result.append(
             {
                 "codigo": codigo,
