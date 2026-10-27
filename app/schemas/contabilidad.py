@@ -73,6 +73,51 @@ class CajaListResponse(BaseModel):
     items: list[CajaDiaItem]
 
 
+class CajaGastoCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    empresaID: int = Field(validation_alias=AliasChoices("empresaID", "empresa_id"), gt=0)
+    sucursalID: int = Field(validation_alias=AliasChoices("sucursalID", "sucursal_id"), gt=0)
+    fechaOperacion: date = Field(validation_alias=AliasChoices("fechaOperacion", "fecha_operacion", "fecha"))
+    concepto: str = Field(min_length=2, max_length=80)
+    descripcion: str | None = Field(default=None, max_length=500)
+    monto: Decimal = Field(gt=Decimal("0"))
+    usuarioID: int | None = Field(default=None, validation_alias=AliasChoices("usuarioID", "usuario_id"), gt=0)
+
+    @field_validator("fechaOperacion", mode="before")
+    @classmethod
+    def parse_fecha_operacion(cls, value):
+        return _parse_front_date(value)
+
+    @field_validator("monto", mode="before")
+    @classmethod
+    def parse_monto(cls, value):
+        return _parse_front_money(value)
+
+
+class CajaGastoItem(BaseModel):
+    id: int
+    empresaID: int
+    sucursalID: int
+    fecha: date
+    concepto: str
+    descripcion: str = ""
+    monto: Decimal
+    usuarioID: int | None = None
+    createdAt: datetime | None = None
+
+
+class CajaGastoListResponse(BaseModel):
+    totalGastos: Decimal
+    items: list[CajaGastoItem]
+
+
+class CajaGastoCreateResponse(BaseModel):
+    status: str
+    item: CajaGastoItem
+    totalGastos: Decimal
+
+
 class ContabilidadFloristRow(BaseModel):
     id: int
     nombre: str

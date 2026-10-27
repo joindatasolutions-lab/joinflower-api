@@ -16,6 +16,10 @@ from app.schemas.contabilidad import (
     CajaCierreResponse,
     CajaDiaItem,
     CajaEfectivoDiaResponse,
+    CajaGastoCreateRequest,
+    CajaGastoCreateResponse,
+    CajaGastoItem,
+    CajaGastoListResponse,
     CajaListResponse,
     ContabilidadDomiciliarioInfo,
     ContabilidadDomiciliarioPedidoItem,
@@ -82,6 +86,20 @@ def _row_to_caja_item(row) -> CajaDiaItem:
     )
 
 
+def _row_to_caja_gasto(row) -> CajaGastoItem:
+    return CajaGastoItem(
+        id=int(row["id_caja_gasto"]),
+        empresaID=int(row["empresa_id"]),
+        sucursalID=int(row["sucursal_id"]),
+        fecha=row["fecha_operacion"],
+        concepto=str(row["concepto"]),
+        descripcion=str(row["descripcion"] or ""),
+        monto=_money(row["monto"]),
+        usuarioID=(int(row["usuario_id"]) if row["usuario_id"] is not None else None),
+        createdAt=row["created_at"],
+    )
+
+
 def _relation_exists(db: Session, relation_name: str) -> bool:
     return caja_service.relation_exists(db, relation_name)
 
@@ -121,7 +139,12 @@ def _build_caja_draft(db: Session, *, empresa_id: int, sucursal_id: int, fecha_o
         sucursal_id=int(sucursal_id),
         fecha_operacion=fecha_operacion,
     )
-    total_gastos = Decimal("0")
+    total_gastos = caja_service.load_gastos_total(
+        db,
+        empresa_id=int(empresa_id),
+        sucursal_id=int(sucursal_id),
+        fecha_operacion=fecha_operacion,
+    )
     total_efectivo = base_inicial + efectivo_ventas - total_gastos
     return CajaDiaItem(
         fecha_operacion=fecha_operacion,
@@ -645,6 +668,115 @@ def listar_cierres_caja(
     return CajaListResponse(items=[_row_to_caja_item(row) for row in rows])
 
 
+@router.get("/caja/gastos", response_model=CajaGastoListResponse)
+def listar_gastos_caja(
+    empresa_id: int = Query(..., alias="empresaID", gt=0),
+    sucursal_id: int = Query(..., alias="sucursalID", gt=0),
+    fecha_raw: str = Query(..., alias="fecha"),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    fecha_operacion = _parse_query_date(fecha_raw)
+    assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
+    if not _relation_exists(db, "caja_gasto"):
+        return CajaGastoListResponse(totalGastos=Decimal("0"), items=[])
+
+    rows = db.execute(
+        text(
+            """
+            SELECT id_caja_gasto, empresa_id, sucursal_id, fecha_operacion,
+                   concepto, descripcion, monto, usuario_id, created_at
+            FROM petalops.caja_gasto
+            WHERE empresa_id = :empresa_id
+              AND sucursal_id = :sucursal_id
+              AND fecha_operacion = :fecha_operacion
+            ORDER BY created_at DESC, id_caja_gasto DESC
+            """
+        ),
+        {"empresa_id": int(empresa_id), "sucursal_id": int(sucursal_id), "fecha_operacion": fecha_operacion},
+    ).mappings().all()
+    items = [_row_to_caja_gasto(row) for row in rows]
+    return CajaGastoListResponse(totalGastos=sum((item.monto for item in items), Decimal("0")), items=items)
+
+
+@router.post(
+    "/caja/gastos",
+    response_model=CajaGastoCreateResponse,
+    dependencies=[Depends(require_module_access("contabilidad", "puedeEditar"))],
+)
+def crear_gasto_caja(
+    payload: CajaGastoCreateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(payload.empresaID))
+    assert_sucursal_empresa(db, payload.empresaID, payload.sucursalID)
+    if payload.fechaOperacion > date.today():
+        raise HTTPException(status_code=422, detail="No se pueden registrar gastos en una fecha futura.")
+    if not _relation_exists(db, "caja_gasto"):
+        raise HTTPException(status_code=503, detail="La estructura de gastos de caja no esta disponible.")
+
+    usuario_id = _resolve_usuario_id(
+        db,
+        empresa_id=int(payload.empresaID),
+        requested_user_id=payload.usuarioID,
+        auth=auth,
+    )
+    try:
+        row = db.execute(
+            text(
+                """
+                INSERT INTO petalops.caja_gasto (
+                    empresa_id, sucursal_id, fecha_operacion, concepto,
+                    descripcion, monto, usuario_id
+                )
+                VALUES (
+                    :empresa_id, :sucursal_id, :fecha_operacion, :concepto,
+                    :descripcion, :monto, :usuario_id
+                )
+                RETURNING id_caja_gasto, empresa_id, sucursal_id, fecha_operacion,
+                          concepto, descripcion, monto, usuario_id, created_at
+                """
+            ),
+            {
+                "empresa_id": int(payload.empresaID),
+                "sucursal_id": int(payload.sucursalID),
+                "fecha_operacion": payload.fechaOperacion,
+                "concepto": payload.concepto.strip(),
+                "descripcion": (payload.descripcion or "").strip() or None,
+                "monto": payload.monto,
+                "usuario_id": usuario_id,
+            },
+        ).mappings().one()
+        caja_service.refresh_caja_por_gastos(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            fecha_operacion=payload.fechaOperacion,
+            usuario_id=usuario_id,
+        )
+        total_gastos = caja_service.load_gastos_total(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            fecha_operacion=payload.fechaOperacion,
+        )
+        item = _row_to_caja_gasto(row)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        if str(exc) == "gastos_exceden_disponible":
+            raise HTTPException(status_code=422, detail="El gasto supera el efectivo disponible en caja.") from exc
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        contabilidad_logger.error("Error SQL registrando gasto de caja", exc_info=True)
+        raise HTTPException(status_code=400, detail="No fue posible registrar el gasto de caja.") from exc
+
+    return CajaGastoCreateResponse(status="ok", item=item, totalGastos=total_gastos)
+
+
 @router.get("/caja/dia", response_model=CajaDiaItem)
 def obtener_caja_dia(
     empresa_id: int = Query(..., alias="empresaID", gt=0),
@@ -736,7 +868,13 @@ def guardar_cierre_caja(
         sucursal_id=sucursal_id,
         fecha_operacion=fecha_operacion,
     )
-    gasto = payload.gasto
+    gasto_detallado = caja_service.load_gastos_total(
+        db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        fecha_operacion=fecha_operacion,
+    )
+    gasto = gasto_detallado if gasto_detallado > 0 else payload.gasto
     try:
         total_efectivo, total_contado, sobrante, faltante, nueva_base = caja_service.calculate_cierre(
             base_inicial=base_inicial,
@@ -748,7 +886,7 @@ def guardar_cierre_caja(
     except ValueError as exc:
         messages = {
             "gastos_exceden_disponible": "Los gastos no pueden superar la base inicial mas los ingresos en efectivo.",
-            "guardado_excede_contado": "El monto guardado no puede superar el total fisico contado.",
+            "guardado_excede_contado": "La caja menor no puede superar el total fisico contado.",
         }
         raise HTTPException(status_code=422, detail=messages.get(str(exc), "Los valores del cierre de caja no son validos.")) from exc
 

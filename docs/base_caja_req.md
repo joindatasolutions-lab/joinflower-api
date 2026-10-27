@@ -11,12 +11,12 @@ diario sin trasladar sobrantes o faltantes como saldos negativos del dia siguien
 | --- | --- |
 | Base inicial | Efectivo disponible al abrir la caja. |
 | Ingresos en efectivo | Se calculan desde los pagos en efectivo de pedidos validos. |
-| Gastos | Pagos y retiros realizados con dinero de caja. |
+| Gastos | Suma de movimientos registrados en `caja_gasto` para la empresa, sucursal y fecha. |
 | Efectivo esperado | `base inicial + ingresos en efectivo - gastos`. |
 | Total contado | Dinero fisico contado durante el arqueo. |
 | Sobrante | `max(total contado - efectivo esperado, 0)`. |
 | Faltante | `max(efectivo esperado - total contado, 0)`. |
-| Guardado | Dinero retirado y entregado a contabilidad. |
+| Caja menor | Dinero que permanece disponible como fondo operativo; se conserva en `caja.guardado` por compatibilidad. |
 | Nueva base | `total contado - guardado`. |
 
 ## Validaciones
@@ -29,6 +29,9 @@ diario sin trasladar sobrantes o faltantes como saldos negativos del dia siguien
 5. La nueva base del ultimo cierre anterior nunca se carga como un valor negativo.
 6. Los valores calculados enviados por el frontend no son fuente de verdad; el
    backend recalcula efectivo esperado, sobrante, faltante y nueva base.
+7. Cada gasto debe guardar fecha, concepto, descripcion, valor, tenant,
+   sucursal y usuario. El consolidado de caja se actualiza en la misma
+   transaccion que crea el movimiento.
 
 ## Ejemplo
 
@@ -38,7 +41,7 @@ diario sin trasladar sobrantes o faltantes como saldos negativos del dia siguien
 - Efectivo esperado: `$600.000`.
 - Total contado: `$590.000`.
 - Faltante: `$10.000`.
-- Guardado: `$500.000`.
+- Caja menor: `$500.000`.
 - Nueva base: `$90.000`.
 
 El faltante queda auditado por separado y no se descuenta nuevamente de la nueva

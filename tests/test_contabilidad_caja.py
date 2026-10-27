@@ -19,7 +19,7 @@ from app.routers.contabilidad import (
     obtener_pedidos_domiciliario_contabilidad,
     obtener_resumen_floristas_contabilidad,
 )
-from app.schemas.contabilidad import CajaCierreRequest
+from app.schemas.contabilidad import CajaCierreRequest, CajaGastoCreateRequest
 from app.services import caja_service
 
 
@@ -49,6 +49,33 @@ def test_caja_cierre_request_accepts_camel_case():
     assert payload.totalContado == Decimal("152000")
     assert payload.nuevaBase == Decimal("115000")
     assert payload.usuarioID == 9
+
+
+def test_caja_gasto_request_normalizes_frontend_values():
+    payload = CajaGastoCreateRequest(
+        empresaID=3,
+        sucursalID=2,
+        fecha="27/10/2026",
+        concepto="Transporte",
+        descripcion="Compra urgente",
+        monto="$ 25.000",
+        usuarioID=9,
+    )
+
+    assert payload.fechaOperacion == date(2026, 10, 27)
+    assert payload.monto == Decimal("25000")
+    assert payload.concepto == "Transporte"
+
+
+def test_caja_gasto_request_rejects_zero_amount():
+    with pytest.raises(ValueError):
+        CajaGastoCreateRequest(
+            empresaID=3,
+            sucursalID=2,
+            fecha="2026-10-27",
+            concepto="Otros",
+            monto=0,
+        )
 
 
 def test_caja_cierre_request_accepts_snake_case():

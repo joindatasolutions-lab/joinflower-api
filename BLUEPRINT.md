@@ -83,6 +83,7 @@ habilitadas por sus permisos.
 | 2026-10-27 | Sincronizacion inicial y creacion del blueprint general | `ae0e91b` | `9277007` | Sin cambios | Ambos repositorios coinciden con `origin/main` |
 | 2026-10-27 | Costos por paquete y precios publicos de Flores | Pendiente de commit | Pendiente de commit | `inventario.costo_paquete`, `insumo.precio_venta_paquete` | Migracion aplicada; pruebas de backend y frontend correctas |
 | 2026-10-27 | Arqueo fisico y control de diferencias de caja | Pendiente de commit | Pendiente de commit | `caja.total_contado`, `caja.sobrante`, `caja.faltante` | Migracion aplicada; 250 cierres historicos conservados y prueba transaccional con rollback correcta |
+| 2026-10-27 | Gastos detallados y caja menor | Pendiente de commit | Pendiente de commit | `caja_gasto`; consolidado en `caja.gasto` | 117 gastos historicos migrados; suma detallada y consolidada sin diferencias |
 
 ## Inventario: Costos Y Precios
 
@@ -116,6 +117,13 @@ dia siguiente. Los cierres anteriores conservan `total_contado` en `NULL` para
 no inventar arqueos historicos. La especificacion completa esta en
 `docs/base_caja_req.md` y la migracion en
 `sql/alter_contabilidad_caja_arqueo.sql`.
+
+Los gastos pagados en efectivo se registran en `petalops.caja_gasto`, aislados
+por empresa y sucursal. Su creacion recalcula dentro de la misma transaccion el
+total de gastos, efectivo esperado, diferencias y nueva base. El nombre visible
+`Caja menor` conserva internamente la columna `caja.guardado` para mantener
+compatibilidad con cierres y contratos anteriores. La migracion se encuentra en
+`sql/alter_contabilidad_caja_gastos.sql`.
 
 ## Regla De Actualizacion
 

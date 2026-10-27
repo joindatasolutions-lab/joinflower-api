@@ -194,6 +194,86 @@ def load_base_anterior(db: Session, *, empresa_id: int, sucursal_id: int, fecha_
     return money(row[0] if row else 0)
 
 
+def load_gastos_total(db: Session, *, empresa_id: int, sucursal_id: int, fecha_operacion: date) -> Decimal:
+    if not relation_exists(db, "caja_gasto"):
+        return Decimal("0")
+    row = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(monto), 0)
+            FROM petalops.caja_gasto
+            WHERE empresa_id = :empresa_id
+              AND sucursal_id = :sucursal_id
+              AND fecha_operacion = :fecha_operacion
+            """
+        ),
+        {"empresa_id": int(empresa_id), "sucursal_id": int(sucursal_id), "fecha_operacion": fecha_operacion},
+    ).first()
+    return money(row[0] if row else 0)
+
+
+def refresh_caja_por_gastos(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    fecha_operacion: date,
+    usuario_id: int | None = None,
+) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT base, guardado, total_contado, observacion, usuario_id
+            FROM petalops.caja
+            WHERE empresa_id = :empresa_id
+              AND sucursal_id = :sucursal_id
+              AND fecha = :fecha_operacion
+            LIMIT 1
+            """
+        ),
+        {"empresa_id": int(empresa_id), "sucursal_id": int(sucursal_id), "fecha_operacion": fecha_operacion},
+    ).mappings().first()
+
+    base = money(row["base"] if row else None)
+    if not row:
+        base = load_base_anterior(db, empresa_id=empresa_id, sucursal_id=sucursal_id, fecha_operacion=fecha_operacion)
+    efectivo = load_efectivo_ventas(db, empresa_id=empresa_id, sucursal_id=sucursal_id, fecha_operacion=fecha_operacion)
+    gasto = load_gastos_total(db, empresa_id=empresa_id, sucursal_id=sucursal_id, fecha_operacion=fecha_operacion)
+    total_efectivo = base + efectivo - gasto
+    if total_efectivo < 0:
+        raise ValueError("gastos_exceden_disponible")
+
+    guardado = money(row["guardado"] if row else None)
+    total_contado = money(row["total_contado"]) if row and row["total_contado"] is not None else None
+    if total_contado is None:
+        sobrante = Decimal("0")
+        faltante = Decimal("0")
+        nueva_base = max(total_efectivo - guardado, Decimal("0"))
+    else:
+        diferencia = total_contado - total_efectivo
+        sobrante = max(diferencia, Decimal("0"))
+        faltante = max(-diferencia, Decimal("0"))
+        nueva_base = max(total_contado - guardado, Decimal("0"))
+
+    upsert_caja(
+        db,
+        empresa_id=empresa_id,
+        sucursal_id=sucursal_id,
+        fecha=fecha_operacion,
+        base=base,
+        efectivo=efectivo,
+        gasto=gasto,
+        total_efectivo=total_efectivo,
+        guardado=guardado,
+        nueva_base=nueva_base,
+        total_contado=total_contado,
+        sobrante=sobrante,
+        faltante=faltante,
+        observacion=str(row["observacion"] or "") if row else "",
+        usuario_id=usuario_id if usuario_id is not None else (row["usuario_id"] if row else None),
+    )
+
+
 def upsert_caja(
     db: Session,
     *,
