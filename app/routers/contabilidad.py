@@ -66,6 +66,7 @@ def _calculate_nueva_base(
 
 
 def _row_to_caja_item(row) -> CajaDiaItem:
+    total_contado = row.get("total_contado")
     return CajaDiaItem(
         fecha_operacion=row["fecha"],
         base_inicial=_money(row["base"]),
@@ -74,6 +75,9 @@ def _row_to_caja_item(row) -> CajaDiaItem:
         total_efectivo=_money(row["total_efectivo"]),
         monto_guardado=_money(row["guardado"]),
         nueva_base=_money(row["nueva_base"]),
+        total_contado=(_money(total_contado) if total_contado is not None else None),
+        sobrante=_money(row.get("sobrante")),
+        faltante=_money(row.get("faltante")),
         observacion=row["observacion"] or "",
     )
 
@@ -132,6 +136,9 @@ def _build_caja_draft(db: Session, *, empresa_id: int, sucursal_id: int, fecha_o
             total_gastos=total_gastos,
             monto_guardado=Decimal("0"),
         ),
+        total_contado=None,
+        sobrante=Decimal("0"),
+        faltante=Decimal("0"),
         observacion="",
     )
 
@@ -157,7 +164,15 @@ def _load_caja_dia(db: Session, *, empresa_id: int, sucursal_id: int, fecha_oper
     )
     item.efectivo_ventas = efectivo_real
     item.total_efectivo = item.base_inicial + efectivo_real - item.total_gastos
-    item.nueva_base = item.total_efectivo - item.monto_guardado
+    if item.total_contado is None:
+        item.sobrante = Decimal("0")
+        item.faltante = Decimal("0")
+        item.nueva_base = max(item.total_efectivo - item.monto_guardado, Decimal("0"))
+    else:
+        diferencia = item.total_contado - item.total_efectivo
+        item.sobrante = max(diferencia, Decimal("0"))
+        item.faltante = max(-diferencia, Decimal("0"))
+        item.nueva_base = max(item.total_contado - item.monto_guardado, Decimal("0"))
     return item
 
 
@@ -173,6 +188,9 @@ def _upsert_caja(
     total_efectivo: Decimal,
     guardado: Decimal,
     nueva_base: Decimal,
+    total_contado: Decimal | None,
+    sobrante: Decimal,
+    faltante: Decimal,
     observacion: str,
     usuario_id: int | None,
 ) -> None:
@@ -187,6 +205,9 @@ def _upsert_caja(
         total_efectivo=total_efectivo,
         guardado=guardado,
         nueva_base=nueva_base,
+        total_contado=total_contado,
+        sobrante=sobrante,
+        faltante=faltante,
         observacion=observacion,
         usuario_id=usuario_id,
     )
@@ -716,8 +737,20 @@ def guardar_cierre_caja(
         fecha_operacion=fecha_operacion,
     )
     gasto = payload.gasto
-    total_efectivo = base_inicial + efectivo - gasto
-    nueva_base = total_efectivo - monto_guardado
+    try:
+        total_efectivo, total_contado, sobrante, faltante, nueva_base = caja_service.calculate_cierre(
+            base_inicial=base_inicial,
+            efectivo_ventas=efectivo,
+            total_gastos=gasto,
+            total_contado=payload.totalContado,
+            monto_guardado=monto_guardado,
+        )
+    except ValueError as exc:
+        messages = {
+            "gastos_exceden_disponible": "Los gastos no pueden superar la base inicial mas los ingresos en efectivo.",
+            "guardado_excede_contado": "El monto guardado no puede superar el total fisico contado.",
+        }
+        raise HTTPException(status_code=422, detail=messages.get(str(exc), "Los valores del cierre de caja no son validos.")) from exc
 
     try:
         _upsert_caja(
@@ -731,6 +764,9 @@ def guardar_cierre_caja(
             total_efectivo=total_efectivo,
             guardado=monto_guardado,
             nueva_base=nueva_base,
+            total_contado=total_contado,
+            sobrante=sobrante,
+            faltante=faltante,
             observacion=observacion,
             usuario_id=usuario_id,
         )

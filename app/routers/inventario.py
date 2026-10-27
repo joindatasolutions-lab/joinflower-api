@@ -102,6 +102,7 @@ def _to_item(
     observaciones: str | None = None,
     marca: str | None = None,
     precio_venta: Decimal | None = None,
+    precio_venta_paquete: Decimal | None = None,
     vendible_unidad: bool = False,
     producto_venta_id: int | None = None,
     proveedor_id: int | None = None,
@@ -126,6 +127,7 @@ def _to_item(
         observaciones=(str(observaciones) if observaciones is not None else None),
         marca=(str(marca) if marca is not None else None),
         precioVenta=(Decimal(precio_venta) if precio_venta is not None else None),
+        precioVentaPaquete=(Decimal(precio_venta_paquete) if precio_venta_paquete is not None else None),
         vendibleUnidad=bool(vendible_unidad),
         productoVentaID=(int(producto_venta_id) if producto_venta_id is not None else None),
         proveedorID=(int(proveedor_id) if proveedor_id is not None else None),
@@ -134,6 +136,7 @@ def _to_item(
         stockActual=stock_actual,
         stockMinimo=stock_minimo,
         valorUnitario=Decimal(row.valorUnitario or 0),
+        costoPaquete=(Decimal(row.costoPaquete) if row.costoPaquete is not None else None),
         activo=bool(row.activo),
         estadoStock=_status_stock(bool(row.activo), stock_actual, stock_minimo),
         fechaUltimaActualizacion=row.fechaUltimaActualizacion,
@@ -310,6 +313,7 @@ def _to_item_from_db(db: Session, item: Inventario) -> InventarioItem:
         observaciones=(getattr(insumo, "observaciones", None) if insumo else None),
         marca=(str(insumo.marca) if insumo and insumo.marca else None),
         precio_venta=(Decimal(insumo.precioVenta) if insumo and insumo.precioVenta is not None else None),
+        precio_venta_paquete=(Decimal(insumo.precioVentaPaquete) if insumo and insumo.precioVentaPaquete is not None else None),
         vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo else False,
         producto_venta_id=(int(getattr(insumo, "productoVentaID")) if insumo and getattr(insumo, "productoVentaID", None) is not None else None),
         proveedor_id=(int(insumo.proveedorID) if insumo and insumo.proveedorID is not None else None),
@@ -820,6 +824,7 @@ def listar_inventario(
                 observaciones=(getattr(insumo, "observaciones", None) if insumo else None),
                 marca=(str(insumo.marca) if insumo and has_categoria_col and insumo.marca else None),
                 precio_venta=(Decimal(insumo.precioVenta) if insumo and has_categoria_col and insumo.precioVenta is not None else None),
+                precio_venta_paquete=(Decimal(insumo.precioVentaPaquete) if insumo and has_categoria_col and insumo.precioVentaPaquete is not None else None),
                 vendible_unidad=bool(getattr(insumo, "vendibleUnidad", False)) if insumo and has_vendible_col else False,
                 producto_venta_id=(int(getattr(insumo, "productoVentaID")) if insumo and has_vendible_col and getattr(insumo, "productoVentaID", None) is not None else None),
                 proveedor_id=(int(proveedor.idProveedor) if proveedor else None),
@@ -866,6 +871,7 @@ def crear_item_inventario(
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
     has_dias_vida_util = _has_column(db, "insumo", "dias_vida_util")
     has_observaciones = _has_column(db, "insumo", "observaciones")
+    has_precio_venta_paquete = _has_column(db, "insumo", "precio_venta_paquete")
     now = colombia_now_naive()
 
     try:
@@ -1006,18 +1012,39 @@ def crear_item_inventario(
                 },
             )
 
+        if has_precio_venta_paquete:
+            db.execute(
+                text(
+                    """
+                    UPDATE petalops.insumo
+                    SET precio_venta_paquete = :precio_venta_paquete
+                    WHERE id_insumo = :insumo_id
+                      AND empresa_id = :empresa_id
+                    """
+                ),
+                {
+                    "precio_venta_paquete": (
+                        payload.precioVentaPaquete
+                        if payload.categoria.strip().upper() == "FLORES"
+                        else None
+                    ),
+                    "insumo_id": insumo_id,
+                    "empresa_id": int(payload.empresaID),
+                },
+            )
+
         item_row = db.execute(
             text(
                 """
                 INSERT INTO petalops.inventario (
                     empresa_id, sucursal_id, insumo_id,
                     stock_actual, stock_reservado, stock_minimo,
-                    valor_unitario, activo, fechaultimaactualizacion,
+                    valor_unitario, costo_paquete, activo, fechaultimaactualizacion,
                     created_at, updated_at
                 ) VALUES (
                     :empresa_id, :sucursal_id, :insumo_id,
                     :stock_actual, :stock_reservado, :stock_minimo,
-                    :valor_unitario, :activo, :fecha_actualizacion,
+                    :valor_unitario, :costo_paquete, :activo, :fecha_actualizacion,
                     :created_at, :updated_at
                 )
                 RETURNING id_inventario
@@ -1031,6 +1058,7 @@ def crear_item_inventario(
                 "stock_reservado": Decimal("0"),
                 "stock_minimo": payload.stockMinimo,
                 "valor_unitario": payload.valorUnitario,
+                "costo_paquete": payload.costoPaquete,
                 "activo": bool(payload.activo),
                 "fecha_actualizacion": now,
                 "created_at": now,
@@ -1100,6 +1128,7 @@ def actualizar_item_inventario(
     has_vendible = _has_column(db, "insumo", "vendible_unidad")
     has_dias_vida_util = _has_column(db, "insumo", "dias_vida_util")
     has_observaciones = _has_column(db, "insumo", "observaciones")
+    has_precio_venta_paquete = _has_column(db, "insumo", "precio_venta_paquete")
     now = colombia_now_naive()
 
     insumo.nombreInsumo = payload.nombre.strip()
@@ -1130,11 +1159,19 @@ def actualizar_item_inventario(
         insumo.marca = (payload.marca.strip() if payload.marca else None)
         insumo.precioVenta = payload.precioVenta
 
+    if has_precio_venta_paquete:
+        insumo.precioVentaPaquete = (
+            payload.precioVentaPaquete
+            if payload.categoria.strip().upper() == "FLORES"
+            else None
+        )
+
     if has_vendible:
         insumo.vendibleUnidad = bool(payload.vendibleUnidad)
 
     item.stockMinimo = payload.stockMinimo
     item.valorUnitario = payload.valorUnitario
+    item.costoPaquete = payload.costoPaquete
     item.fechaUltimaActualizacion = now
     item.updatedAt = now
 

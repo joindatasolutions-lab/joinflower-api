@@ -16,6 +16,7 @@ class Inventario(Base):
     stockReservado = Column("stock_reservado", Numeric(12, 4), nullable=False, default=0)
     stockMinimo = Column("stock_minimo", Numeric(12, 2), nullable=False, default=0)
     valorUnitario = Column("valor_unitario", Numeric(12, 2), nullable=False, default=0)
+    costoPaquete = Column("costo_paquete", Numeric(12, 2), nullable=True)
     activo = Column(Boolean, nullable=False, default=True, index=True)
     fechaUltimaActualizacion = Column("fechaultimaactualizacion", DateTime)
     createdAt = Column("created_at", DateTime)

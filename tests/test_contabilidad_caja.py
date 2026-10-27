@@ -33,6 +33,7 @@ def test_caja_cierre_request_accepts_camel_case():
         gasto=15000,
         totalEfectivo=155000,
         montoGuardado=40000,
+        totalContado=152000,
         nuevaBase=115000,
         usuarioID=9,
     )
@@ -45,6 +46,7 @@ def test_caja_cierre_request_accepts_camel_case():
     assert payload.gasto == Decimal("15000")
     assert payload.totalEfectivo == Decimal("155000")
     assert payload.montoGuardado == Decimal("40000")
+    assert payload.totalContado == Decimal("152000")
     assert payload.nuevaBase == Decimal("115000")
     assert payload.usuarioID == 9
 
@@ -133,12 +135,18 @@ def test_row_to_caja_item_maps_nulls_to_contract_defaults():
             "total_efectivo": Decimal("170000"),
             "guardado": Decimal("40000"),
             "nueva_base": Decimal("130000"),
+            "total_contado": None,
+            "sobrante": Decimal("0"),
+            "faltante": Decimal("0"),
             "observacion": None,
         }
     )
 
     assert item.efectivo_ventas == Decimal("0")
     assert item.total_gastos == Decimal("0")
+    assert item.total_contado is None
+    assert item.sobrante == Decimal("0")
+    assert item.faltante == Decimal("0")
     assert item.observacion == ""
 
 
@@ -180,6 +188,56 @@ def test_calculate_nueva_base_subtracts_gastos_and_guardado():
         total_gastos=Decimal("15000"),
         monto_guardado=Decimal("40000"),
     ) == Decimal("115000")
+
+
+def test_calculate_cierre_registers_shortage_without_negative_base():
+    result = caja_service.calculate_cierre(
+        base_inicial=Decimal("200000"),
+        efectivo_ventas=Decimal("500000"),
+        total_gastos=Decimal("100000"),
+        total_contado=Decimal("590000"),
+        monto_guardado=Decimal("500000"),
+    )
+
+    assert result == (
+        Decimal("600000"),
+        Decimal("590000"),
+        Decimal("0"),
+        Decimal("10000"),
+        Decimal("90000"),
+    )
+
+
+def test_calculate_cierre_registers_surplus():
+    result = caja_service.calculate_cierre(
+        base_inicial=Decimal("100000"),
+        efectivo_ventas=Decimal("200000"),
+        total_gastos=Decimal("50000"),
+        total_contado=Decimal("260000"),
+        monto_guardado=Decimal("200000"),
+    )
+
+    assert result[2:] == (Decimal("10000"), Decimal("0"), Decimal("60000"))
+
+
+@pytest.mark.parametrize(
+    ("total_gastos", "total_contado", "monto_guardado", "code"),
+    [
+        (Decimal("310000"), Decimal("0"), Decimal("0"), "gastos_exceden_disponible"),
+        (Decimal("0"), Decimal("250000"), Decimal("260000"), "guardado_excede_contado"),
+    ],
+)
+def test_calculate_cierre_rejects_values_that_create_negative_cash(
+    total_gastos, total_contado, monto_guardado, code
+):
+    with pytest.raises(ValueError, match=code):
+        caja_service.calculate_cierre(
+            base_inicial=Decimal("100000"),
+            efectivo_ventas=Decimal("200000"),
+            total_gastos=total_gastos,
+            total_contado=total_contado,
+            monto_guardado=monto_guardado,
+        )
 
 
 def test_florist_rows_sql_uses_required_accounting_filters():

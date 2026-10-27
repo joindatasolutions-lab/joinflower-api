@@ -19,6 +19,29 @@ def calculate_nueva_base(
     return base_inicial + efectivo_ventas - total_gastos - monto_guardado
 
 
+def calculate_cierre(
+    *,
+    base_inicial: Decimal,
+    efectivo_ventas: Decimal,
+    total_gastos: Decimal,
+    total_contado: Decimal | None,
+    monto_guardado: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+    total_efectivo = base_inicial + efectivo_ventas - total_gastos
+    if total_efectivo < 0:
+        raise ValueError("gastos_exceden_disponible")
+
+    conteo = total_efectivo if total_contado is None else total_contado
+    if monto_guardado > conteo:
+        raise ValueError("guardado_excede_contado")
+
+    diferencia = conteo - total_efectivo
+    sobrante = max(diferencia, Decimal("0"))
+    faltante = max(-diferencia, Decimal("0"))
+    nueva_base = conteo - monto_guardado
+    return total_efectivo, conteo, sobrante, faltante, nueva_base
+
+
 def relation_exists(db: Session, relation_name: str) -> bool:
     row = db.execute(
         text("SELECT to_regclass(:relation_name) IS NOT NULL"),
@@ -56,6 +79,9 @@ def caja_totales_sql(*, single_day: bool) -> str:
                total_efectivo,
                guardado,
                nueva_base,
+               total_contado,
+               sobrante,
+               faltante,
                observacion
         FROM petalops.caja
         WHERE empresa_id = :empresa_id
@@ -150,7 +176,7 @@ def load_base_anterior(db: Session, *, empresa_id: int, sucursal_id: int, fecha_
     row = db.execute(
         text(
             """
-            SELECT nueva_base
+            SELECT GREATEST(nueva_base, 0)
             FROM petalops.caja
             WHERE empresa_id = :empresa_id
               AND sucursal_id = :sucursal_id
@@ -180,6 +206,9 @@ def upsert_caja(
     total_efectivo: Decimal,
     guardado: Decimal,
     nueva_base: Decimal,
+    total_contado: Decimal | None,
+    sobrante: Decimal,
+    faltante: Decimal,
     observacion: str,
     usuario_id: int | None,
 ) -> None:
@@ -196,6 +225,9 @@ def upsert_caja(
                 total_efectivo,
                 guardado,
                 nueva_base,
+                total_contado,
+                sobrante,
+                faltante,
                 observacion,
                 usuario_id,
                 updated_at
@@ -210,6 +242,9 @@ def upsert_caja(
                 :total_efectivo,
                 :guardado,
                 :nueva_base,
+                :total_contado,
+                :sobrante,
+                :faltante,
                 :observacion,
                 :usuario_id,
                 CURRENT_TIMESTAMP
@@ -222,6 +257,9 @@ def upsert_caja(
                 total_efectivo = EXCLUDED.total_efectivo,
                 guardado = EXCLUDED.guardado,
                 nueva_base = EXCLUDED.nueva_base,
+                total_contado = EXCLUDED.total_contado,
+                sobrante = EXCLUDED.sobrante,
+                faltante = EXCLUDED.faltante,
                 observacion = EXCLUDED.observacion,
                 usuario_id = EXCLUDED.usuario_id,
                 updated_at = CURRENT_TIMESTAMP
@@ -237,6 +275,9 @@ def upsert_caja(
             "total_efectivo": total_efectivo,
             "guardado": guardado,
             "nueva_base": nueva_base,
+            "total_contado": total_contado,
+            "sobrante": sobrante,
+            "faltante": faltante,
             "observacion": observacion,
             "usuario_id": (int(usuario_id) if usuario_id is not None else None),
         },
@@ -260,7 +301,7 @@ def refresh_caja_por_pedido(db: Session, *, pedido, usuario_id: int | None = Non
     row = db.execute(
         text(
             """
-            SELECT base, gasto, guardado, observacion, usuario_id
+            SELECT base, gasto, guardado, total_contado, observacion, usuario_id
             FROM petalops.caja
             WHERE empresa_id = :empresa_id
               AND sucursal_id = :sucursal_id
@@ -288,7 +329,16 @@ def refresh_caja_por_pedido(db: Session, *, pedido, usuario_id: int | None = Non
     observacion = str(row["observacion"] or "") if row else ""
     resolved_usuario_id = usuario_id if usuario_id is not None else (row["usuario_id"] if row else None)
     total_efectivo = base + efectivo - gasto
-    nueva_base = total_efectivo - guardado
+    total_contado = money(row["total_contado"]) if row and row["total_contado"] is not None else None
+    if total_contado is None:
+        sobrante = Decimal("0")
+        faltante = Decimal("0")
+        nueva_base = max(total_efectivo - guardado, Decimal("0"))
+    else:
+        diferencia = total_contado - total_efectivo
+        sobrante = max(diferencia, Decimal("0"))
+        faltante = max(-diferencia, Decimal("0"))
+        nueva_base = max(total_contado - guardado, Decimal("0"))
 
     upsert_caja(
         db,
@@ -301,6 +351,9 @@ def refresh_caja_por_pedido(db: Session, *, pedido, usuario_id: int | None = Non
         total_efectivo=total_efectivo,
         guardado=guardado,
         nueva_base=nueva_base,
+        total_contado=total_contado,
+        sobrante=sobrante,
+        faltante=faltante,
         observacion=observacion,
         usuario_id=resolved_usuario_id,
     )

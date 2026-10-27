@@ -52,12 +52,14 @@ class InventarioCreateRequest(BaseModel):
     observaciones: str | None = Field(default=None, max_length=1000)
     marca: str | None = Field(default=None, max_length=100)
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
+    precioVentaPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
     vendibleUnidad: bool = False
     proveedorID: int | None = None
     codigoProveedor: str | None = Field(default=None, max_length=80)
     stockActual: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     stockMinimo: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     valorUnitario: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    costoPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
     activo: bool = True
 
 
@@ -75,11 +77,13 @@ class InventarioUpdateRequest(BaseModel):
     observaciones: str | None = Field(default=None, max_length=1000)
     marca: str | None = Field(default=None, max_length=100)
     precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
+    precioVentaPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
     vendibleUnidad: bool = False
     proveedorID: int | None = None
     codigoProveedor: str | None = Field(default=None, max_length=80)
     stockMinimo: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     valorUnitario: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    costoPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
     activo: bool = True
 
 
@@ -141,6 +145,7 @@ class InventarioItem(BaseModel):
     observaciones: str | None = None
     marca: str | None = None
     precioVenta: Decimal | None = None
+    precioVentaPaquete: Decimal | None = None
     vendibleUnidad: bool = False
     productoVentaID: int | None = None
     proveedorID: int | None = None
@@ -149,6 +154,7 @@ class InventarioItem(BaseModel):
     stockActual: Decimal
     stockMinimo: Decimal
     valorUnitario: Decimal
+    costoPaquete: Decimal | None = None
     activo: bool
     estadoStock: str
     fechaUltimaActualizacion: datetime | None = None

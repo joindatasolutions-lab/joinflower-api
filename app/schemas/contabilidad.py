@@ -63,6 +63,9 @@ class CajaDiaItem(BaseModel):
     total_efectivo: Decimal
     monto_guardado: Decimal
     nueva_base: Decimal
+    total_contado: Decimal | None = None
+    sobrante: Decimal = Decimal("0")
+    faltante: Decimal = Decimal("0")
     observacion: str | None = None
 
 
@@ -173,6 +176,11 @@ class CajaCierreRequest(BaseModel):
         validation_alias=AliasChoices("montoGuardado", "monto_guardado", "guardado"),
         ge=Decimal("0"),
     )
+    totalContado: Decimal | None = Field(
+        default=None,
+        validation_alias=AliasChoices("totalContado", "total_contado"),
+        ge=Decimal("0"),
+    )
     nuevaBase: Decimal = Field(
         default=Decimal("0"),
         validation_alias=AliasChoices("nuevaBase", "nueva_base"),
@@ -195,6 +203,7 @@ class CajaCierreRequest(BaseModel):
         "gasto",
         "totalEfectivo",
         "montoGuardado",
+        "totalContado",
         "nuevaBase",
         mode="before",
     )
