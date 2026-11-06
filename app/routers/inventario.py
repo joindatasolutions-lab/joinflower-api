@@ -197,7 +197,7 @@ INVENTARIO_CATEGORIAS = {
         "motivosAjuste": ["Conteo fisico", "Error anterior", "Flor encontrada", "Flor extraviada"],
     },
     "BASES": {
-        "subcategorias": ["Box", "Ceramica", "Vidrio", "Canasta", "Madera", "Otro"],
+        "subcategorias": ["Box", "Ceramica", "Vidrio", "Canasto", "Madera", "Otro"],
         "unidades": ["Unidad", "Caja", "Paquete"],
         "motivosSalida": ["Venta", "Produccion", "Daño"],
         "motivosDano": ["Rota", "Quebrada", "Golpe transporte", "Defecto de fabrica", "Otro"],
@@ -516,6 +516,9 @@ def listar_proveedores(
         query = query.filter(
             Proveedor.nombreProveedor.ilike(term)
             | Proveedor.codigoProveedor.ilike(term)
+            | Proveedor.telefono.ilike(term)
+            | Proveedor.email.ilike(term)
+            | Proveedor.direccion.ilike(term)
         )
 
     rows = query.order_by(Proveedor.nombreProveedor.asc()).all()

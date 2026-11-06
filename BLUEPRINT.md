@@ -86,6 +86,7 @@ habilitadas por sus permisos.
 | 2026-10-27 | Gastos detallados y caja menor | Pendiente de commit | Pendiente de commit | `caja_gasto`; consolidado en `caja.gasto` | 117 gastos historicos migrados; suma detallada y consolidada sin diferencias |
 | 2026-11-06 | Edicion de datos del cliente desde el detalle de Pedidos | `6f53f3d` | `2d04570` | Sin cambios | Usuarios con el modulo `pedidos` pueden editar nombre y telefono; usuarios sin el modulo permanecen bloqueados |
 | 2026-11-06 | Cancelacion de pedidos por usuarios del modulo Pedidos | Sin cambio funcional | `4e71fea` | Sin cambios | Cancelacion habilitada para `CREADO`, `PENDIENTE` y `APROBADO`; estados finales y usuarios sin Pedidos permanecen bloqueados |
+| 2026-11-06 | Catalogos y proveedores de Inventario | Mismo commit | `eaa2374` | Sin cambios | Canasto corregido; colores ampliados; edicion, busqueda y vista compacta de proveedores corregidas |
 
 ## Pedidos: Edicion De Datos Del Cliente
 
@@ -124,6 +125,27 @@ Los campos de paquete son anulables para conservar la compatibilidad con los
 registros existentes. No se crean precios implicitos ni se recalcula un valor a
 partir del otro. La interfaz limita el precio de venta por paquete a Flores y el
 backend normaliza ese valor a `NULL` para las demas categorias.
+
+## Inventario: Catalogos Y Proveedores
+
+El catalogo de Bases usa `Canasto` como subcategoria. El selector de color
+incluye Gris, Terracota, Rojo oscuro, Verde claro, Fucsia, Verde esmeralda,
+Mamon, Vino tinto, Mango y Bicolor, ademas de los valores existentes. No se
+crearon tablas ni columnas nuevas: estos valores forman parte del catalogo
+operativo del modulo y el color se sigue almacenando en `insumo.color`.
+
+La gestion de proveedores conserva los endpoints existentes y el aislamiento
+por `empresaID`:
+
+- `GET /inventario/proveedores` lista y permite buscar por nombre, codigo,
+  telefono, correo o direccion;
+- `POST /inventario/proveedores` guarda todos los datos del formulario;
+- `PUT /inventario/proveedores/{proveedor_id}` actualiza todos los datos y
+  exige permiso de edicion de Inventario.
+
+El frontend filtra la tabla de proveedores con el buscador general sin reducir
+la lista utilizada por los selectores de otras categorias. La tabla y el modal
+usan estilos compactos y mantienen una columna en pantallas pequenas.
 
 ## Contabilidad: Arqueo De Caja
 

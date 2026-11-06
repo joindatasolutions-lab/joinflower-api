@@ -42,4 +42,6 @@ def test_inventario_categorias_exposes_operational_catalogs():
     assert "Tallo" in categorias["FLORES"]["unidades"]
     assert "Marchita" in categorias["FLORES"]["motivosDano"]
     assert "Box" in categorias["BASES"]["subcategorias"]
+    assert "Canasto" in categorias["BASES"]["subcategorias"]
+    assert "Canasta" not in categorias["BASES"]["subcategorias"]
     assert "Chocolates" in categorias["ADICIONALES"]["subcategorias"]
