@@ -85,6 +85,7 @@ habilitadas por sus permisos.
 | 2026-10-27 | Arqueo fisico y control de diferencias de caja | Pendiente de commit | Pendiente de commit | `caja.total_contado`, `caja.sobrante`, `caja.faltante` | Migracion aplicada; 250 cierres historicos conservados y prueba transaccional con rollback correcta |
 | 2026-10-27 | Gastos detallados y caja menor | Pendiente de commit | Pendiente de commit | `caja_gasto`; consolidado en `caja.gasto` | 117 gastos historicos migrados; suma detallada y consolidada sin diferencias |
 | 2026-11-06 | Edicion de datos del cliente desde el detalle de Pedidos | `6f53f3d` | `2d04570` | Sin cambios | Usuarios con el modulo `pedidos` pueden editar nombre y telefono; usuarios sin el modulo permanecen bloqueados |
+| 2026-11-06 | Cancelacion de pedidos por usuarios del modulo Pedidos | Sin cambio funcional | `4e71fea` | Sin cambios | Cancelacion habilitada para `CREADO`, `PENDIENTE` y `APROBADO`; estados finales y usuarios sin Pedidos permanecen bloqueados |
 
 ## Pedidos: Edicion De Datos Del Cliente
 
@@ -101,6 +102,12 @@ sesion y actualiza exclusivamente el cliente vinculado al pedido del tenant.
 
 No requiere migraciones ni cambios de datos. Los usuarios con una sesion ya
 abierta deben recargar la aplicacion para obtener la version nueva del frontend.
+
+La misma asignacion del modulo `pedidos` habilita la accion Cancelar para
+pedidos en estado `CREADO`, `PENDIENTE` o `APROBADO`. La API conserva la
+validacion de permisos, tenant, transicion de estado, motivo obligatorio,
+auditoria y sincronizacion operativa. No se permite cancelar desde la interfaz
+un pedido ya entregado, rechazado o cancelado.
 
 ## Inventario: Costos Y Precios
 
