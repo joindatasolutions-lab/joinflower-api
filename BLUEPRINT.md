@@ -84,6 +84,23 @@ habilitadas por sus permisos.
 | 2026-10-27 | Costos por paquete y precios publicos de Flores | Pendiente de commit | Pendiente de commit | `inventario.costo_paquete`, `insumo.precio_venta_paquete` | Migracion aplicada; pruebas de backend y frontend correctas |
 | 2026-10-27 | Arqueo fisico y control de diferencias de caja | Pendiente de commit | Pendiente de commit | `caja.total_contado`, `caja.sobrante`, `caja.faltante` | Migracion aplicada; 250 cierres historicos conservados y prueba transaccional con rollback correcta |
 | 2026-10-27 | Gastos detallados y caja menor | Pendiente de commit | Pendiente de commit | `caja_gasto`; consolidado en `caja.gasto` | 117 gastos historicos migrados; suma detallada y consolidada sin diferencias |
+| 2026-11-06 | Edicion de datos del cliente desde el detalle de Pedidos | `6f53f3d` | `2d04570` | Sin cambios | Usuarios con el modulo `pedidos` pueden editar nombre y telefono; usuarios sin el modulo permanecen bloqueados |
+
+## Pedidos: Edicion De Datos Del Cliente
+
+La edicion de nombre y telefono del cliente dentro del panel de detalle de un
+pedido se habilita para administradores, superadministradores y usuarios que
+tengan asignado el modulo `pedidos`. Esta regla no concede permisos en el
+modulo independiente de Clientes ni altera los permisos de otros modulos.
+
+El frontend valida que `pedidos` este activo en `modulosActivosPlan` y que el
+usuario tenga permiso de visualizacion o edicion sobre ese modulo. El backend
+mantiene la proteccion del endpoint `PUT /pedido/{pedido_id}/detalle` mediante
+`require_module_access("pedidos", "puedeEditar")`, valida `empresa_id` desde la
+sesion y actualiza exclusivamente el cliente vinculado al pedido del tenant.
+
+No requiere migraciones ni cambios de datos. Los usuarios con una sesion ya
+abierta deben recargar la aplicacion para obtener la version nueva del frontend.
 
 ## Inventario: Costos Y Precios
 
