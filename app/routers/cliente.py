@@ -1393,7 +1393,7 @@ def create_cliente(
     return {"status": "ok", "cliente": _cliente_to_dict(cliente)}
 
 
-@router.put("/clientes/{cliente_id}", dependencies=[Depends(require_module_access("clientes", "puedeEditar"))])
+@router.put("/clientes/{cliente_id}", dependencies=[Depends(require_module_access("pedidos", "puedeEditar"))])
 def update_cliente(
     cliente_id: int,
     payload: ClienteUpdatePayload,
