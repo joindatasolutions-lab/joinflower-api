@@ -30,7 +30,7 @@ TRANSICIONES_VALIDAS = {
     ESTADO_ASIGNADO: {ESTADO_PENDIENTE, ESTADO_EN_RUTA, ESTADO_CANCELADO},
     ESTADO_EN_RUTA: {ESTADO_ENTREGADO, ESTADO_NO_ENTREGADO},
     ESTADO_ENTREGADO: set(),
-    ESTADO_NO_ENTREGADO: {ESTADO_PENDIENTE, ESTADO_ASIGNADO, ESTADO_CANCELADO},
+    ESTADO_NO_ENTREGADO: {ESTADO_PENDIENTE, ESTADO_ASIGNADO, ESTADO_CANCELADO, ESTADO_ENTREGADO},
     ESTADO_CANCELADO: set(),
 }
 
@@ -45,6 +45,7 @@ DEFAULT_TRANSICIONES_ENTREGA = [
     (ESTADO_NO_ENTREGADO, ESTADO_PENDIENTE),
     (ESTADO_NO_ENTREGADO, ESTADO_ASIGNADO),
     (ESTADO_NO_ENTREGADO, ESTADO_CANCELADO),
+    (ESTADO_NO_ENTREGADO, ESTADO_ENTREGADO),
 ]
 
 # Fallback IDs when estado_entrega catalog is not seeded yet.
@@ -227,6 +228,8 @@ def assert_transition_allowed_for_empresa(
     empresa_id: int,
     current: str | int | None,
     target: str | int | None,
+    *,
+    strict: bool = False,
 ):
     current_id = resolve_estado_entrega_id(db, current)
     target_id = resolve_estado_entrega_id(db, target)
@@ -235,7 +238,8 @@ def assert_transition_allowed_for_empresa(
         return
 
     if _transicion_estado_entrega_table_exists(db):
-        _ensure_transiciones_entrega_defaults(db, empresa_id)
+        if not strict:
+            _ensure_transiciones_entrega_defaults(db, empresa_id)
         row = (
             db.query(TransicionEstadoEntrega.idTrancisionEstadoEntrega)
             .filter(
@@ -252,6 +256,8 @@ def assert_transition_allowed_for_empresa(
             detail=f"Transicion no permitida: {estado_norm(current)} -> {estado_norm(target)}",
         )
 
+    if strict:
+        raise HTTPException(status_code=400, detail="No hay catalogo de transiciones de entrega configurado")
     assert_transition_allowed(estado_norm(current), estado_norm(target))
 
 

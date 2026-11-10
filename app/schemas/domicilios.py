@@ -341,6 +341,30 @@ class DomicilioActionResponse(BaseModel):
     estado: str
 
 
+class DomicilioNovedadItem(BaseModel):
+    idNovedad: int
+    pedidoID: int
+    idEntrega: int
+    domiciliarioID: int | None = None
+    estado: str
+    motivo: str | None = None
+    observaciones: str | None = None
+    reportadaPor: str | None = None
+    reportadaEn: datetime
+    accionResolucion: str | None = None
+    observacionResolucion: str | None = None
+    resueltaPor: str | None = None
+    resueltaEn: datetime | None = None
+    nuevaEntregaID: int | None = None
+
+
+class DomicilioNovedadesResponse(BaseModel):
+    items: list[DomicilioNovedadItem]
+    abiertas: int
+    resueltas: int
+    total: int
+
+
 class DomicilioTrazabilidadCorreccionRequest(BaseModel):
     estado: str = Field(min_length=2, max_length=40)
     fechaEfectiva: datetime = Field(alias="fecha_efectiva")

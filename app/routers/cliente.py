@@ -1287,6 +1287,7 @@ def list_clientes(
     page_size: int = Query(default=3000, ge=1, le=5000, alias="pageSize"),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
+    has_purchases: bool | None = None,
 ):
     scoped_empresa_id = _resolve_empresa_id(auth, empresa_id)
     texto = str(q or "").strip()
@@ -1294,7 +1295,20 @@ def list_clientes(
     query = db.query(Cliente).filter(Cliente.empresaID == scoped_empresa_id)
 
     if solo_activos:
-        query = query.filter(Cliente.activo.is_(True))
+        query = query.filter(Cliente.activo == 1)
+
+    if has_purchases is not None:
+        from app.models.pedido import Pedido
+        from app.models.estadopedido import EstadoPedido
+        from sqlalchemy import func
+        purchase_exists = db.query(Pedido.idPedido).join(
+            EstadoPedido, EstadoPedido.idEstadoPedido == Pedido.estadoPedidoID
+        ).filter(
+            Pedido.empresaID == scoped_empresa_id,
+            Pedido.clienteID == Cliente.idCliente,
+            func.upper(func.trim(EstadoPedido.nombreEstado)).in_(CUSTOMER_EFFECTIVE_PURCHASE_STATES),
+        ).exists()
+        query = query.filter(purchase_exists if has_purchases else ~purchase_exists)
 
     if texto:
         like = f"%{texto}%"

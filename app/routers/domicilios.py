@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 import os
 import shutil
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import String, and_, bindparam, cast, exists, func, null, or_, text
@@ -48,6 +49,8 @@ from app.models.usuario import Usuario
 from app.schemas.domicilios import (
     AsignarDomiciliarioRequest,
     DomicilioDetailResponse,
+    DomicilioNovedadItem,
+    DomicilioNovedadesResponse,
     DomicilioEvidenciasResponse,
     DomiciliarioCreateRequest,
     DomiciliarioCreateResponse,
@@ -415,7 +418,7 @@ def _audit_domicilio_action(
                 :estado_anterior,
                 :estado_nuevo,
                 :detalle_json,
-                CURRENT_TIMESTAMP
+                :created_at
             )
             """
         ),
@@ -431,6 +434,7 @@ def _audit_domicilio_action(
             "estado_anterior": estado_anterior,
             "estado_nuevo": estado_nuevo,
             "detalle_json": json.dumps(extra or {}, ensure_ascii=True),
+            "created_at": colombia_now_naive(),
         },
     )
 
@@ -498,20 +502,20 @@ def _novedad_audit_summary(
         return str(value or "").strip().lower().replace("_", "").replace(" ", "")
 
     novedad_event = None
-    for item in auditoria:
+    novedad_index = -1
+    for index, item in enumerate(auditoria):
         accion = norm(item.accion)
         estado_nuevo = norm(item.estadoNuevo)
         if estado_nuevo == norm(ESTADO_NO_ENTREGADO) or accion in {"noentregado", "marcarnoentregado"}:
             novedad_event = item
+            novedad_index = index
 
     resolution_event = None
     if novedad_event:
-        for item in auditoria:
-            if item.createdAt <= novedad_event.createdAt:
-                continue
+        for item in auditoria[novedad_index + 1:]:
             accion = norm(item.accion)
             estado_nuevo = norm(item.estadoNuevo)
-            if accion == "resolvernovedad" or (estado_nuevo and estado_nuevo != norm(ESTADO_NO_ENTREGADO)):
+            if accion in {"resolvernovedad", "entregado", "devolucion", "reintentoasignado"}:
                 resolution_event = item
                 break
 
@@ -581,6 +585,8 @@ def _assert_entrega_actor_scope(entrega: Entrega, auth, db: Session):
 
     actor_domiciliario_id = _domiciliario_id_for_auth(db, auth)
     if actor_domiciliario_id is None:
+        if str(getattr(auth, "rol", "")).strip().lower() == "domiciliario":
+            raise _err("DOMICILIO_USER_NOT_LINKED", "Domiciliario no identificado", status_code=403)
         return
 
     if entrega.domiciliarioID is None or int(entrega.domiciliarioID) != int(actor_domiciliario_id):
@@ -2783,13 +2789,13 @@ def _marcar_entregado_impl(
             status_code=400,
         )
     resuelve_novedad = actual == ESTADO_NO_ENTREGADO
-    if not (requiere_novedad and resuelve_novedad):
-        domicilio_service.assert_transition_allowed_for_empresa(
-            db=db,
-            empresa_id=int(entrega.empresaID),
-            current=actual,
-            target=ESTADO_ENTREGADO,
-        )
+    domicilio_service.assert_transition_allowed_for_empresa(
+        db=db,
+        empresa_id=int(entrega.empresaID),
+        current=actual,
+        target=ESTADO_ENTREGADO,
+        strict=requiere_novedad,
+    )
     if not resuelve_novedad:
         if latitudEntrega is None:
             raise _err("DOMICILIO_LATITUD_REQUIRED", "latitudEntrega es requerida para marcar entregado", status_code=422)
@@ -2827,6 +2833,7 @@ def _marcar_entregado_impl(
             "evidenciaFotoUrl": entrega.evidenciaFotoUrl,
             "observaciones": str(observaciones or "").strip() or None,
             "resuelveNovedad": resuelve_novedad,
+            "accionResolucion": "entregar" if resuelve_novedad else None,
         },
     )
     # Encola (idempotente) la notificacion de WhatsApp de pedido entregado en la MISMA
@@ -2900,7 +2907,14 @@ def resolver_novedad(
     evidenciaFoto: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     auth=Depends(get_current_auth_context),
+    accion: Annotated[Literal["entregar", "nuevo_intento", "devolver_disponibles"], Form()] = "entregar",
+    reprogramarPara: Annotated[datetime | None, Form()] = None,
 ):
+    observaciones = str(observaciones or "").strip()
+    if not observaciones:
+        raise _err("DOMICILIO_OBSERVACION_REQUIRED", "La observacion de resolucion es requerida", status_code=422)
+    if accion != "entregar":
+        return _resolver_novedad_operativa(entrega_id, accion, observaciones, reprogramarPara, db, auth)
     return _marcar_entregado_impl(
         entrega_id=entrega_id,
         usuarioCambio=usuarioCambio,
@@ -2918,6 +2932,62 @@ def resolver_novedad(
         accion_auditoria="RESOLVER_NOVEDAD",
         requiere_novedad=True,
     )
+
+
+def _resolver_novedad_operativa(entrega_id, accion, observaciones, reprogramar_para, db, auth):
+    entrega = _locked_current_entrega(db, int(auth.empresaID), entrega_id)
+    assert_same_empresa(auth, int(entrega.empresaID))
+    _assert_entrega_actor_scope(entrega, auth, db)
+    actual = domicilio_service.estado_norm(entrega.estadoEntregaID)
+    if actual != ESTADO_NO_ENTREGADO:
+        raise _err("DOMICILIO_NOVEDAD_REQUIRED", "Solo se pueden resolver novedades en entregas no entregadas", status_code=400)
+    if accion not in {"nuevo_intento", "devolver_disponibles"}:
+        raise _err("DOMICILIO_ACCION_INVALID", "Accion de resolucion invalida", status_code=422)
+    domiciliario_id = entrega.domiciliarioID if accion == "nuevo_intento" else None
+    destino = ESTADO_ASIGNADO if domiciliario_id is not None else ESTADO_PENDIENTE
+    domicilio_service.assert_transition_allowed_for_empresa(
+        db=db, empresa_id=int(auth.empresaID), current=actual, target=destino, strict=True,
+    )
+    if domiciliario_id is not None:
+        domicilio_service.assert_domiciliario_capacity(
+            db=db, empresa_id=int(auth.empresaID), sucursal_id=entrega.sucursalID,
+            domiciliario_id=int(domiciliario_id),
+        )
+    anterior_domiciliario = entrega.domiciliarioID
+    resultado = entrega
+    if accion == "nuevo_intento":
+        resultado = domicilio_service.create_retry_entrega(
+            db=db, previous=entrega, domiciliario_id=domiciliario_id, next_state=destino,
+        )
+        if reprogramar_para is not None:
+            resultado.fechaEntregaProgramada = reprogramar_para
+            resultado.reprogramadaPara = reprogramar_para
+        resultado.observaciones = observaciones
+        db.flush()
+    else:
+        entrega.estadoEntregaID = domicilio_service.resolve_estado_entrega_id(db, destino)
+        entrega.domiciliarioID = None
+        entrega.fechaAsignacion = None
+        entrega.fechaSalida = None
+        entrega.observaciones = observaciones
+        if reprogramar_para is not None:
+            entrega.reprogramadaPara = reprogramar_para
+    entrega.updatedAt = colombia_now_naive()
+    _audit_domicilio_action(
+        db=db, auth=auth, entrega=entrega, accion="RESOLVER_NOVEDAD",
+        estado_anterior=actual, estado_nuevo=destino,
+        extra={"accionResolucion": accion, "observaciones": observaciones,
+               "nuevaEntregaID": int(resultado.idEntrega) if resultado is not entrega else None,
+               "domiciliarioAnteriorID": anterior_domiciliario,
+               "reprogramarPara": reprogramar_para.isoformat() if reprogramar_para else None},
+    )
+    if resultado is not entrega and domiciliario_id is not None:
+        whatsapp_service.encolar_notificacion_nuevo_pedido_domiciliario(
+            db, empresa_id=int(auth.empresaID), pedido_id=int(entrega.pedidoID),
+            entrega_id=int(resultado.idEntrega), domiciliario_id=int(domiciliario_id),
+        )
+    db.commit()
+    return DomicilioActionResponse(status="ok", idEntrega=int(resultado.idEntrega), estado=destino)
 
 
 @router.put(
@@ -2964,6 +3034,83 @@ def marcar_no_entregado(
     db.commit()
 
     return DomicilioActionResponse(status="ok", idEntrega=int(entrega.idEntrega), estado=ESTADO_NO_ENTREGADO)
+
+
+@router.get("/novedades", response_model=DomicilioNovedadesResponse)
+def listar_novedades(
+    estado: Literal["abierta", "resuelta"] | None = None,
+    pedidoID: int | None = None,
+    sucursalID: int | None = None,
+    limite: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    empresa_id = int(auth.empresaID)
+    _assert_sucursal_empresa(db, empresa_id, sucursalID)
+    domiciliario_id = None
+    if not _actor_can_override_delivery(auth):
+        domiciliario_id = _domiciliario_id_for_auth(db, auth)
+        if str(getattr(auth, "rol", "")).strip().lower() == "domiciliario" and domiciliario_id is None:
+            raise _err("DOMICILIO_SCOPE_INVALID", "Domiciliario no identificado", status_code=403)
+    _ensure_domicilio_auditoria_table(db)
+    # Each report is a historical incident; correlate its first explicit resolution
+    # before the next report, by audit ID (timestamps can be equal in a transaction).
+    base_sql = """
+        WITH reportes AS (
+            SELECT a.*,
+                   LEAD(a.id_audit) OVER (PARTITION BY a.empresa_id, a.entrega_id ORDER BY a.id_audit) AS siguiente
+            FROM petalops.domicilio_auditoria a
+            WHERE a.empresa_id = :empresa AND a.accion IN ('NO_ENTREGADO', 'MARCAR_NO_ENTREGADO')
+        ), novedades AS (
+            SELECT a.*, r.actor_login AS resuelta_por, r.created_at AS resuelta_en,
+                   r.detalle_json AS resolucion_json, r.accion AS resolucion_accion,
+                   CASE WHEN r.id_audit IS NULL THEN 'abierta' ELSE 'resuelta' END AS estado
+            FROM reportes a
+            LEFT JOIN LATERAL (
+                SELECT b.* FROM petalops.domicilio_auditoria b
+                WHERE b.empresa_id = :empresa AND b.pedido_id = a.pedido_id
+                  AND b.id_audit > a.id_audit
+                  AND (a.siguiente IS NULL OR b.id_audit < a.siguiente)
+                  AND (b.entrega_id = a.entrega_id OR
+                       (b.accion = 'REINTENTO_ASIGNADO' AND
+                        b.detalle_json::jsonb ->> 'entregaAnteriorID' = a.entrega_id::text))
+                  AND b.accion IN ('RESOLVER_NOVEDAD', 'ENTREGADO', 'DEVOLUCION', 'REINTENTO_ASIGNADO')
+                ORDER BY b.id_audit LIMIT 1
+            ) r ON TRUE
+            WHERE (:pedido IS NULL OR a.pedido_id = :pedido)
+              AND (:sucursal IS NULL OR a.sucursal_id = :sucursal)
+              AND (:domiciliario IS NULL OR a.domiciliario_id = :domiciliario)
+        )
+    """
+    params = {"empresa": empresa_id, "pedido": pedidoID, "sucursal": sucursalID,
+              "domiciliario": domiciliario_id, "estado": estado, "limite": limite, "offset": offset}
+    counts = db.execute(text(base_sql + """
+        SELECT COUNT(*) FILTER (WHERE estado = 'abierta') AS abiertas,
+               COUNT(*) FILTER (WHERE estado = 'resuelta') AS resueltas
+        FROM novedades
+    """), params).mappings().one()
+    rows = db.execute(text(base_sql + """
+        SELECT * FROM novedades WHERE (:estado IS NULL OR estado = :estado)
+        ORDER BY id_audit DESC LIMIT :limite OFFSET :offset
+    """), params).mappings().all()
+    items = []
+    for row in rows:
+        reporte = _parse_audit_detail(row["detalle_json"]) or {}
+        resolucion = _parse_audit_detail(row["resolucion_json"]) or {}
+        items.append(DomicilioNovedadItem(
+            idNovedad=row["id_audit"], pedidoID=row["pedido_id"], idEntrega=row["entrega_id"],
+            domiciliarioID=row["domiciliario_id"], estado=row["estado"],
+            motivo=reporte.get("motivo"), observaciones=reporte.get("observaciones"),
+            reportadaPor=row["actor_login"], reportadaEn=row["created_at"],
+            accionResolucion=resolucion.get("accionResolucion") or row["resolucion_accion"],
+            observacionResolucion=resolucion.get("observaciones") or resolucion.get("solucion"),
+            resueltaPor=row["resuelta_por"], resueltaEn=row["resuelta_en"],
+            nuevaEntregaID=resolucion.get("nuevaEntregaID"),
+        ))
+    abiertas, resueltas = int(counts["abiertas"]), int(counts["resueltas"])
+    return DomicilioNovedadesResponse(items=items, abiertas=abiertas, resueltas=resueltas,
+                                    total=abiertas if estado == "abierta" else resueltas if estado == "resuelta" else abiertas + resueltas)
 
 
 @router.get("/mis-entregas", response_model=DomicilioCourierListResponse)

@@ -21,6 +21,7 @@ from app.routers import admin
 from app.routers import barrios
 from app.routers import catalogo
 from app.routers import cliente
+from app.routers import cliente_ficha
 from app.routers import configuracion
 from app.routers import contabilidad
 from app.routers import domicilios
@@ -84,6 +85,7 @@ app.include_router(admin.router)
 app.include_router(catalogo.router)
 app.include_router(pedido.router)
 app.include_router(cliente.router)
+app.include_router(cliente_ficha.router)
 app.include_router(configuracion.router)
 app.include_router(contabilidad.router)
 app.include_router(barrios.router)
