@@ -89,6 +89,7 @@ habilitadas por sus permisos.
 | 2026-11-06 | Catalogos y proveedores de Inventario | Mismo commit | `eaa2374` | Sin cambios | Canasto corregido; colores ampliados; edicion, busqueda y vista compacta de proveedores corregidas |
 | 2026-11-11 | Edicion y eliminacion de gastos de Caja | `c1e8087` | `b63c2bb` | Sin cambios | Operaciones aisladas por tenant/sucursal y recalculo transaccional de caja |
 | 2026-11-11 | Cierre de Caja sin arqueo fisico | `1244a0d` | `bb7e4db` | Sin cambios | Conserva `total_contado` en `NULL`, persiste caja menor y calcula nueva base con el efectivo esperado |
+| 2026-11-11 | Sincronizacion de efectivo en historial de Caja | `b109abb` | Sin cambio | Sin cambios | Recalcula por periodo desde pagos reales, aislado por empresa y sucursal, evitando cierres visibles con efectivo obsoleto |
 | 2026-11-11 | Importacion masiva de Inventario desde Excel | `ed25a18` | `10dfe68` | Sin cambios | Columnas flexibles, vista previa, control de duplicados y proveedores por tenant |
 
 ## Pedidos: Edicion De Datos Del Cliente
