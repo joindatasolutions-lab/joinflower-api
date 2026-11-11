@@ -198,6 +198,52 @@ class InventarioMutationResponse(BaseModel):
     item: InventarioItem
 
 
+class InventarioImportRow(BaseModel):
+    fila: int = Field(ge=2)
+    codigo: str = Field(min_length=1, max_length=80)
+    nombre: str = Field(min_length=2, max_length=180)
+    subcategoria: str | None = Field(default=None, max_length=80)
+    color: str | None = Field(default=None, max_length=80)
+    descripcion: str | None = None
+    tamano: str | None = Field(default=None, max_length=50)
+    unidadMedida: str | None = Field(default=None, max_length=50)
+    proveedor: str | None = Field(default=None, max_length=150)
+    fechaVencimiento: date | None = None
+    diasVidaUtil: int | None = Field(default=None, ge=0, le=3650)
+    observaciones: str | None = Field(default=None, max_length=1000)
+    marca: str | None = Field(default=None, max_length=100)
+    precioVenta: Decimal | None = Field(default=None, ge=Decimal("0"))
+    precioVentaPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
+    vendibleUnidad: bool = False
+    stockActual: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    stockMinimo: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    valorUnitario: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    costoPaquete: Decimal | None = Field(default=None, ge=Decimal("0"))
+    activo: bool = True
+
+
+class InventarioImportRequest(BaseModel):
+    empresaID: int = Field(gt=0)
+    categoria: str = Field(min_length=2, max_length=80)
+    crearProveedores: bool = True
+    items: list[InventarioImportRow] = Field(min_length=1, max_length=2000)
+
+
+class InventarioImportError(BaseModel):
+    fila: int
+    codigo: str | None = None
+    mensaje: str
+
+
+class InventarioImportResponse(BaseModel):
+    status: str
+    totalFilas: int
+    creados: int
+    omitidos: int
+    proveedoresCreados: int
+    errores: list[InventarioImportError]
+
+
 class MovimientoInventarioItem(BaseModel):
     movimientoID: int
     inventarioID: int

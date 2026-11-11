@@ -1,6 +1,8 @@
 from app.core.timezone import colombia_now_naive, colombia_today
 import re
 import secrets
+import unicodedata
+from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -29,6 +31,9 @@ from app.schemas.inventario import (
     InventarioCreateRequest,
     InventarioDanoRequest,
     InventarioItem,
+    InventarioImportError,
+    InventarioImportRequest,
+    InventarioImportResponse,
     InventarioListResponse,
     InventarioMetricasResponse,
     InventarioMutationResponse,
@@ -272,6 +277,18 @@ def _get_proveedor_for_empresa(db: Session, empresa_id: int, proveedor_id: int) 
     if _has_column(db, "proveedor", "empresa_id"):
         query = query.filter((Proveedor.empresaID == int(empresa_id)) | (Proveedor.empresaID.is_(None)))
     return query.first()
+
+
+def _inventario_schema_flags(db: Session) -> dict[str, bool]:
+    has_categoria = _has_column(db, "insumo", "categoria")
+    return {
+        "categoria": has_categoria,
+        "marca": has_categoria and _has_column(db, "insumo", "marca"),
+        "vendible": _has_column(db, "insumo", "vendible_unidad"),
+        "dias_vida_util": _has_column(db, "insumo", "dias_vida_util"),
+        "observaciones": _has_column(db, "insumo", "observaciones"),
+        "precio_venta_paquete": _has_column(db, "insumo", "precio_venta_paquete"),
+    }
 
 
 def _load_item_relations(db: Session, item: Inventario) -> tuple[Insumo | None, Proveedor | None]:
@@ -850,11 +867,14 @@ def listar_inventario(
     return InventarioListResponse(items=items_paginados, total=total, page=page, pageSize=page_size)
 
 
-@router.post("", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeCrear"))])
-def crear_item_inventario(
+def _crear_item_inventario(
     payload: InventarioCreateRequest,
-    db: Session = Depends(get_db),
-    auth=Depends(get_current_auth_context),
+    db: Session,
+    auth,
+    *,
+    commit: bool = True,
+    schema_flags: dict[str, bool] | None = None,
+    build_response: bool = True,
 ):
     assert_same_empresa(auth, payload.empresaID)
 
@@ -869,12 +889,13 @@ def crear_item_inventario(
     if auth.sucursalID is None:
         raise HTTPException(status_code=400, detail="El usuario autenticado no tiene sucursal asignada")
 
-    has_cat    = _has_column(db, "insumo", "categoria")
-    has_marca  = has_cat and _has_column(db, "insumo", "marca")
-    has_vendible = _has_column(db, "insumo", "vendible_unidad")
-    has_dias_vida_util = _has_column(db, "insumo", "dias_vida_util")
-    has_observaciones = _has_column(db, "insumo", "observaciones")
-    has_precio_venta_paquete = _has_column(db, "insumo", "precio_venta_paquete")
+    flags = schema_flags or _inventario_schema_flags(db)
+    has_cat = flags["categoria"]
+    has_marca = flags["marca"]
+    has_vendible = flags["vendible"]
+    has_dias_vida_util = flags["dias_vida_util"]
+    has_observaciones = flags["observaciones"]
+    has_precio_venta_paquete = flags["precio_venta_paquete"]
     now = colombia_now_naive()
 
     try:
@@ -1096,13 +1117,184 @@ def crear_item_inventario(
                 },
             )
 
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+        if not build_response:
+            return None
         item = db.query(Inventario).filter(Inventario.idInventario == inventario_id).first()
     except SQLAlchemyError:
-        db.rollback()
+        if commit:
+            db.rollback()
         raise HTTPException(status_code=400, detail="No fue posible crear item de inventario (codigo duplicado o datos invalidos)")
 
     return InventarioMutationResponse(status="ok", item=_to_item_from_db(db, item))
+
+
+@router.post("", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeCrear"))])
+def crear_item_inventario(
+    payload: InventarioCreateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    return _crear_item_inventario(payload, db, auth)
+
+
+def _normalize_import_lookup(value: object | None) -> str:
+    normalized = unicodedata.normalize("NFD", str(value or "").strip().lower())
+    without_accents = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    return re.sub(r"[^a-z0-9]+", "", without_accents)
+
+
+@router.post(
+    "/importar",
+    response_model=InventarioImportResponse,
+    dependencies=[Depends(require_module_access("inventario", "puedeCrear"))],
+)
+def importar_inventario_excel(
+    payload: InventarioImportRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, payload.empresaID)
+    if auth.sucursalID is None:
+        raise HTTPException(status_code=400, detail="El usuario autenticado no tiene sucursal asignada")
+
+    category_by_key = {_normalize_import_lookup(name): name for name in INVENTARIO_CATEGORIAS}
+    category_key = _normalize_import_lookup(payload.categoria)
+    category = category_by_key.get(category_key)
+    if not category:
+        raise HTTPException(status_code=400, detail="Categoria de inventario no valida para importacion")
+
+    code_counts = Counter(_normalize_import_lookup(item.codigo) for item in payload.items)
+    duplicate_codes = {code for code, count in code_counts.items() if code and count > 1}
+    existing_codes = {
+        _normalize_import_lookup(row[0])
+        for row in db.query(Insumo.codigoBarra)
+        .filter(Insumo.empresaID == int(payload.empresaID), Insumo.codigoBarra.isnot(None))
+        .all()
+        if row[0]
+    }
+
+    provider_has_company = _has_column(db, "proveedor", "empresa_id")
+    provider_query = db.query(Proveedor)
+    if provider_has_company:
+        provider_query = provider_query.filter(Proveedor.empresaID == int(payload.empresaID))
+    providers = {
+        _normalize_import_lookup(provider.nombreProveedor): provider
+        for provider in provider_query.all()
+        if provider.nombreProveedor
+    }
+
+    errors: list[InventarioImportError] = []
+    created = 0
+    skipped = 0
+    providers_created = 0
+    schema_flags = _inventario_schema_flags(db)
+    now = colombia_now_naive()
+
+    try:
+        for row in payload.items:
+            normalized_code = _normalize_import_lookup(row.codigo)
+            if normalized_code in duplicate_codes:
+                skipped += 1
+                errors.append(InventarioImportError(
+                    fila=row.fila,
+                    codigo=row.codigo,
+                    mensaje="El codigo esta repetido dentro del archivo.",
+                ))
+                continue
+            if normalized_code in existing_codes:
+                skipped += 1
+                errors.append(InventarioImportError(
+                    fila=row.fila,
+                    codigo=row.codigo,
+                    mensaje="El codigo ya existe para este negocio y fue omitido.",
+                ))
+                continue
+
+            provider_id = None
+            provider_name = str(row.proveedor or "").strip()
+            if provider_name:
+                provider_key = _normalize_import_lookup(provider_name)
+                provider = providers.get(provider_key)
+                if provider is None and payload.crearProveedores:
+                    provider = Proveedor(
+                        empresaID=(int(payload.empresaID) if provider_has_company else None),
+                        nombreProveedor=provider_name,
+                        codigoProveedor=None,
+                        telefono=None,
+                        email=None,
+                        direccion=None,
+                        activo=True,
+                        createdAt=now,
+                        updatedAt=now,
+                    )
+                    db.add(provider)
+                    db.flush()
+                    providers[provider_key] = provider
+                    providers_created += 1
+                elif provider is None:
+                    skipped += 1
+                    errors.append(InventarioImportError(
+                        fila=row.fila,
+                        codigo=row.codigo,
+                        mensaje=f"El proveedor '{provider_name}' no existe.",
+                    ))
+                    continue
+                provider_id = int(provider.idProveedor)
+
+            create_payload = InventarioCreateRequest(
+                empresaID=int(payload.empresaID),
+                codigo=row.codigo.strip(),
+                nombre=row.nombre.strip(),
+                categoria=category.title(),
+                subcategoria=(row.subcategoria.strip() if row.subcategoria else None),
+                color=(row.color.strip() if row.color else None),
+                descripcion=(row.descripcion.strip() if row.descripcion else None),
+                tamano=(row.tamano.strip() if row.tamano else None),
+                unidadMedida=(row.unidadMedida.strip() if row.unidadMedida else "Unidad"),
+                fechaVencimiento=row.fechaVencimiento,
+                diasVidaUtil=row.diasVidaUtil,
+                observaciones=(row.observaciones.strip() if row.observaciones else None),
+                marca=(row.marca.strip() if row.marca else None),
+                precioVenta=row.precioVenta,
+                precioVentaPaquete=row.precioVentaPaquete,
+                vendibleUnidad=bool(row.vendibleUnidad),
+                proveedorID=provider_id,
+                stockActual=row.stockActual,
+                stockMinimo=row.stockMinimo,
+                valorUnitario=row.valorUnitario,
+                costoPaquete=row.costoPaquete,
+                activo=bool(row.activo),
+            )
+            _crear_item_inventario(
+                create_payload,
+                db,
+                auth,
+                commit=False,
+                schema_flags=schema_flags,
+                build_response=False,
+            )
+            existing_codes.add(normalized_code)
+            created += 1
+
+        db.commit()
+    except (SQLAlchemyError, HTTPException) as exc:
+        db.rollback()
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(status_code=400, detail="No fue posible completar la importacion de inventario") from exc
+
+    return InventarioImportResponse(
+        status="ok" if not errors else "partial",
+        totalFilas=len(payload.items),
+        creados=created,
+        omitidos=skipped,
+        proveedoresCreados=providers_created,
+        errores=errors,
+    )
 
 
 @router.put("/{inventario_id}", response_model=InventarioMutationResponse, dependencies=[Depends(require_module_access("inventario", "puedeEditar"))])
