@@ -88,6 +88,7 @@ habilitadas por sus permisos.
 | 2026-11-06 | Cancelacion de pedidos por usuarios del modulo Pedidos | Sin cambio funcional | `4e71fea` | Sin cambios | Cancelacion habilitada para `CREADO`, `PENDIENTE` y `APROBADO`; estados finales y usuarios sin Pedidos permanecen bloqueados |
 | 2026-11-06 | Catalogos y proveedores de Inventario | Mismo commit | `eaa2374` | Sin cambios | Canasto corregido; colores ampliados; edicion, busqueda y vista compacta de proveedores corregidas |
 | 2026-11-11 | Edicion y eliminacion de gastos de Caja | `c1e8087` | `b63c2bb` | Sin cambios | Operaciones aisladas por tenant/sucursal y recalculo transaccional de caja |
+| 2026-11-11 | Cierre de Caja sin arqueo fisico | `1244a0d` | `bb7e4db` | Sin cambios | Conserva `total_contado` en `NULL`, persiste caja menor y calcula nueva base con el efectivo esperado |
 | 2026-11-11 | Importacion masiva de Inventario desde Excel | `ed25a18` | `10dfe68` | Sin cambios | Columnas flexibles, vista previa, control de duplicados y proveedores por tenant |
 
 ## Pedidos: Edicion De Datos Del Cliente
@@ -175,10 +176,14 @@ El cierre separa el dinero esperado del dinero fisicamente contado:
 - efectivo esperado: `base + ventas en efectivo - gastos`;
 - sobrante: `max(total contado - efectivo esperado, 0)`;
 - faltante: `max(efectivo esperado - total contado, 0)`;
-- nueva base: `total contado - guardado`.
+- nueva base con arqueo: `total contado - guardado`;
+- nueva base sin arqueo: `efectivo esperado - guardado`.
 
 El backend recalcula todos los valores derivados y rechaza gastos superiores al
-efectivo disponible o montos guardados superiores al conteo fisico. Un faltante
+efectivo disponible o montos guardados superiores al efectivo disponible para
+el cierre. Cuando no se realiza arqueo, `total_contado` permanece en `NULL`,
+sobrante y faltante quedan en cero, y la caja menor se persiste sin inventar un
+conteo fisico. Un faltante
 se registra como diferencia de arqueo y nunca se propaga como base negativa del
 dia siguiente. Los cierres anteriores conservan `total_contado` en `NULL` para
 no inventar arqueos historicos. La especificacion completa esta en
