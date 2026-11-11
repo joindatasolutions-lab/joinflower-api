@@ -87,7 +87,8 @@ habilitadas por sus permisos.
 | 2026-11-06 | Edicion de datos del cliente desde el detalle de Pedidos | `6f53f3d` | `2d04570` | Sin cambios | Usuarios con el modulo `pedidos` pueden editar nombre y telefono; usuarios sin el modulo permanecen bloqueados |
 | 2026-11-06 | Cancelacion de pedidos por usuarios del modulo Pedidos | Sin cambio funcional | `4e71fea` | Sin cambios | Cancelacion habilitada para `CREADO`, `PENDIENTE` y `APROBADO`; estados finales y usuarios sin Pedidos permanecen bloqueados |
 | 2026-11-06 | Catalogos y proveedores de Inventario | Mismo commit | `eaa2374` | Sin cambios | Canasto corregido; colores ampliados; edicion, busqueda y vista compacta de proveedores corregidas |
-| 2026-11-11 | Edicion y eliminacion de gastos de Caja | Pendiente de commit | Pendiente de commit | Sin cambios | Operaciones aisladas por tenant/sucursal y recalculo transaccional de caja |
+| 2026-11-11 | Edicion y eliminacion de gastos de Caja | `c1e8087` | `b63c2bb` | Sin cambios | Operaciones aisladas por tenant/sucursal y recalculo transaccional de caja |
+| 2026-11-11 | Importacion masiva de Inventario desde Excel | `ed25a18` | `10dfe68` | Sin cambios | Columnas flexibles, vista previa, control de duplicados y proveedores por tenant |
 
 ## Pedidos: Edicion De Datos Del Cliente
 
@@ -147,6 +148,25 @@ por `empresaID`:
 El frontend filtra la tabla de proveedores con el buscador general sin reducir
 la lista utilizada por los selectores de otras categorias. La tabla y el modal
 usan estilos compactos y mantienen una columna en pantallas pequenas.
+
+## Inventario: Importacion Desde Excel
+
+Las categorias Flores, Bases, Materiales y Adicionales permiten importar desde
+el menu `Acciones` usando archivos `.xlsx` o `.xls`. La categoria de destino es
+el submenu activo; no se confia en una categoria escrita dentro del archivo.
+
+El lector reconoce encabezados aunque cambien mayusculas, minusculas, tildes,
+espacios o variantes conocidas como `PROVEDOR`. Los campos se mapean a las
+columnas existentes de `insumo` e `inventario`; no se crean tablas ni columnas.
+Antes de guardar se muestra una vista previa y se separan filas invalidas.
+
+El endpoint `POST /inventario/importar` exige permiso `puedeCrear`, valida el
+`empresaID` autenticado y usa la sucursal de la sesion. Los codigos se comparan
+sin distinguir mayusculas, tildes o separadores. Codigos repetidos dentro del
+archivo o existentes en el tenant se omiten y se reportan por fila. Los
+proveedores se reutilizan por nombre normalizado y, cuando no existen, se crean
+para el mismo tenant. La carga valida todo el lote y realiza una unica
+transaccion para evitar inventarios parciales por fallos tecnicos.
 
 ## Contabilidad: Arqueo De Caja
 
