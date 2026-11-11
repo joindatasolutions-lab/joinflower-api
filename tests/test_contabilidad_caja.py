@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 
+from app.routers import contabilidad as contabilidad_router
 from app.routers.contabilidad import (
     _caja_totales_sql,
     _calculate_nueva_base,
@@ -16,6 +17,8 @@ from app.routers.contabilidad import (
     _row_to_florist_item,
     _row_to_caja_item,
     listar_cierres_caja,
+    actualizar_gasto_caja,
+    eliminar_gasto_caja,
     obtener_pedidos_domiciliario_contabilidad,
     obtener_resumen_floristas_contabilidad,
 )
@@ -76,6 +79,22 @@ def test_caja_gasto_request_rejects_zero_amount():
             concepto="Otros",
             monto=0,
         )
+
+
+def test_caja_gasto_request_supports_corrected_expense_values():
+    payload = CajaGastoCreateRequest(
+        empresaID=4,
+        sucursalID=2,
+        fecha="2026-11-11",
+        concepto="Servicios",
+        descripcion="Valor corregido por error humano",
+        monto="35.500",
+        usuarioID=9,
+    )
+
+    assert payload.fechaOperacion == date(2026, 11, 11)
+    assert payload.monto == Decimal("35500")
+    assert payload.descripcion == "Valor corregido por error humano"
 
 
 def test_caja_cierre_request_accepts_snake_case():
@@ -649,3 +668,109 @@ def test_cash_query_matches_custom_cash_method_names():
     assert "ILIKE '%efectivo%'" in db.legacy_cash_sum_sql
     assert "NOT EXISTS" in db.legacy_cash_sum_sql
     assert total == Decimal("5000")
+
+
+class _ExpenseMutationResult:
+    def __init__(self, row=None):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self.row
+
+    def one(self):
+        return self.row
+
+
+class _ExpenseMutationDb:
+    def __init__(self, row):
+        self.row = row
+        self.statements = []
+        self.committed = False
+        self.rolled_back = False
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params or {}))
+        return _ExpenseMutationResult(self.row)
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def _expense_row():
+    return {
+        "id_caja_gasto": 18,
+        "empresa_id": 4,
+        "sucursal_id": 2,
+        "fecha_operacion": date(2026, 11, 11),
+        "concepto": "Transporte",
+        "descripcion": "Valor corregido",
+        "monto": Decimal("25000"),
+        "usuario_id": 9,
+        "created_at": datetime(2026, 11, 11, 10, 0),
+    }
+
+
+def _mock_expense_dependencies(monkeypatch, refreshed):
+    monkeypatch.setattr(contabilidad_router, "assert_same_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contabilidad_router, "assert_sucursal_empresa", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(contabilidad_router, "_relation_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(contabilidad_router, "_resolve_usuario_id", lambda *_args, **_kwargs: 9)
+    monkeypatch.setattr(
+        contabilidad_router.caja_service,
+        "refresh_caja_por_gastos",
+        lambda _db, **kwargs: refreshed.append(kwargs),
+    )
+    monkeypatch.setattr(
+        contabilidad_router.caja_service,
+        "load_gastos_total",
+        lambda *_args, **_kwargs: Decimal("25000"),
+    )
+
+
+def test_actualizar_gasto_scopes_update_and_recalculates_cash(monkeypatch):
+    refreshed = []
+    _mock_expense_dependencies(monkeypatch, refreshed)
+    db = _ExpenseMutationDb(_expense_row())
+    payload = CajaGastoCreateRequest(
+        empresaID=4,
+        sucursalID=2,
+        fecha="2026-11-11",
+        concepto="Transporte",
+        descripcion="Valor corregido",
+        monto=25000,
+        usuarioID=9,
+    )
+
+    response = actualizar_gasto_caja(18, payload, db=db, auth=object())
+
+    update_sql, update_params = next(entry for entry in db.statements if "UPDATE petalops.caja_gasto" in entry[0])
+    assert "empresa_id = :empresa_id" in update_sql
+    assert "sucursal_id = :sucursal_id" in update_sql
+    assert update_params["empresa_id"] == 4
+    assert update_params["sucursal_id"] == 2
+    assert refreshed[0]["fecha_operacion"] == date(2026, 11, 11)
+    assert response.item.id == 18
+    assert db.committed is True
+
+
+def test_eliminar_gasto_scopes_delete_and_recalculates_cash(monkeypatch):
+    refreshed = []
+    _mock_expense_dependencies(monkeypatch, refreshed)
+    db = _ExpenseMutationDb(_expense_row())
+
+    response = eliminar_gasto_caja(18, empresa_id=4, sucursal_id=2, db=db, auth=object())
+
+    delete_sql, delete_params = next(entry for entry in db.statements if "DELETE FROM petalops.caja_gasto" in entry[0])
+    assert "empresa_id = :empresa_id" in delete_sql
+    assert "sucursal_id = :sucursal_id" in delete_sql
+    assert delete_params == {"gasto_id": 18, "empresa_id": 4, "sucursal_id": 2}
+    assert refreshed[0]["fecha_operacion"] == date(2026, 11, 11)
+    assert response.item.id == 18
+    assert db.committed is True

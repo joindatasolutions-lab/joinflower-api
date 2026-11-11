@@ -777,6 +777,170 @@ def crear_gasto_caja(
     return CajaGastoCreateResponse(status="ok", item=item, totalGastos=total_gastos)
 
 
+@router.put(
+    "/caja/gastos/{gasto_id}",
+    response_model=CajaGastoCreateResponse,
+    dependencies=[Depends(require_module_access("contabilidad", "puedeEditar"))],
+)
+def actualizar_gasto_caja(
+    gasto_id: int,
+    payload: CajaGastoCreateRequest,
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(payload.empresaID))
+    assert_sucursal_empresa(db, payload.empresaID, payload.sucursalID)
+    if not _relation_exists(db, "caja_gasto"):
+        raise HTTPException(status_code=503, detail="La estructura de gastos de caja no esta disponible.")
+
+    current = db.execute(
+        text(
+            """
+            SELECT id_caja_gasto, fecha_operacion
+            FROM petalops.caja_gasto
+            WHERE id_caja_gasto = :gasto_id
+              AND empresa_id = :empresa_id
+              AND sucursal_id = :sucursal_id
+            FOR UPDATE
+            """
+        ),
+        {
+            "gasto_id": int(gasto_id),
+            "empresa_id": int(payload.empresaID),
+            "sucursal_id": int(payload.sucursalID),
+        },
+    ).mappings().first()
+    if not current:
+        raise HTTPException(status_code=404, detail="Gasto de caja no encontrado.")
+    if current["fecha_operacion"] != payload.fechaOperacion:
+        raise HTTPException(status_code=409, detail="La fecha del gasto no se puede cambiar desde esta operacion.")
+
+    usuario_id = _resolve_usuario_id(
+        db,
+        empresa_id=int(payload.empresaID),
+        requested_user_id=payload.usuarioID,
+        auth=auth,
+    )
+    try:
+        row = db.execute(
+            text(
+                """
+                UPDATE petalops.caja_gasto
+                SET concepto = :concepto,
+                    descripcion = :descripcion,
+                    monto = :monto,
+                    usuario_id = :usuario_id
+                WHERE id_caja_gasto = :gasto_id
+                  AND empresa_id = :empresa_id
+                  AND sucursal_id = :sucursal_id
+                RETURNING id_caja_gasto, empresa_id, sucursal_id, fecha_operacion,
+                          concepto, descripcion, monto, usuario_id, created_at
+                """
+            ),
+            {
+                "gasto_id": int(gasto_id),
+                "empresa_id": int(payload.empresaID),
+                "sucursal_id": int(payload.sucursalID),
+                "concepto": payload.concepto.strip(),
+                "descripcion": (payload.descripcion or "").strip() or None,
+                "monto": payload.monto,
+                "usuario_id": usuario_id,
+            },
+        ).mappings().one()
+        caja_service.refresh_caja_por_gastos(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            fecha_operacion=payload.fechaOperacion,
+            usuario_id=usuario_id,
+        )
+        total_gastos = caja_service.load_gastos_total(
+            db,
+            empresa_id=int(payload.empresaID),
+            sucursal_id=int(payload.sucursalID),
+            fecha_operacion=payload.fechaOperacion,
+        )
+        item = _row_to_caja_gasto(row)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        if str(exc) == "gastos_exceden_disponible":
+            raise HTTPException(status_code=422, detail="El gasto supera el efectivo disponible en caja.") from exc
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        contabilidad_logger.error("Error SQL actualizando gasto de caja", exc_info=True)
+        raise HTTPException(status_code=400, detail="No fue posible actualizar el gasto de caja.") from exc
+
+    return CajaGastoCreateResponse(status="ok", item=item, totalGastos=total_gastos)
+
+
+@router.delete(
+    "/caja/gastos/{gasto_id}",
+    response_model=CajaGastoCreateResponse,
+    dependencies=[Depends(require_module_access("contabilidad", "puedeEditar"))],
+)
+def eliminar_gasto_caja(
+    gasto_id: int,
+    empresa_id: int = Query(..., alias="empresaID", gt=0),
+    sucursal_id: int = Query(..., alias="sucursalID", gt=0),
+    db: Session = Depends(get_db),
+    auth=Depends(get_current_auth_context),
+):
+    assert_same_empresa(auth, int(empresa_id))
+    assert_sucursal_empresa(db, empresa_id, sucursal_id)
+    if not _relation_exists(db, "caja_gasto"):
+        raise HTTPException(status_code=503, detail="La estructura de gastos de caja no esta disponible.")
+
+    usuario_id = _resolve_usuario_id(db, empresa_id=int(empresa_id), requested_user_id=None, auth=auth)
+    try:
+        row = db.execute(
+            text(
+                """
+                DELETE FROM petalops.caja_gasto
+                WHERE id_caja_gasto = :gasto_id
+                  AND empresa_id = :empresa_id
+                  AND sucursal_id = :sucursal_id
+                RETURNING id_caja_gasto, empresa_id, sucursal_id, fecha_operacion,
+                          concepto, descripcion, monto, usuario_id, created_at
+                """
+            ),
+            {
+                "gasto_id": int(gasto_id),
+                "empresa_id": int(empresa_id),
+                "sucursal_id": int(sucursal_id),
+            },
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Gasto de caja no encontrado.")
+
+        fecha_operacion = row["fecha_operacion"]
+        caja_service.refresh_caja_por_gastos(
+            db,
+            empresa_id=int(empresa_id),
+            sucursal_id=int(sucursal_id),
+            fecha_operacion=fecha_operacion,
+            usuario_id=usuario_id,
+        )
+        total_gastos = caja_service.load_gastos_total(
+            db,
+            empresa_id=int(empresa_id),
+            sucursal_id=int(sucursal_id),
+            fecha_operacion=fecha_operacion,
+        )
+        item = _row_to_caja_gasto(row)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        contabilidad_logger.error("Error SQL eliminando gasto de caja", exc_info=True)
+        raise HTTPException(status_code=400, detail="No fue posible eliminar el gasto de caja.") from exc
+
+    return CajaGastoCreateResponse(status="ok", item=item, totalGastos=total_gastos)
+
+
 @router.get("/caja/dia", response_model=CajaDiaItem)
 def obtener_caja_dia(
     empresa_id: int = Query(..., alias="empresaID", gt=0),

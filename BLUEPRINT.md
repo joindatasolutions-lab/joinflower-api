@@ -87,6 +87,7 @@ habilitadas por sus permisos.
 | 2026-11-06 | Edicion de datos del cliente desde el detalle de Pedidos | `6f53f3d` | `2d04570` | Sin cambios | Usuarios con el modulo `pedidos` pueden editar nombre y telefono; usuarios sin el modulo permanecen bloqueados |
 | 2026-11-06 | Cancelacion de pedidos por usuarios del modulo Pedidos | Sin cambio funcional | `4e71fea` | Sin cambios | Cancelacion habilitada para `CREADO`, `PENDIENTE` y `APROBADO`; estados finales y usuarios sin Pedidos permanecen bloqueados |
 | 2026-11-06 | Catalogos y proveedores de Inventario | Mismo commit | `eaa2374` | Sin cambios | Canasto corregido; colores ampliados; edicion, busqueda y vista compacta de proveedores corregidas |
+| 2026-11-11 | Edicion y eliminacion de gastos de Caja | Pendiente de commit | Pendiente de commit | Sin cambios | Operaciones aisladas por tenant/sucursal y recalculo transaccional de caja |
 
 ## Pedidos: Edicion De Datos Del Cliente
 
@@ -165,8 +166,13 @@ no inventar arqueos historicos. La especificacion completa esta en
 `sql/alter_contabilidad_caja_arqueo.sql`.
 
 Los gastos pagados en efectivo se registran en `petalops.caja_gasto`, aislados
-por empresa y sucursal. Su creacion recalcula dentro de la misma transaccion el
-total de gastos, efectivo esperado, diferencias y nueva base. El nombre visible
+por empresa y sucursal. Su creacion, edicion o eliminacion recalcula dentro de
+la misma transaccion el total de gastos, efectivo esperado, diferencias y nueva
+base. Los contratos vigentes son `POST /contabilidad/caja/gastos`,
+`PUT /contabilidad/caja/gastos/{gasto_id}` y
+`DELETE /contabilidad/caja/gastos/{gasto_id}`. Las mutaciones exigen permiso de
+edicion de Contabilidad y no permiten mover un gasto a otra fecha, empresa o
+sucursal. El nombre visible
 `Caja menor` conserva internamente la columna `caja.guardado` para mantener
 compatibilidad con cierres y contratos anteriores. La migracion se encuentra en
 `sql/alter_contabilidad_caja_gastos.sql`.
