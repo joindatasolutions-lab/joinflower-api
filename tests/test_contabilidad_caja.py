@@ -13,6 +13,7 @@ from app.routers.contabilidad import (
     _domiciliario_resumen,
     _florist_rows_sql,
     _parse_query_date,
+    _apply_live_cash,
     _row_to_domiciliario_pedido_item,
     _row_to_florist_item,
     _row_to_caja_item,
@@ -194,6 +195,33 @@ def test_row_to_caja_item_maps_nulls_to_contract_defaults():
     assert item.sobrante == Decimal("0")
     assert item.faltante == Decimal("0")
     assert item.observacion == ""
+
+
+def test_apply_live_cash_updates_stale_history_without_inventing_arqueo():
+    item = _row_to_caja_item(
+        {
+            "fecha": date(2026, 11, 11),
+            "base": Decimal("1219520"),
+            "efectivo": Decimal("0"),
+            "gasto": Decimal("0"),
+            "total_efectivo": Decimal("1219520"),
+            "guardado": Decimal("0"),
+            "nueva_base": Decimal("1219520"),
+            "total_contado": None,
+            "sobrante": Decimal("0"),
+            "faltante": Decimal("0"),
+            "observacion": "",
+        }
+    )
+
+    refreshed = _apply_live_cash(item, Decimal("180000"))
+
+    assert refreshed.efectivo_ventas == Decimal("180000")
+    assert refreshed.total_efectivo == Decimal("1399520")
+    assert refreshed.nueva_base == Decimal("1399520")
+    assert refreshed.total_contado is None
+    assert refreshed.sobrante == Decimal("0")
+    assert refreshed.faltante == Decimal("0")
 
 
 def test_listar_cierres_caja_rejects_invalid_date_range():

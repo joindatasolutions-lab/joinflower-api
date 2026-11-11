@@ -176,6 +176,101 @@ def load_efectivo_ventas(db: Session, *, empresa_id: int, sucursal_id: int, fech
     return total
 
 
+def load_efectivo_ventas_range(
+    db: Session,
+    *,
+    empresa_id: int,
+    sucursal_id: int,
+    fecha_desde: date,
+    fecha_hasta: date,
+) -> dict[date, Decimal]:
+    totals: dict[date, Decimal] = {}
+    has_phase2_amounts = (
+        relation_exists(db, "pago_metodo")
+        and relation_exists(db, "metodo_pago_catalogo")
+        and column_exists(db, "pago_metodo", "monto")
+    )
+
+    if has_phase2_amounts:
+        rows = db.execute(
+            text(
+                """
+                SELECT CAST(p.fecha_pedido AS DATE) AS fecha,
+                       COALESCE(SUM(pm.monto), 0) AS efectivo
+                FROM petalops.pago_metodo pm
+                JOIN petalops.metodo_pago_catalogo mpc
+                  ON mpc.id_metodo_pago = pm.metodo_pago_id
+                 AND mpc.empresa_id = pm.empresa_id
+                JOIN petalops.pedido p
+                  ON p.id_pedido = pm.pedido_id
+                 AND p.empresa_id = pm.empresa_id
+                LEFT JOIN petalops.estado_pedido ep
+                  ON ep.id_estado_pedido = p.estado_pedido_id
+                WHERE pm.empresa_id = :empresa_id
+                  AND p.sucursal_id = :sucursal_id
+                  AND CAST(p.fecha_pedido AS DATE) BETWEEN :fecha_desde AND :fecha_hasta
+                  AND (
+                    COALESCE(mpc.codigo, '') ILIKE '%efectivo%'
+                    OR COALESCE(mpc.nombre, '') ILIKE '%efectivo%'
+                  )
+                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
+                GROUP BY CAST(p.fecha_pedido AS DATE)
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "sucursal_id": int(sucursal_id),
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            },
+        ).mappings().all()
+        for row in rows:
+            totals[row["fecha"]] = totals.get(row["fecha"], Decimal("0")) + money(row["efectivo"])
+
+    if relation_exists(db, "pago"):
+        legacy_filter = ""
+        if has_phase2_amounts:
+            legacy_filter = """
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM petalops.pago_metodo pm
+                    WHERE pm.empresa_id = pa.empresa_id
+                      AND pm.pedido_id = pa.pedido_id
+                  )
+            """
+        rows = db.execute(
+            text(
+                f"""
+                SELECT CAST(p.fecha_pedido AS DATE) AS fecha,
+                       COALESCE(SUM(pa.monto), 0) AS efectivo
+                FROM petalops.pago pa
+                JOIN petalops.pedido p
+                  ON p.id_pedido = pa.pedido_id
+                 AND p.empresa_id = pa.empresa_id
+                LEFT JOIN petalops.estado_pedido ep
+                  ON ep.id_estado_pedido = p.estado_pedido_id
+                WHERE pa.empresa_id = :empresa_id
+                  AND p.sucursal_id = :sucursal_id
+                  AND CAST(p.fecha_pedido AS DATE) BETWEEN :fecha_desde AND :fecha_hasta
+                  AND COALESCE(pa.metodo_pago, '') ILIKE '%efectivo%'
+                  AND upper(COALESCE(ep.nombre_estado, '')) NOT IN ('CREADO', 'CANCELADO', 'RECHAZADO', 'ANULADO')
+                  {legacy_filter}
+                GROUP BY CAST(p.fecha_pedido AS DATE)
+                """
+            ),
+            {
+                "empresa_id": int(empresa_id),
+                "sucursal_id": int(sucursal_id),
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            },
+        ).mappings().all()
+        for row in rows:
+            totals[row["fecha"]] = totals.get(row["fecha"], Decimal("0")) + money(row["efectivo"])
+
+    return totals
+
+
 def load_base_anterior(db: Session, *, empresa_id: int, sucursal_id: int, fecha_operacion: date) -> Decimal:
     row = db.execute(
         text(

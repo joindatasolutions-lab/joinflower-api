@@ -86,6 +86,21 @@ def _row_to_caja_item(row) -> CajaDiaItem:
     )
 
 
+def _apply_live_cash(item: CajaDiaItem, efectivo_ventas: Decimal) -> CajaDiaItem:
+    item.efectivo_ventas = efectivo_ventas
+    item.total_efectivo = item.base_inicial + efectivo_ventas - item.total_gastos
+    if item.total_contado is None:
+        item.sobrante = Decimal("0")
+        item.faltante = Decimal("0")
+        item.nueva_base = max(item.total_efectivo - item.monto_guardado, Decimal("0"))
+    else:
+        diferencia = item.total_contado - item.total_efectivo
+        item.sobrante = max(diferencia, Decimal("0"))
+        item.faltante = max(-diferencia, Decimal("0"))
+        item.nueva_base = max(item.total_contado - item.monto_guardado, Decimal("0"))
+    return item
+
+
 def _row_to_caja_gasto(row) -> CajaGastoItem:
     return CajaGastoItem(
         id=int(row["id_caja_gasto"]),
@@ -185,18 +200,7 @@ def _load_caja_dia(db: Session, *, empresa_id: int, sucursal_id: int, fecha_oper
         sucursal_id=int(sucursal_id),
         fecha_operacion=fecha_operacion,
     )
-    item.efectivo_ventas = efectivo_real
-    item.total_efectivo = item.base_inicial + efectivo_real - item.total_gastos
-    if item.total_contado is None:
-        item.sobrante = Decimal("0")
-        item.faltante = Decimal("0")
-        item.nueva_base = max(item.total_efectivo - item.monto_guardado, Decimal("0"))
-    else:
-        diferencia = item.total_contado - item.total_efectivo
-        item.sobrante = max(diferencia, Decimal("0"))
-        item.faltante = max(-diferencia, Decimal("0"))
-        item.nueva_base = max(item.total_contado - item.monto_guardado, Decimal("0"))
-    return item
+    return _apply_live_cash(item, efectivo_real)
 
 
 def _upsert_caja(
@@ -665,7 +669,18 @@ def listar_cierres_caja(
         },
     ).mappings().all()
 
-    return CajaListResponse(items=[_row_to_caja_item(row) for row in rows])
+    live_cash_by_date = caja_service.load_efectivo_ventas_range(
+        db,
+        empresa_id=int(empresa_id),
+        sucursal_id=int(sucursal_id),
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+    items = []
+    for row in rows:
+        item = _row_to_caja_item(row)
+        items.append(_apply_live_cash(item, live_cash_by_date.get(item.fecha_operacion, Decimal("0"))))
+    return CajaListResponse(items=items)
 
 
 @router.get("/caja/gastos", response_model=CajaGastoListResponse)
