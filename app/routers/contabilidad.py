@@ -1050,7 +1050,7 @@ def guardar_cierre_caja(
     except ValueError as exc:
         messages = {
             "gastos_exceden_disponible": "Los gastos no pueden superar la base inicial mas los ingresos en efectivo.",
-            "guardado_excede_contado": "La caja menor no puede superar el total fisico contado.",
+            "guardado_excede_contado": "La caja menor no puede superar el efectivo disponible para el cierre.",
         }
         raise HTTPException(status_code=422, detail=messages.get(str(exc), "Los valores del cierre de caja no son validos.")) from exc
 

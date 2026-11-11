@@ -266,11 +266,30 @@ def test_calculate_cierre_registers_surplus():
     assert result[2:] == (Decimal("10000"), Decimal("0"), Decimal("60000"))
 
 
+def test_calculate_cierre_without_count_keeps_pending_arqueo_and_persists_petty_cash():
+    result = caja_service.calculate_cierre(
+        base_inicial=Decimal("60100"),
+        efectivo_ventas=Decimal("514000"),
+        total_gastos=Decimal("22000"),
+        total_contado=None,
+        monto_guardado=Decimal("500000"),
+    )
+
+    assert result == (
+        Decimal("552100"),
+        None,
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("52100"),
+    )
+
+
 @pytest.mark.parametrize(
     ("total_gastos", "total_contado", "monto_guardado", "code"),
     [
         (Decimal("310000"), Decimal("0"), Decimal("0"), "gastos_exceden_disponible"),
         (Decimal("0"), Decimal("250000"), Decimal("260000"), "guardado_excede_contado"),
+        (Decimal("0"), None, Decimal("310000"), "guardado_excede_contado"),
     ],
 )
 def test_calculate_cierre_rejects_values_that_create_negative_cash(

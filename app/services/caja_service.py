@@ -26,20 +26,24 @@ def calculate_cierre(
     total_gastos: Decimal,
     total_contado: Decimal | None,
     monto_guardado: Decimal,
-) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+) -> tuple[Decimal, Decimal | None, Decimal, Decimal, Decimal]:
     total_efectivo = base_inicial + efectivo_ventas - total_gastos
     if total_efectivo < 0:
         raise ValueError("gastos_exceden_disponible")
 
-    conteo = total_efectivo if total_contado is None else total_contado
-    if monto_guardado > conteo:
+    efectivo_disponible = total_efectivo if total_contado is None else total_contado
+    if monto_guardado > efectivo_disponible:
         raise ValueError("guardado_excede_contado")
 
-    diferencia = conteo - total_efectivo
-    sobrante = max(diferencia, Decimal("0"))
-    faltante = max(-diferencia, Decimal("0"))
-    nueva_base = conteo - monto_guardado
-    return total_efectivo, conteo, sobrante, faltante, nueva_base
+    if total_contado is None:
+        sobrante = Decimal("0")
+        faltante = Decimal("0")
+    else:
+        diferencia = total_contado - total_efectivo
+        sobrante = max(diferencia, Decimal("0"))
+        faltante = max(-diferencia, Decimal("0"))
+    nueva_base = efectivo_disponible - monto_guardado
+    return total_efectivo, total_contado, sobrante, faltante, nueva_base
 
 
 def relation_exists(db: Session, relation_name: str) -> bool:
